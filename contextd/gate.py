@@ -49,10 +49,11 @@ def spent_today(conn) -> int:
     return int(row["v"] or 0)
 
 
-def check_budget(conn, cfg):
+def check_budget(conn, cfg, upcoming: int = 0):
     spent, daily = spent_today(conn), cfg["gate"]["daily_token_budget"]
-    if spent >= daily:
-        raise GateError(f"daily egress budget exhausted ({spent}/{daily} est. tokens)")
+    if spent + upcoming >= daily:
+        raise GateError(f"daily egress budget exhausted "
+                        f"({spent} spent + {upcoming} requested / {daily} est. tokens)")
 
 
 def log_egress(conn, cfg, content: str, meta: dict) -> int:
@@ -64,7 +65,7 @@ def log_egress(conn, cfg, content: str, meta: dict) -> int:
 
 def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "") -> dict:
     budget = min(budget, cfg["gate"]["max_recall_budget"])
-    check_budget(conn, cfg)
+    check_budget(conn, cfg, upcoming=budget)
     parts, ids, used = [], [], 0
     for hit in search(conn, query, limit=40):
         if never_leave(cfg, hit["uri"]):

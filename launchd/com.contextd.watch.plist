@@ -9,6 +9,11 @@
         <string>/Users/joseph/contextd/.venv/bin/ctx</string>
         <string>watch</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

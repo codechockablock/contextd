@@ -25,8 +25,10 @@ def _never(cfg, path: str) -> bool:
     )
 
 
-def ingest_note(conn, text: str, tags=None) -> int:
-    meta = {"tags": tags} if tags else None
+def ingest_note(conn, text: str, tags=None, actor: str = "human") -> int:
+    meta = {"actor": actor}
+    if tags:
+        meta["tags"] = tags
     return append_event(conn, "note", "note", content=text, meta=meta)
 
 
@@ -34,15 +36,21 @@ def scan_fs(conn, cfg) -> dict:
     exts = set(cfg["ingest"]["text_extensions"])
     max_bytes = cfg["ingest"]["max_file_bytes"]
     seen, new, deleted = set(), 0, 0
+    unavailable = []
     for top in cfg["ingest"]["watch_dirs"]:
         top = Path(top).expanduser()
         if not top.is_dir():
+            # an unreachable root is not a mass deletion; keep its files as-seen
+            unavailable.append(str(top).rstrip(os.sep) + os.sep)
             continue
         for root, dirs, files in os.walk(top):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
             for name in files:
                 path = Path(root) / name
                 uri = str(path)
+                if path.is_symlink():
+                    # an alias can smuggle a never_ingest target past path rules
+                    continue
                 if path.suffix.lower() not in exts or _never(cfg, uri):
                     continue
                 try:
@@ -68,6 +76,9 @@ def scan_fs(conn, cfg) -> dict:
                 new += 1
     cursor = get_cursor(conn, "fs")
     for gone in set(cursor.get("seen", [])) - seen:
+        if any(gone.startswith(u) for u in unavailable):
+            seen.add(gone)
+            continue
         append_event(conn, "fs", "file_delete", uri=gone)
         deleted += 1
     set_cursor(conn, "fs", {"seen": sorted(seen)})

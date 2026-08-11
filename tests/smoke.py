@@ -146,4 +146,49 @@ cfg3["gate"]["never_leave"] = []
 assert never_leave(cfg3, "https://sub.blocked.test/x"), \
     "gate must enforce domain policy even with no globs"
 
+# 13. FTS highlight brackets must not break redaction (mcp search leak regression)
+append_event(conn, "note", "note", content="gateway key sk-zzzzzzzzzzzzzzzz9876 in use")
+out = mcp_search("sk gateway")
+assert "zzzzzzzzzzzzzzzz9876" not in out, "highlight brackets split the key past redaction"
+assert "[REDACTED:api_key]" in out, out
+
+# 14. missing watch root is not a mass deletion; restores are re-recorded
+(watch / "b.md").write_text("gamma heron notes")
+scan_fs(conn, cfg)
+hidden = watch.rename(watch.with_name(watch.name + "-away"))
+r = scan_fs(conn, cfg)
+assert r["file_delete"] == 0, "unreachable root recorded as mass deletion"
+hidden.rename(watch)
+r = scan_fs(conn, cfg)
+assert r["file_write"] == 0, "unchanged files re-ingested after root returned"
+(watch / "b.md").unlink()
+assert scan_fs(conn, cfg)["file_delete"] == 1
+(watch / "b.md").write_text("gamma heron notes")
+r = scan_fs(conn, cfg)
+assert r["file_write"] == 1, "restored file skipped because pre-delete hash matched"
+
+# 15. symlinks are never followed into unwatched territory
+outside = Path(tempfile.mkdtemp(prefix="contextd-outside-"))
+(outside / "hush.md").write_text("linked ocelot secret")
+(watch / "alias.md").symlink_to(outside / "hush.md")
+r = scan_fs(conn, cfg)
+assert r["file_write"] == 0 and not search(conn, "ocelot"), "symlink followed"
+
+# 16. mcp notes carry provenance; budget refusals are prospective
+import json
+
+from contextd.gate import check_budget
+from contextd.mcp_server import note as mcp_note
+
+nid = int(mcp_note("model-written test note").rsplit("#", 1)[1])
+row = conn.execute("SELECT meta FROM events WHERE id = ?", (nid,)).fetchone()
+assert json.loads(row["meta"])["actor"] == "mcp", "mcp note missing provenance"
+cfg_low = load_config()
+cfg_low["gate"]["daily_token_budget"] = 10
+try:
+    check_budget(conn, cfg_low, upcoming=10_000)
+    raise AssertionError("prospective budget not enforced")
+except GateError:
+    pass
+
 print("ALL SMOKE TESTS PASSED")

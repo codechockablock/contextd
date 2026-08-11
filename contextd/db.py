@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 
@@ -44,10 +45,16 @@ def now_iso() -> str:
 
 def connect() -> sqlite3.Connection:
     home().mkdir(parents=True, exist_ok=True)
+    os.chmod(home(), 0o700)
     conn = sqlite3.connect(home() / "contextd.db")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    for f in home().glob("contextd.db*"):
+        try:
+            os.chmod(f, 0o600)
+        except OSError:
+            pass
     return conn
 
 
@@ -64,11 +71,13 @@ def append_event(conn, source, kind, uri=None, content=None, content_hash=None, 
 
 def last_hash(conn, uri):
     row = conn.execute(
-        "SELECT content_hash FROM events WHERE uri = ? AND kind != 'file_delete' "
-        "ORDER BY id DESC LIMIT 1",
+        "SELECT kind, content_hash FROM events WHERE uri = ? ORDER BY id DESC LIMIT 1",
         (uri,),
     ).fetchone()
-    return row["content_hash"] if row else None
+    # after a file_delete the hash must not match, or restorations are skipped
+    if not row or row["kind"] == "file_delete":
+        return None
+    return row["content_hash"]
 
 
 def store_blob(data: bytes) -> str:
@@ -77,6 +86,7 @@ def store_blob(data: bytes) -> str:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        os.chmod(path, 0o600)
     return digest
 
 

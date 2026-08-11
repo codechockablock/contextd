@@ -3,6 +3,7 @@ recall always produces a gated, logged egress bundle — same path MCP uses."""
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -37,6 +38,7 @@ def cmd_init(args):
     cfg_path = home() / "config.toml"
     if not cfg_path.exists():
         cfg_path.write_text(CONFIG_TEMPLATE)
+    os.chmod(cfg_path, 0o600)
     connect().close()
     print(f"initialized {home()}")
     print(f"  db:     {home() / 'contextd.db'}")
@@ -58,16 +60,22 @@ def cmd_ingest(args):
 def cmd_watch(args):
     cfg = load_config()
     interval = cfg["ingest"]["scan_interval_seconds"]
-    print(f"contextd watch: scanning every {interval}s (ctrl-c to stop)")
+    print(f"contextd watch: scanning every {interval}s (ctrl-c to stop)", flush=True)
+    last_status = None
     while True:
         try:
             results = run_all(connect(), cfg)
             counts = {k: v for k, v in results.items() if any(
                 isinstance(n, int) and n for n in v.values())}
             if counts:
-                print(json.dumps(counts))
+                print(json.dumps(counts), flush=True)
+            status = {k: v["status"] for k, v in results.items() if "status" in v}
+            if status != last_status:
+                for k, s in (status or {"all": "ok"}).items():
+                    print(f"ingester {k}: {s}", file=sys.stderr, flush=True)
+                last_status = status
         except Exception as e:
-            print(f"scan error: {e}", file=sys.stderr)
+            print(f"scan error: {e}", file=sys.stderr, flush=True)
         time.sleep(interval)
 
 

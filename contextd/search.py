@@ -8,19 +8,22 @@ def fts_escape(query: str):
     return " ".join(f'"{t}"' for t in terms) if terms else None
 
 
-def search(conn, query: str, limit: int = 20):
+def search(conn, query: str, limit: int = 20, highlight: bool = True):
     q = fts_escape(query)
     if not q:
         return []
+    # highlight brackets can split a credential mid-token and defeat redaction;
+    # any caller that redacts afterward must pass highlight=False
+    mark = ("[", "]") if highlight else ("", "")
     return conn.execute(
         """
         SELECT e.id, e.ts, e.source, e.kind, e.uri,
-               snippet(events_fts, 0, '[', ']', '…', 16) AS snip
+               snippet(events_fts, 0, ?, ?, '…', 16) AS snip
         FROM events_fts JOIN events e ON e.id = events_fts.rowid
         WHERE events_fts MATCH ? AND e.kind != 'egress'
         ORDER BY bm25(events_fts) LIMIT ?
         """,
-        (q, limit),
+        (*mark, q, limit),
     ).fetchall()
 
 
