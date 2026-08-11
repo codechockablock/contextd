@@ -65,6 +65,21 @@ egress event; `ctx audit` shows the full disclosure history.
   budgeted, and logged.
 - **Data lives in `~/.contextd/`, never in this repo.**
 
+## Trust model
+
+The gate is an **audit layer, not a security boundary** (decided 2026-08-11).
+It redacts, meters, and logs every disclosure made through recall and the MCP
+tools — but it governs only that path. Any local process with filesystem
+access can read the SQLite directly; `0700`/`0600` permissions keep other
+accounts out, not your own software. Hard isolation is deliberately not a v0
+goal. The promise is narrower and kept: everything a well-behaved client
+sees is redacted, budgeted, and on the record.
+
+Models may write notes. Every note records its author in `meta.actor`
+(`human` from the CLI, `mcp` from model clients), so the archive always
+distinguishes what you said from what a model said. No approval workflow
+until a real incident earns one.
+
 ## Deliberately not in v0
 
 No sync, no multi-device, no encryption-at-rest, no plugin system, no UI, no
