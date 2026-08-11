@@ -7,8 +7,9 @@ tool_timeout_sec = 60
 [mcp_servers.contextd.env]
 CONTEXTD_CLIENT = "codex"
 
-# NOTE: headless `codex exec` auto-cancels MCP tool calls ("user cancelled" with
-# no user present) regardless of approval_policy/timeouts — a Codex exec-mode
-# limitation, not a contextd issue. Interactive Codex (TUI / ChatGPT app), which
-# reads this same config, has a user to approve the call. Verified working via
-# direct MCP stdio: recall logged egress as client=codex-probe / client=timing.
+# NOTE: headless `codex exec` cancels MCP tool calls ("user cancelled" with no
+# user present to approve) regardless of approval_policy/timeouts. Interactive
+# Codex (TUI / ChatGPT app), which reads this same config, has a user to approve
+# the call — CONFIRMED working: an interactive recall logged egress as
+# client=codex (audit #40939). So the exec cancellation is the missing approval,
+# not a contextd or protocol issue; direct MCP stdio also works headless.
