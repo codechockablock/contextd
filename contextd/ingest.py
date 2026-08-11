@@ -1,16 +1,21 @@
-"""Three ingesters, on purpose: watched text files, deliberate notes, browser history.
-Every additional ingester must be earned by a documented retrieval failure."""
+"""Four ingesters, on purpose: watched text files, deliberate notes, browser
+history, and Claude Code dialogue. Every additional ingester must be earned by
+a documented retrieval failure."""
 
 import fnmatch
+import json
 import os
 import shutil
 import sqlite3
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .db import append_event, get_cursor, last_hash, set_cursor, store_blob
 from .domains import blocked, load_skip_domains
+from .gate import redact
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".obsidian", ".Trash"}
 
@@ -161,10 +166,146 @@ def scan_safari(conn, cfg) -> dict:
     )
 
 
+# --- Claude Code dialogue ---------------------------------------------------
+# Transcripts are JSONL under ~/.claude/projects. The filter is mechanical:
+# user text, assistant text, delegation prompts, and subagent reports — no
+# tool dumps, no thinking, no sidechain interiors. Content is redacted before
+# storage (the archive never holds credentials) and role-tagged forever.
+
+CLAUDE_NOISE = ("<system-reminder", "<local-command", "<command-name",
+                "Caveat: The messages")
+
+
+def _result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _claude_dialogue(obj, task_ids):
+    """Yield (role, text) worth archiving from one transcript line."""
+    if obj.get("isSidechain"):
+        return
+    content = (obj.get("message") or {}).get("content")
+    if obj.get("type") == "assistant":
+        for b in content or []:
+            if b.get("type") == "text" and (b.get("text") or "").strip():
+                yield "assistant", b["text"]
+            elif b.get("type") == "tool_use" and b.get("name") in ("Task", "Agent"):
+                task_ids[b.get("id") or ""] = 1
+                prompt = (b.get("input") or {}).get("prompt")
+                if prompt:
+                    yield "delegation", prompt
+    elif obj.get("type") == "user":
+        if isinstance(content, str):
+            if content.strip() and not content.startswith(CLAUDE_NOISE):
+                yield "user", content
+            return
+        for b in content or []:
+            if b.get("type") == "text":
+                t = b.get("text") or ""
+                if t.strip() and not t.startswith(CLAUDE_NOISE):
+                    yield "user", t
+            elif b.get("type") == "tool_result" and b.get("tool_use_id") in task_ids:
+                # a delegate's report is a finding, not tool noise
+                task_ids.pop(b["tool_use_id"], None)
+                t = _result_text(b.get("content"))
+                if t.strip():
+                    yield "subagent", t
+
+
+def _parse_claude(path: Path, offset: int, task_ids: dict):
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read()
+    end = data.rfind(b"\n") + 1  # never consume a partially written line
+    msgs = []
+    for i, raw in enumerate(data[:end].splitlines()):
+        try:
+            obj = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        ts_unix = None
+        if obj.get("timestamp"):
+            try:
+                ts_unix = datetime.fromisoformat(
+                    obj["timestamp"].replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        uid = (obj.get("uuid") or "")[:16] or f"{path.stem[:8]}-{offset + i}"
+        # one line can yield several messages (text + delegation); disambiguate
+        for j, (role, text) in enumerate(_claude_dialogue(obj, task_ids)):
+            msgs.append((role, text, ts_unix, uid if j == 0 else f"{uid}-{j}"))
+    return msgs, offset + end
+
+
+def _claude_cursors(conn) -> dict:
+    rows = conn.execute(
+        "SELECT source, state FROM cursors WHERE source LIKE 'claude_code:%'"
+    ).fetchall()
+    return {r["source"][12:]: json.loads(r["state"]) for r in rows}
+
+
+def scan_claude(conn, cfg) -> dict:
+    ccfg = cfg["claude"]
+    root = Path(os.path.expanduser(ccfg["projects_dir"]))
+    if not root.is_dir():
+        return {"status": "not found"}
+    states = _claude_cursors(conn)
+    now = time.time()
+    new = epochs = 0
+    for path in root.glob("*/*.jsonl"):
+        key = str(path.relative_to(root))
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        s = states.get(key)
+        first_seen = s is None
+        if first_seen:
+            s = {"o": 0, "e": 0, "z": 0, "open": False, "g": now, "t": {}}
+        if size > s["o"]:
+            msgs, s["o"] = _parse_claude(path, s["o"], s["t"])
+            sid = path.stem
+            for role, text, ts_unix, uid in msgs:
+                uri = f"claude://{uid}"
+                if conn.execute("SELECT 1 FROM events WHERE uri = ? LIMIT 1",
+                                (uri,)).fetchone():
+                    continue  # resumed/forked sessions replay earlier messages
+                meta = {"role": role, "session_id": sid}
+                if ts_unix:
+                    meta["visited_unix"] = ts_unix
+                s["e"] = append_event(conn, "claude_code", "message", uri=uri,
+                                      content=redact(cfg, text)[: ccfg["max_message_chars"]],
+                                      meta=meta)
+                new += 1
+            s["g"] = now
+            # a file first seen already-written was quiet history, not a live
+            # episode: ingest it as evidence but never open an epoch for it
+            s["open"] = not first_seen
+            if first_seen:
+                s["z"] = s["e"]
+            set_cursor(conn, "claude_code:" + key, s)
+        elif s["open"] and now - s["g"] >= ccfg["quiet_seconds"]:
+            append_event(conn, "claude_code", "epoch",
+                         meta={"session_id": path.stem,
+                               "start_event_id": s["z"],
+                               "end_event_id": s["e"]})
+            s["open"], s["z"] = False, s["e"]
+            epochs += 1
+            set_cursor(conn, "claude_code:" + key, s)
+    return {"message": new, "epoch": epochs}
+
+
 def run_all(conn, cfg) -> dict:
     results = {"fs": scan_fs(conn, cfg)}
     if cfg["browser"]["chrome"]:
         results["chrome"] = scan_chrome(conn, cfg)
     if cfg["browser"]["safari"]:
         results["safari"] = scan_safari(conn, cfg)
+    if cfg["claude"]["enabled"]:
+        results["claude_code"] = scan_claude(conn, cfg)
     return results

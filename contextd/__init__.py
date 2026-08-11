@@ -17,6 +17,8 @@ DEFAULTS = {
     },
     "browser": {"chrome": True, "safari": True,
                 "skip_domains": [], "skip_domain_files": []},
+    "claude": {"enabled": True, "projects_dir": "~/.claude/projects",
+               "quiet_seconds": 1200, "max_message_chars": 8000},
     "gate": {
         "daily_token_budget": 200_000,
         "max_recall_budget": 32_000,

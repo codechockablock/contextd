@@ -12,10 +12,12 @@ The four kernel jobs, each in its smallest honest form:
 | **Gate** | Every outbound bundle passes `assemble()`: never-leave path rules, secret redaction, a daily token budget — and the exact disclosed bundle is logged back into the archive as an `egress` event |
 | **Scheduler** | The budget counter, derived entirely from egress events in the log itself |
 
-Three ingesters, on purpose: watched text/markdown directories, deliberate
-notes (`ctx note`), and a read-only sip of Chrome/Safari history (titles+URLs;
-`browser.skip_domains` never enters the archive at all — the only pre-ingest
-filter, because append-only means ingestion is forever).
+Four ingesters, on purpose: watched text/markdown directories, deliberate
+notes (`ctx note`), a read-only sip of Chrome/Safari history (titles+URLs;
+`browser.skip_domains` never enters the archive at all, because append-only
+means ingestion is forever), and Claude Code dialogue — user and assistant
+text, delegation prompts, and subagent reports, with tool noise dropped,
+secrets redacted before storage, and every message role-tagged for provenance.
 
 **Zero network code.** Nothing in this package opens a socket except the MCP
 stdio server talking to a local client. Verify: `grep -rn "http\|socket\|urllib\|requests" contextd/`.
@@ -52,6 +54,24 @@ Tools exposed: `recall(query, budget, purpose, since, until)`, `search(query)`,
 `note(text)`, `timeline(since, until, source)`. Recall's window filters by
 occurrence time (visit time for browser history), not ingest time. Every MCP read is redacted and logged as an
 egress event; `ctx audit` shows the full disclosure history.
+
+## AI-session pipeline
+
+The daemon tails Claude Code transcripts live and ingests dialogue as
+evidence. When a session goes quiet for `claude.quiet_seconds` (20 min), the
+daemon marks an *epoch* — sessions mostly end by abandonment, so quiescence,
+not exit, is the episode boundary. A harness-side janitor
+(`hooks/reconcile.py`, launchd every 10 min) distills unreconciled epochs
+into notes via `claude -p --model haiku`, skipping episodes that already
+self-documented with live notes. The kernel never calls a model; the janitor
+is a client like any other, and its notes land with `actor=mcp` provenance.
+(`hooks/` shells out to your Claude subscription; the contextd package itself
+still opens no sockets.)
+
+```bash
+cp launchd/com.contextd.reconcile.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.contextd.reconcile.plist
+```
 
 ## Design commitments
 

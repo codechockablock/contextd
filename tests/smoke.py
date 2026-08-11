@@ -220,4 +220,83 @@ assert "quokka-june" in r["bundle"] and "quokka-march" not in r["bundle"], r["bu
 # 20. an every-term AND miss degrades to any-term OR instead of returning nothing
 assert len(search(conn, "xylophone zzznope")) == 1, "OR fallback missing"
 
+# 21. claude code ingestion: mechanical dialogue filter, roles, redaction, watermark
+from contextd.ingest import scan_claude
+
+claude_root = Path(tempfile.mkdtemp(prefix="contextd-claude-"))
+(claude_root / "-Users-test").mkdir()
+sess = claude_root / "-Users-test" / "sess-aaaa-bbbb.jsonl"
+lines = [
+    {"type": "summary", "summary": "skip me"},
+    {"type": "user", "message": {"role": "user", "content": "let's fix the gateway"},
+     "uuid": "u1000000", "timestamp": "2026-06-15T12:00:00Z"},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "skip"},
+        {"type": "text", "text": "rotating key sk-abcdefghijklmnop9876 now"},
+        {"type": "tool_use", "id": "t1", "name": "Task",
+         "input": {"prompt": "explore the auth walrus module"}}]},
+     "uuid": "a1000000", "timestamp": "2026-06-15T12:01:00Z"},
+    {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1",
+         "content": [{"type": "text", "text": "auth walrus uses bcrypt"}]}]},
+     "uuid": "u2000000", "timestamp": "2026-06-15T12:02:00Z"},
+    {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t9", "content": "plain tool noise"}]},
+     "uuid": "u3000000"},
+    {"type": "assistant", "isSidechain": True, "message": {"role": "assistant",
+     "content": [{"type": "text", "text": "sidechain interior monologue"}]},
+     "uuid": "s1000000"},
+    {"type": "user", "message": {"role": "user",
+     "content": "<system-reminder>noise</system-reminder>"}, "uuid": "u4000000"},
+]
+sess.write_text("\n".join(json.dumps(ln) for ln in lines) + "\n")
+cfg["claude"]["projects_dir"] = str(claude_root)
+cfg["claude"]["quiet_seconds"] = 0
+r = scan_claude(conn, cfg)
+assert r["message"] == 4, r  # user, assistant, delegation, subagent
+assert r["epoch"] == 0, "backfilled file must not open an epoch"
+rows = conn.execute(
+    "SELECT content, json_extract(meta,'$.role') AS role FROM events "
+    "WHERE source='claude_code' AND kind='message' ORDER BY id").fetchall()
+assert [x["role"] for x in rows] == ["user", "assistant", "delegation", "subagent"]
+assert "sk-abcdefghijklmnop9876" not in rows[1]["content"], "credential stored raw"
+assert "[REDACTED:api_key]" in rows[1]["content"]
+assert all("sidechain" not in x["content"] and "noise" not in x["content"] for x in rows)
+assert scan_claude(conn, cfg)["message"] == 0, "watermark failed"
+
+# 22. live growth opens an epoch, quiet closes it, replayed fork uuids dedup
+with open(sess, "a") as f:
+    f.write(json.dumps({"type": "user", "message": {"role": "user",
+        "content": "walrus decision: bcrypt stays"}, "uuid": "u5000000",
+        "timestamp": "2026-06-15T12:30:00Z"}) + "\n")
+    f.write(json.dumps(lines[1]) + "\n")  # a forked session replays an old uuid
+r = scan_claude(conn, cfg)
+assert r["message"] == 1, f"fork uuid dedup failed: {r}"
+r = scan_claude(conn, cfg)  # no growth + quiet_seconds=0 -> epoch closes
+assert r["epoch"] == 1, r
+epmeta = json.loads(conn.execute(
+    "SELECT meta FROM events WHERE kind='epoch'").fetchone()["meta"])
+assert epmeta["end_event_id"] > epmeta["start_event_id"]
+
+# 23. reconciler: too-small and self-documented epochs never reach a model
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+import reconcile as rec
+
+pending = rec.unreconciled_epochs(conn)
+assert len(pending) == 1
+out = rec.reconcile(conn, *pending[0])
+assert out["skipped"] == "too_small", out  # one message < MIN_MESSAGES
+with open(sess, "a") as f:
+    for i in range(6):
+        f.write(json.dumps({"type": "user", "message": {"role": "user",
+            "content": f"pelican planning point {i}"}, "uuid": f"p{i}000000",
+            "timestamp": "2026-06-15T13:00:00Z"}) + "\n")
+assert scan_claude(conn, cfg)["message"] == 6
+for i in range(3):
+    append_event(conn, "note", "note", content=f"live pelican note {i}",
+                 meta={"actor": "mcp"})
+assert scan_claude(conn, cfg)["epoch"] == 1
+out = rec.reconcile(conn, *rec.unreconciled_epochs(conn)[-1])
+assert out["skipped"] == "self_documented", out
+
 print("ALL SMOKE TESTS PASSED")

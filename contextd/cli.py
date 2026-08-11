@@ -25,6 +25,11 @@ safari = true
 # skip_domains = ["example.com", "mirror*.com"]  # never ingested, never disclosed
 # skip_domain_files = ["~/.contextd/blocklists/adult-domains.txt"]  # one per line
 
+[claude]
+# claude code transcripts, filtered to dialogue and redacted before storage
+enabled = true
+# quiet_seconds = 1200         # silence that closes a work episode (epoch)
+
 [gate]
 daily_token_budget = 200000
 # never_leave patterns match file paths and URLs; overriding replaces the defaults
