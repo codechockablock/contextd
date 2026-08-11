@@ -2,6 +2,7 @@
 event in the archive — the log records what the log disclosed."""
 
 import json
+import os
 
 from mcp.server.mcpserver import MCPServer
 
@@ -15,6 +16,10 @@ from .search import timeline as do_timeline
 
 mcp = MCPServer("contextd")
 
+# each connecting client identifies itself so the audit trail records who drew
+# on the archive; a stdio client sets it per-subprocess via CONTEXTD_CLIENT
+CLIENT = os.environ.get("CONTEXTD_CLIENT", "mcp").strip() or "mcp"
+
 
 @mcp.tool()
 def recall(query: str, budget: int = 8000, purpose: str = "",
@@ -24,7 +29,8 @@ def recall(query: str, budget: int = 8000, purpose: str = "",
     until exclusive) filter by occurrence time — visit time for browser history."""
     conn = connect()
     try:
-        return assemble(conn, load_config(), query, budget, purpose, since, until)["bundle"]
+        return assemble(conn, load_config(), query, budget, purpose,
+                        since, until, client=CLIENT)["bundle"]
     except GateError as e:
         return f"GATE REFUSED: {e}"
 
@@ -47,14 +53,14 @@ def search(query: str, limit: int = 10) -> str:
         check_budget(conn, cfg, upcoming=est_tokens(out))
     except GateError as e:
         return f"GATE REFUSED: {e}"
-    log_egress(conn, cfg, out, {"type": "search", "query": query})
+    log_egress(conn, cfg, out, {"type": "search", "query": query, "client": CLIENT})
     return out
 
 
 @mcp.tool()
 def note(text: str) -> str:
     """Append a note event to the archive, stamped as model-written (actor=mcp)."""
-    return f"noted as event #{ingest_note(connect(), text, actor='mcp')}"
+    return f"noted as event #{ingest_note(connect(), text, actor=CLIENT)}"
 
 
 @mcp.tool()
@@ -81,7 +87,7 @@ def timeline(since: str = "", until: str = "", source: str = "", limit: int = 30
         check_budget(conn, cfg, upcoming=est_tokens(out))
     except GateError as e:
         return f"GATE REFUSED: {e}"
-    log_egress(conn, cfg, out, {"type": "timeline",
+    log_egress(conn, cfg, out, {"type": "timeline", "client": CLIENT,
                                 "window": json.dumps([since, until, source])})
     return out
 

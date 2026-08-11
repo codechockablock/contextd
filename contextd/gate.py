@@ -64,7 +64,7 @@ def log_egress(conn, cfg, content: str, meta: dict) -> int:
 
 
 def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "",
-             since: str = "", until: str = "") -> dict:
+             since: str = "", until: str = "", client: str = "cli") -> dict:
     budget = min(budget, cfg["gate"]["max_recall_budget"])
     check_budget(conn, cfg, upcoming=budget)
     parts, ids, used = [], [], 0
@@ -99,7 +99,8 @@ def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "",
         if truncated or used >= budget:
             break
     bundle = "\n\n".join(parts) if parts else "(no matching events)"
-    meta = {"type": "recall", "query": query, "purpose": purpose, "budget": budget, "items": ids}
+    meta = {"type": "recall", "query": query, "purpose": purpose,
+            "budget": budget, "items": ids, "client": client}
     if since or until:
         meta["window"] = [since, until]
     egress_id = log_egress(conn, cfg, bundle, meta)

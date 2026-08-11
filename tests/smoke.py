@@ -299,4 +299,13 @@ assert scan_claude(conn, cfg)["epoch"] == 1
 out = rec.reconcile(conn, *rec.unreconciled_epochs(conn)[-1])
 assert out["skipped"] == "self_documented", out
 
+# 24. client attribution: egress records who drew on the archive, notes get actor
+r = assemble(conn, cfg, "zebra service", budget=2000, purpose="attrib", client="openclaw")
+egmeta = json.loads(conn.execute(
+    "SELECT meta FROM events WHERE id = ?", (r["egress_id"],)).fetchone()["meta"])
+assert egmeta["client"] == "openclaw", egmeta
+from contextd.ingest import ingest_note as _note
+nid = _note(conn, "client-tagged note", actor="openclaw")
+assert json.loads(conn.execute("SELECT meta FROM events WHERE id=?", (nid,)).fetchone()["meta"])["actor"] == "openclaw"
+
 print("ALL SMOKE TESTS PASSED")

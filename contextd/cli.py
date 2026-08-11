@@ -115,6 +115,7 @@ def cmd_audit(args):
     for r in rows:
         meta = json.loads(r["meta"] or "{}")
         print(f"[{r['id']}] {r['ts']} type={meta.get('type')} "
+              f"client={meta.get('client', 'cli')} "
               f"query={meta.get('query')!r} purpose={meta.get('purpose')!r} "
               f"~{meta.get('est_tokens')} tokens, items={meta.get('items')}")
 
