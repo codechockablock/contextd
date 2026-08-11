@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .db import append_event, get_cursor, last_hash, set_cursor, store_blob
 from .domains import blocked, load_skip_domains
@@ -98,6 +99,18 @@ def _copy_locked_db(src: Path) -> Path:
     return tmp
 
 
+KEEP_PARAMS = {"q", "v"}  # search terms and video ids are recall signal
+
+
+def clean_url(url: str) -> str:
+    """Strip query params (tracking blobs, auth tokens) and fragments before
+    anything is stored: the append-only archive must never hold credentials,
+    and every stored byte is paid for again at every disclosure."""
+    parts = urlsplit(url)
+    kept = [(k, val) for k, val in parse_qsl(parts.query) if k.lower() in KEEP_PARAMS]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), ""))
+
+
 def _scan_browser(conn, cfg, name, src_path, query, to_unix) -> dict:
     src = Path(src_path).expanduser()
     if not src.exists():
@@ -120,6 +133,7 @@ def _scan_browser(conn, cfg, name, src_path, query, to_unix) -> dict:
         if blocked(skip, url):
             skipped += 1
             continue
+        url = clean_url(url)
         append_event(conn, name, "page_visit", uri=url,
                      content=f"{title or ''} {url}".strip(),
                      meta={"visited_unix": to_unix(raw_time)})

@@ -17,12 +17,14 @@ mcp = MCPServer("contextd")
 
 
 @mcp.tool()
-def recall(query: str, budget: int = 8000, purpose: str = "") -> str:
+def recall(query: str, budget: int = 8000, purpose: str = "",
+           since: str = "", until: str = "") -> str:
     """Assemble a redacted, budget-capped context bundle from the personal archive.
-    State the purpose; the disclosure is logged."""
+    State the purpose; the disclosure is logged. Optional since/until (ISO dates,
+    until exclusive) filter by occurrence time — visit time for browser history."""
     conn = connect()
     try:
-        return assemble(conn, load_config(), query, budget, purpose)["bundle"]
+        return assemble(conn, load_config(), query, budget, purpose, since, until)["bundle"]
     except GateError as e:
         return f"GATE REFUSED: {e}"
 
@@ -33,10 +35,13 @@ def search(query: str, limit: int = 10) -> str:
     conn = connect()
     cfg = load_config()
     hits = do_search(conn, query, max(1, min(limit, 50)), highlight=False)
-    out = "\n".join(
-        f"[{h['id']}] {h['ts']} {h['source']}/{h['kind']} {h['uri'] or ''} :: {h['snip']}"
-        for h in hits if not never_leave(cfg, h["uri"])
-    )
+    seen, lines = set(), []
+    for h in hits:
+        if never_leave(cfg, h["uri"]) or (h["uri"] and h["uri"] in seen):
+            continue
+        seen.add(h["uri"])
+        lines.append(f"[{h['id']}] {h['ts']} {h['source']}/{h['kind']} {h['uri'] or ''} :: {h['snip']}")
+    out = "\n".join(lines)
     out = redact(cfg, out) if out else "(no hits)"
     try:
         check_budget(conn, cfg, upcoming=est_tokens(out))
@@ -60,9 +65,15 @@ def timeline(since: str = "", until: str = "", source: str = "", limit: int = 30
     cfg = load_config()
     rows = do_timeline(conn, since or None, until or None, source or None,
                        limit=max(1, min(limit, 200)), exclude_egress=(source != "gate"))
+
+    def brief(r):
+        c = r["content"] or ""
+        if r["uri"]:
+            c = c.replace(r["uri"], "")
+        return redact(cfg, c.strip())[:120]
+
     out = "\n".join(
-        f"[{r['id']}] {r['ts']} {r['source']}/{r['kind']} {r['uri'] or ''} "
-        f"{redact(cfg, r['content'] or '')[:120]}"
+        f"[{r['id']}] {r['ts']} {r['source']}/{r['kind']} {r['uri'] or ''} {brief(r)}"
         for r in rows if not never_leave(cfg, r["uri"])
     )
     out = redact(cfg, out) if out else "(no events)"

@@ -48,8 +48,9 @@ launchctl load ~/Library/LaunchAgents/com.contextd.watch.plist
 claude mcp add contextd -- /Users/joseph/contextd/.venv/bin/ctx serve
 ```
 
-Tools exposed: `recall(query, budget, purpose)`, `search(query)`, `note(text)`,
-`timeline(since, until, source)`. Every MCP read is redacted and logged as an
+Tools exposed: `recall(query, budget, purpose, since, until)`, `search(query)`,
+`note(text)`, `timeline(since, until, source)`. Recall's window filters by
+occurrence time (visit time for browser history), not ingest time. Every MCP read is redacted and logged as an
 egress event; `ctx audit` shows the full disclosure history.
 
 ## Design commitments

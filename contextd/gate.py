@@ -63,15 +63,24 @@ def log_egress(conn, cfg, content: str, meta: dict) -> int:
     return append_event(conn, "gate", "egress", content=content, meta=meta)
 
 
-def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "") -> dict:
+def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "",
+             since: str = "", until: str = "") -> dict:
     budget = min(budget, cfg["gate"]["max_recall_budget"])
     check_budget(conn, cfg, upcoming=budget)
     parts, ids, used = [], [], 0
-    for hit in search(conn, query, limit=40):
+    seen_uris = set()
+    for hit in search(conn, query, limit=40, since=since or None, until=until or None):
         if never_leave(cfg, hit["uri"]):
             continue
+        if hit["uri"] and hit["uri"] in seen_uris:
+            continue
         ev = conn.execute("SELECT * FROM events WHERE id = ?", (hit["id"],)).fetchone()
-        text = redact(cfg, ev["content"] or "")
+        text = ev["content"] or ""
+        if ev["uri"]:
+            seen_uris.add(ev["uri"])
+            # the header carries the uri; don't pay for it again in the body
+            text = text.replace(ev["uri"], "").strip()
+        text = redact(cfg, text)
         header = redact(
             cfg, f"--- [{ev['id']}] {ev['ts']} {ev['source']}/{ev['kind']} {ev['uri'] or ''} ---"
         )
@@ -90,8 +99,8 @@ def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "") -> di
         if truncated or used >= budget:
             break
     bundle = "\n\n".join(parts) if parts else "(no matching events)"
-    egress_id = log_egress(
-        conn, cfg, bundle,
-        {"type": "recall", "query": query, "purpose": purpose, "budget": budget, "items": ids},
-    )
+    meta = {"type": "recall", "query": query, "purpose": purpose, "budget": budget, "items": ids}
+    if since or until:
+        meta["window"] = [since, until]
+    egress_id = log_egress(conn, cfg, bundle, meta)
     return {"bundle": bundle, "items": ids, "est_tokens": used, "egress_id": egress_id}

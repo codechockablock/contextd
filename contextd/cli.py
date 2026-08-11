@@ -88,7 +88,8 @@ def cmd_search(args):
 def cmd_recall(args):
     try:
         r = assemble(connect(), load_config(), " ".join(args.query),
-                     budget=args.budget, purpose=args.purpose)
+                     budget=args.budget, purpose=args.purpose,
+                     since=args.since or "", until=args.until or "")
     except GateError as e:
         sys.exit(f"gate refused: {e}")
     print(r["bundle"])
@@ -147,6 +148,8 @@ def main():
     sp.add_argument("query", nargs="+")
     sp.add_argument("--budget", type=int, default=8000)
     sp.add_argument("--purpose", default="")
+    sp.add_argument("--since", help="ISO date; filters by occurrence (visit) time")
+    sp.add_argument("--until", help="ISO date, exclusive")
     sp = sub.add_parser("timeline", help="browse events by time")
     sp.add_argument("--since")
     sp.add_argument("--until")

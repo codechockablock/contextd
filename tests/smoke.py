@@ -191,4 +191,33 @@ try:
 except GateError:
     pass
 
+# 17. URLs are stored stripped: tracking + auth params gone, q/v kept, no fragment
+from contextd.ingest import clean_url
+
+assert clean_url("https://x.test/s?q=colab&gs_lcrp=blob&code=sekrit123#access_token=tok") == \
+    "https://x.test/s?q=colab"
+assert clean_url("https://y.test/watch?v=abc123&si=tracker") == "https://y.test/watch?v=abc123"
+
+# 18. recall pays for each url once, and never twice for repeat visits
+for _ in range(3):
+    append_event(conn, "chrome", "page_visit", uri="https://news.test/lemur-society",
+                 content="Lemur Society Quarterly https://news.test/lemur-society",
+                 meta={"visited_unix": 1750000000})
+r = assemble(conn, cfg, "lemur society", budget=4000)
+assert len(r["items"]) == 1, f"repeat visits not deduped: {r['items']}"
+assert r["bundle"].count("https://news.test/lemur-society") == 1, "url paid for twice"
+
+# 19. recall windows filter by occurrence (visit) time, not ingest time
+append_event(conn, "chrome", "page_visit", uri="https://a.test/quokka-march",
+             content="Quokka March Report https://a.test/quokka-march",
+             meta={"visited_unix": 1741000000})   # 2025-03
+append_event(conn, "chrome", "page_visit", uri="https://a.test/quokka-june",
+             content="Quokka June Festival https://a.test/quokka-june",
+             meta={"visited_unix": 1750500000})   # 2025-06
+r = assemble(conn, cfg, "quokka", budget=4000, since="2025-06-01", until="2025-07-01")
+assert "quokka-june" in r["bundle"] and "quokka-march" not in r["bundle"], r["bundle"]
+
+# 20. an every-term AND miss degrades to any-term OR instead of returning nothing
+assert len(search(conn, "xylophone zzznope")) == 1, "OR fallback missing"
+
 print("ALL SMOKE TESTS PASSED")
