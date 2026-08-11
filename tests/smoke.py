@@ -8,6 +8,10 @@ import tempfile
 from pathlib import Path
 
 os.environ["CONTEXTD_HOME"] = tempfile.mkdtemp(prefix="contextd-test-")
+Path(os.environ["CONTEXTD_HOME"], "config.toml").write_text(
+    '[browser]\nskip_domains = ["blocked.test"]\n'
+    '[gate]\nnever_leave = ["*/.ssh/*", "*/.aws/*", "*.pem", "*/.env*", "*blocked.test*"]\n'
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -105,5 +109,41 @@ assert "ea65e288710f322a" not in out, "oauth code leaked via mcp timeline"
 assert "gate/egress" not in out, "egress events echoed into timeline"
 out = mcp_timeline(source="gate", limit=10)
 assert "gate/egress" in out, "source='gate' should still audit disclosures"
+
+# 11. never_leave URL globs hold across every disclosure path
+append_event(conn, "chrome", "page_visit", uri="https://www.blocked.test/watch?v=1",
+             content="private kumquat viewing https://www.blocked.test/watch?v=1")
+assert len(search(conn, "kumquat")) == 1, "local search should still see it"
+r = assemble(conn, cfg, "kumquat viewing", budget=4000)
+assert "kumquat" not in r["bundle"], "never_leave domain escaped recall"
+out = mcp_search("kumquat viewing")
+assert "kumquat" not in out and "blocked.test" not in out, "escaped mcp search"
+out = mcp_timeline(limit=100)
+assert "blocked.test" not in out, "never_leave domain escaped mcp timeline"
+
+# 12. domain policy: suffix match, globs, blocklist files, gate enforcement
+from contextd.domains import blocked, load_skip_domains
+from contextd.gate import never_leave
+
+sd = load_skip_domains(cfg)
+assert blocked(sd, "https://sub.blocked.test/x")
+assert blocked(sd, "http://blocked.test:8080/y")
+assert not blocked(sd, "https://notblocked.test/z")
+
+blfile = Path(os.environ["CONTEXTD_HOME"]) / "extra-blocked.txt"
+blfile.write_text("# comment\n0.0.0.0 fromfile.test\nlocalhost\n")
+cfg2 = load_config()
+cfg2["browser"]["skip_domains"].append("mirror*.test")
+cfg2["browser"]["skip_domain_files"] = [str(blfile)]
+sd2 = load_skip_domains(cfg2)
+assert blocked(sd2, "https://mirror7.test/a"), "glob entry should match mirrors"
+assert blocked(sd2, "https://www.mirror7.test/a"), "glob should match via suffix walk"
+assert blocked(sd2, "https://x.fromfile.test/b"), "file entry should match"
+assert not blocked(sd2, "http://localhost:3000/dev"), "hosts-file noise must not block"
+
+cfg3 = load_config()
+cfg3["gate"]["never_leave"] = []
+assert never_leave(cfg3, "https://sub.blocked.test/x"), \
+    "gate must enforce domain policy even with no globs"
 
 print("ALL SMOKE TESTS PASSED")

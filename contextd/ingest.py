@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from .db import append_event, get_cursor, last_hash, set_cursor, store_blob
+from .domains import blocked, load_skip_domains
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".obsidian", ".Trash"}
 
@@ -86,7 +87,7 @@ def _copy_locked_db(src: Path) -> Path:
     return tmp
 
 
-def _scan_browser(conn, name, src_path, query, to_unix) -> dict:
+def _scan_browser(conn, cfg, name, src_path, query, to_unix) -> dict:
     src = Path(src_path).expanduser()
     if not src.exists():
         return {"status": "not found"}
@@ -100,29 +101,34 @@ def _scan_browser(conn, name, src_path, query, to_unix) -> dict:
         shutil.rmtree(copy.parent, ignore_errors=True)
     except (OSError, sqlite3.Error) as e:
         return {"status": f"no access ({e})"}
-    new = 0
+    skip = load_skip_domains(cfg)
+    new = skipped = 0
     for url, title, raw_time in rows:
+        # advance past skipped rows too, or a blocked tail stalls the cursor
+        watermark = max(watermark, raw_time)
+        if blocked(skip, url):
+            skipped += 1
+            continue
         append_event(conn, name, "page_visit", uri=url,
                      content=f"{title or ''} {url}".strip(),
                      meta={"visited_unix": to_unix(raw_time)})
-        watermark = max(watermark, raw_time)
         new += 1
     set_cursor(conn, name, {"watermark": watermark})
-    return {"page_visit": new}
+    return {"page_visit": new, "skipped": skipped}
 
 
-def scan_chrome(conn) -> dict:
+def scan_chrome(conn, cfg) -> dict:
     return _scan_browser(
-        conn, "chrome", CHROME_HISTORY,
+        conn, cfg, "chrome", CHROME_HISTORY,
         "SELECT url, title, last_visit_time FROM urls "
         "WHERE last_visit_time > ? ORDER BY last_visit_time LIMIT 5000",
         lambda t: t / 1_000_000 - CHROME_EPOCH_OFFSET,
     )
 
 
-def scan_safari(conn) -> dict:
+def scan_safari(conn, cfg) -> dict:
     return _scan_browser(
-        conn, "safari", SAFARI_HISTORY,
+        conn, cfg, "safari", SAFARI_HISTORY,
         "SELECT i.url, v.title, v.visit_time FROM history_visits v "
         "JOIN history_items i ON i.id = v.history_item "
         "WHERE v.visit_time > ? ORDER BY v.visit_time LIMIT 5000",
@@ -133,7 +139,7 @@ def scan_safari(conn) -> dict:
 def run_all(conn, cfg) -> dict:
     results = {"fs": scan_fs(conn, cfg)}
     if cfg["browser"]["chrome"]:
-        results["chrome"] = scan_chrome(conn)
+        results["chrome"] = scan_chrome(conn, cfg)
     if cfg["browser"]["safari"]:
-        results["safari"] = scan_safari(conn)
+        results["safari"] = scan_safari(conn, cfg)
     return results

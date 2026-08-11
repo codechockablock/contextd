@@ -7,7 +7,7 @@ from mcp.server.mcpserver import MCPServer
 
 from . import load_config
 from .db import append_event, connect
-from .gate import GateError, assemble, log_egress, redact
+from .gate import GateError, assemble, log_egress, never_leave, redact
 from .ingest import ingest_note
 from .search import search as do_search
 from .search import timeline as do_timeline
@@ -34,7 +34,7 @@ def search(query: str, limit: int = 10) -> str:
     hits = do_search(conn, query, limit)
     out = "\n".join(
         f"[{h['id']}] {h['ts']} {h['source']}/{h['kind']} {h['uri'] or ''} :: {h['snip']}"
-        for h in hits
+        for h in hits if not never_leave(cfg, h["uri"])
     )
     out = redact(cfg, out) if out else "(no hits)"
     log_egress(conn, cfg, out, {"type": "search", "query": query})
@@ -58,7 +58,7 @@ def timeline(since: str = "", until: str = "", source: str = "", limit: int = 30
     out = "\n".join(
         f"[{r['id']}] {r['ts']} {r['source']}/{r['kind']} {r['uri'] or ''} "
         f"{redact(cfg, r['content'] or '')[:120]}"
-        for r in rows
+        for r in rows if not never_leave(cfg, r["uri"])
     )
     out = redact(cfg, out) if out else "(no events)"
     log_egress(conn, cfg, out, {"type": "timeline",

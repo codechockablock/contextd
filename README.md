@@ -13,7 +13,9 @@ The four kernel jobs, each in its smallest honest form:
 | **Scheduler** | The budget counter, derived entirely from egress events in the log itself |
 
 Three ingesters, on purpose: watched text/markdown directories, deliberate
-notes (`ctx note`), and a read-only sip of Chrome/Safari history (titles+URLs).
+notes (`ctx note`), and a read-only sip of Chrome/Safari history (titles+URLs;
+`browser.skip_domains` never enters the archive at all — the only pre-ingest
+filter, because append-only means ingestion is forever).
 
 **Zero network code.** Nothing in this package opens a socket except the MCP
 stdio server talking to a local client. Verify: `grep -rn "http\|socket\|urllib\|requests" contextd/`.

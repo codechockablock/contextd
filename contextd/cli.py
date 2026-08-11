@@ -21,10 +21,13 @@ scan_interval_seconds = 120
 [browser]
 chrome = true
 safari = true
+# skip_domains = ["example.com", "mirror*.com"]  # never ingested, never disclosed
+# skip_domain_files = ["~/.contextd/blocklists/adult-domains.txt"]  # one per line
 
 [gate]
 daily_token_budget = 200000
-# never_leave = ["*/.ssh/*", "*/.aws/*", "*.pem", "*/.env*", "~/Private/*"]
+# never_leave patterns match file paths and URLs; overriding replaces the defaults
+# never_leave = ["*/.ssh/*", "*/.aws/*", "*.pem", "*/.env*", "*example.com*"]
 '''
 
 

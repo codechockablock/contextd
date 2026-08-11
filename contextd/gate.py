@@ -6,6 +6,7 @@ import os
 import re
 
 from .db import append_event, now_iso
+from .domains import blocked, load_skip_domains
 from .search import search
 
 
@@ -26,6 +27,8 @@ def redact(cfg, text: str) -> str:
 def never_leave(cfg, uri) -> bool:
     if not uri:
         return False
+    if uri.startswith(("http://", "https://")) and blocked(load_skip_domains(cfg), uri):
+        return True
     path = os.path.expanduser(uri)
     return any(
         fnmatch.fnmatch(path, os.path.expanduser(p)) for p in cfg["gate"]["never_leave"]

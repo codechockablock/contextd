@@ -15,7 +15,8 @@ DEFAULTS = {
         "text_extensions": [".md", ".markdown", ".txt", ".text", ".org", ".rst"],
         "max_file_bytes": 2_000_000,
     },
-    "browser": {"chrome": True, "safari": True},
+    "browser": {"chrome": True, "safari": True,
+                "skip_domains": [], "skip_domain_files": []},
     "gate": {
         "daily_token_budget": 200_000,
         "max_recall_budget": 32_000,
