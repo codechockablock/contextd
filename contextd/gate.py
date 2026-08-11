@@ -53,6 +53,8 @@ def check_budget(conn, cfg):
 
 
 def log_egress(conn, cfg, content: str, meta: dict) -> int:
+    # the choke point: nothing is logged, and so nothing leaves, unredacted
+    content = redact(cfg, content)
     meta = {"est_tokens": est_tokens(content), **meta}
     return append_event(conn, "gate", "egress", content=content, meta=meta)
 
@@ -66,7 +68,9 @@ def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "") -> di
             continue
         ev = conn.execute("SELECT * FROM events WHERE id = ?", (hit["id"],)).fetchone()
         text = redact(cfg, ev["content"] or "")
-        header = f"--- [{ev['id']}] {ev['ts']} {ev['source']}/{ev['kind']} {ev['uri'] or ''} ---"
+        header = redact(
+            cfg, f"--- [{ev['id']}] {ev['ts']} {ev['source']}/{ev['kind']} {ev['uri'] or ''} ---"
+        )
         cost = est_tokens(header + text)
         truncated = False
         if used + cost > budget:

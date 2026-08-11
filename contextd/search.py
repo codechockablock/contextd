@@ -24,8 +24,11 @@ def search(conn, query: str, limit: int = 20):
     ).fetchall()
 
 
-def timeline(conn, since=None, until=None, source=None, kind=None, limit=200):
+def timeline(conn, since=None, until=None, source=None, kind=None, limit=200,
+             exclude_egress=False):
     clauses, args = [], []
+    if exclude_egress:
+        clauses.append("kind != 'egress'")
     if since:
         clauses.append("ts >= ?")
         args.append(since)

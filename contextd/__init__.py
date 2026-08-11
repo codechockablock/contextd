@@ -29,6 +29,9 @@ DEFAULTS = {
             "jwt": r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
             "private_key": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
             "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+            # auth-shaped query params in URLs (?code=, &access_token=, ...),
+            # including %-encoded ones nested in redirect values (%26state%3D...)
+            "url_param": r"(?i)(?:[?&]|%26|%3f)[a-z0-9_.-]*(?:code|token|auth|nonce|state|secret|passw|pwd|sig|session|key|otp|ticket|csrf|xsrf|sso|jwt|bearer)[a-z0-9_.-]*(?:=|%3d)[^&\s\"'<>]+",
             "card": r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6011)[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,4}\b",
         },
     },

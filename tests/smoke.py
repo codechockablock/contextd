@@ -78,4 +78,32 @@ assert "wombat" not in result["bundle"], "never_leave path escaped the gate"
 # 7. egress events are not searchable (no recursive recall)
 assert all(h["kind"] != "egress" for h in search(conn, "zebra", limit=50))
 
+# 8. gate: auth-shaped URL params are redacted, in content and in the uri field
+leaky = ("https://example.com/login/steam-auth?code=ea65e288710f322a&state=04ffd06c"
+         "&redir=https%3A%2F%2Fx.test%2Flogin%3Fclient_id%3D638D%26state%3Ddeadbeef1234")
+append_event(conn, "chrome", "page_visit", uri=leaky,
+             content=f"PoE2 Trade - Path of Exile {leaky}")
+result = assemble(conn, cfg, "steam-auth login", budget=4000, purpose="smoke")
+assert "ea65e288710f322a" not in result["bundle"], "oauth code leaked via content"
+assert "04ffd06c" not in result["bundle"], "state param leaked via uri header"
+assert "deadbeef1234" not in result["bundle"], "encoded state leaked via redirect"
+assert "[REDACTED:url_param]" in result["bundle"], result["bundle"]
+
+# 9. the egress record itself holds only the redacted bundle (choke point)
+row = conn.execute("SELECT content FROM events WHERE id = ?",
+                   (result["egress_id"],)).fetchone()
+assert "ea65e288710f322a" not in row["content"], "unredacted secret in egress log"
+
+# 10. MCP surface: uri redacted in search/timeline; egress hidden unless asked
+from contextd.mcp_server import search as mcp_search
+from contextd.mcp_server import timeline as mcp_timeline
+
+out = mcp_search("steam-auth login")
+assert "ea65e288710f322a" not in out, "oauth code leaked via mcp search uri"
+out = mcp_timeline(limit=50)
+assert "ea65e288710f322a" not in out, "oauth code leaked via mcp timeline"
+assert "gate/egress" not in out, "egress events echoed into timeline"
+out = mcp_timeline(source="gate", limit=10)
+assert "gate/egress" in out, "source='gate' should still audit disclosures"
+
 print("ALL SMOKE TESTS PASSED")

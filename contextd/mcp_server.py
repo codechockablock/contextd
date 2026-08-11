@@ -33,10 +33,10 @@ def search(query: str, limit: int = 10) -> str:
     cfg = load_config()
     hits = do_search(conn, query, limit)
     out = "\n".join(
-        f"[{h['id']}] {h['ts']} {h['source']}/{h['kind']} {h['uri'] or ''} :: "
-        f"{redact(cfg, h['snip'])}"
+        f"[{h['id']}] {h['ts']} {h['source']}/{h['kind']} {h['uri'] or ''} :: {h['snip']}"
         for h in hits
-    ) or "(no hits)"
+    )
+    out = redact(cfg, out) if out else "(no hits)"
     log_egress(conn, cfg, out, {"type": "search", "query": query})
     return out
 
@@ -49,15 +49,18 @@ def note(text: str) -> str:
 
 @mcp.tool()
 def timeline(since: str = "", until: str = "", source: str = "", limit: int = 30) -> str:
-    """Browse recent events by time window (redacted briefs, logged)."""
+    """Browse recent events by time window (redacted briefs, logged).
+    Egress events are excluded unless source='gate' (disclosure audit)."""
     conn = connect()
     cfg = load_config()
-    rows = do_timeline(conn, since or None, until or None, source or None, limit=limit)
+    rows = do_timeline(conn, since or None, until or None, source or None,
+                       limit=limit, exclude_egress=(source != "gate"))
     out = "\n".join(
         f"[{r['id']}] {r['ts']} {r['source']}/{r['kind']} {r['uri'] or ''} "
-        f"{redact(cfg, (r['content'] or '')[:120])}"
+        f"{redact(cfg, r['content'] or '')[:120]}"
         for r in rows
-    ) or "(no events)"
+    )
+    out = redact(cfg, out) if out else "(no events)"
     log_egress(conn, cfg, out, {"type": "timeline",
                                 "window": json.dumps([since, until, source])})
     return out

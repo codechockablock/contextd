@@ -55,8 +55,9 @@ egress event; `ctx audit` shows the full disclosure history.
 - **Append-only**: `UPDATE`/`DELETE` on `events` abort at the SQLite level.
   Try it: `sqlite3 ~/.contextd/contextd.db "DELETE FROM events"` → refuses.
 - **Self-auditing gate**: the archive records what the archive disclosed.
-  Egress events are excluded from search/recall, so recalls never feed on
-  themselves.
+  Egress events are excluded from search, recall, and the timeline tool
+  (audit disclosures with `ctx audit`, or MCP `timeline` with
+  `source='gate'`), so disclosures never feed on themselves.
 - **Local search is free; egress is metered.** `ctx search` is yours and
   unlogged. Anything shaped for a model (`recall`, all MCP reads) is gated,
   budgeted, and logged.
