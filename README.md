@@ -52,7 +52,10 @@ claude mcp add contextd -- /Users/joseph/contextd/.venv/bin/ctx serve
 
 Tools exposed: `recall(query, budget, purpose, since, until)`, `search(query)`,
 `note(text)`, `timeline(since, until, source)`. Recall's window filters by
-occurrence time (visit time for browser history), not ingest time. Every MCP read is redacted and logged as an
+occurrence time (visit time for browser history), not ingest time.
+
+Other clients (OpenClaw, Codex) connect the same way — see [clients/](clients/).
+Each sets `CONTEXTD_CLIENT`, so the audit trail names who took what. Every MCP read is redacted and logged as an
 egress event; `ctx audit` shows the full disclosure history.
 
 ## AI-session pipeline

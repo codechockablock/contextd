@@ -1,0 +1,6 @@
+{
+  "command": "/Users/joseph/contextd/.venv/bin/ctx",
+  "args": ["serve"],
+  "env": { "CONTEXTD_CLIENT": "openclaw" },
+  "toolFilter": { "include": ["recall", "search", "timeline"] }
+}
