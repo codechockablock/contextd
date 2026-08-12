@@ -1,0 +1,159 @@
+{
+  "task_id": "reasoning-prediction-sonnet-v1",
+  "title": "Sonnet sensitivity: was the axis-miss a model-capability bound?",
+  "model": "sonnet",
+  "n_per_arm": 4,
+  "baseline_arm": "retrieved_detail",
+  "detail_arm": "retrieved_detail",
+  "context_sets": {
+    "retrieved": {
+      "query": "never_leave skip domains blocklist privacy stance append-only receipts recall disclosure trust model incident",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    },
+    "full": {
+      "query": "never_leave skip domains blocklist privacy stance append-only receipts recall disclosure trust model incident",
+      "budget": 5000,
+      "until": "2026-08-12T02:10:00"
+    },
+    "irrelevant": {
+      "query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    }
+  },
+  "origin_overrides": {
+    "41050": {
+      "origin": "mixed",
+      "reason": "reconciler prompt ingested as role=user; embeds model-authored report text"
+    }
+  },
+  "arms": [
+    {
+      "name": "no_history",
+      "no_context": true
+    },
+    {
+      "name": "retrieved_detail",
+      "context_set": "retrieved"
+    }
+  ],
+  "prompt": "A new proposal for contextd (Joseph's personal context daemon: append-only local event log + index + disclosure gate over MCP) has NOT previously been evaluated:\n\nPROPOSAL 'ctx forget': a command that tombstones an event \u2014 the event stays in the ledger (hash chain untouched) but is permanently excluded from search, recall, and timeline outputs. Tombstones are themselves ledger events, so forgetting is on the record. Motivation: some ingested content (an embarrassing browsing session, a vented message) is something the operator may never want resurfacing in bundles.\n\nPredict Joseph's verdict: ACCEPT, REJECT, or MODIFY (and if MODIFY, state the modification you expect him to require). Then explain the reasoning you attribute to him, grounded in his recorded principles and prior decisions. If you lack grounds, say so rather than guessing.",
+  "rubric": {
+    "facts": [
+      {
+        "id": "grounds_existing_mech",
+        "weight": 1.0,
+        "loss_class": "factual_detail",
+        "desc": "grounds the prediction in the existing suppression machinery (never_leave / skip_domains / blocklists)",
+        "all": [
+          [
+            "never_leave|skip_domains|blocklist|never ingested|domain (?:blocklist|policy)"
+          ]
+        ]
+      },
+      {
+        "id": "grounds_receipts",
+        "weight": 1.0,
+        "loss_class": "rationale",
+        "desc": "grounds it in append-only/receipts/tamper-evidence values",
+        "all": [
+          [
+            "append-?only|receipts|hash chain|tamper|on the record|immutab"
+          ]
+        ]
+      },
+      {
+        "id": "grounds_incident",
+        "weight": 0.5,
+        "loss_class": "rationale",
+        "desc": "recognizes the features-earned-by-incident pattern",
+        "all": [
+          [
+            "until (?:a|an) (?:incident|failure)|incident earns|earn|no approval workflow"
+          ]
+        ]
+      },
+      {
+        "id": "states_verdict",
+        "weight": 0.5,
+        "loss_class": "factual_detail",
+        "desc": "commits to an explicit verdict",
+        "all": [
+          [
+            "\\b(?:ACCEPT|REJECT|MODIFY)\\b"
+          ]
+        ]
+      },
+      {
+        "id": "axis_naming",
+        "weight": 1.0,
+        "loss_class": "contextual_framing",
+        "desc": "predicts the semantic-honesty objection: 'forget' promises more than suppression does; rename/reframe",
+        "all": [
+          [
+            "misnom|rename|semantic|(?:the (?:name|word|term)|calling it|labell?ed?) .{0,30}forget|forget.{0,80}(?:promis|suggest|impl|overclaim|pretend|misle)|suppress(?:ion)?,? not (?:forget|delet)|not (?:really|actually|truly) forg|isn'?t (?:really |actually |truly )?forgetting"
+          ]
+        ]
+      },
+      {
+        "id": "axis_custody",
+        "weight": 1.0,
+        "loss_class": "rationale",
+        "desc": "predicts the reversibility/owner-custody requirement: no permanent self-denial of owner access",
+        "all": [
+          [
+            "reversib|irreversib|restore|un-?suppress|un-?tombstone|owner (?:override|inspection|can still|retains|access)|deny(?:ing)?.{0,20}(?:the )?owner|(?:his|the operator'?s?|joseph'?s) own access|custody|permanent(?:ly)? (?:hid|exclud|los)"
+          ]
+        ]
+      }
+    ],
+    "fixtures": [
+      {
+        "text": "MODIFY \u2014 Joseph would keep the ledger untouched but fold this into the existing never_leave/blocklist machinery: the archive already has 'never ingested, never disclosed' domains. He'd insist the tombstone is itself an append-only receipt (hash chain intact) and would defer building it until an incident earns it.",
+        "expect": {
+          "grounds_existing_mech": true,
+          "grounds_receipts": true,
+          "grounds_incident": true,
+          "states_verdict": true,
+          "axis_naming": false,
+          "axis_custody": false
+        }
+      },
+      {
+        "text": "MODIFY \u2014 he would object that calling it 'forget' promises deletion the mechanism never performs; it is suppression, not forgetting, so rename the primitive. He would reject irreversibility: the owner must retain an explicit override to restore or inspect, because a system permanently denying its owner access to bytes it still holds violates custody. Grounded in his never_leave blocklist precedent and append-only receipts \u2014 and he would likely defer building any of it until an incident earns it.",
+        "expect": {
+          "grounds_existing_mech": true,
+          "grounds_receipts": true,
+          "grounds_incident": true,
+          "states_verdict": true,
+          "axis_naming": true,
+          "axis_custody": true
+        }
+      },
+      {
+        "text": "I cannot predict this person's judgment; I have no information about how he weighs privacy against durability.",
+        "expect": {
+          "grounds_existing_mech": false,
+          "grounds_receipts": false,
+          "grounds_incident": false,
+          "states_verdict": false,
+          "axis_naming": false,
+          "axis_custody": false
+        }
+      },
+      {
+        "text": "Everyone loves delete features; it is standard GDPR practice and users expect it, so he will surely add it as designed.",
+        "expect": {
+          "grounds_existing_mech": false,
+          "grounds_receipts": false,
+          "grounds_incident": false,
+          "states_verdict": false,
+          "axis_naming": false,
+          "axis_custody": false
+        }
+      }
+    ]
+  },
+  "expectation": "Preregistered sonnet sensitivity check on the frozen prediction bundle (--reuse-frozen 41286; byte-identical retrieved set; original prompt; the operator's blind reference MODIFY + axes recorded in events #41373/#41374 BEFORE these patterns were written). Axis facts axis_naming/axis_custody are frozen in this event before any sonnet run. Readings: (a) sonnet retrieved hits the axes (rate >= 0.5) while sonnet no_history does not -> the axis was extractable from the same bundle; haiku-capability bound confirmed; (b) sonnet retrieved also misses -> the miss is not model tier at this gap; (c) sonnet no_history hits the axes -> model prior, not archive-carried \u2014 discount the through-line claim. Secondary: verdict distribution (haiku detail arms were MODIFY 8/8). Post-analysis will also rescore haiku's frozen outputs with these axis patterns as a DESCRIPTIVE baseline (haiku outputs were read before pattern-writing; the patterns derive from the operator's verdict text, but the label is exploratory for haiku). Grounding-fact rates are cross-model comparable (identical patterns); total scores are not (rubric extended). Indifferent between outcomes."
+}
