@@ -135,3 +135,10 @@ bare .db file while the daemon runs loses whatever is still in the WAL).
 ```bash
 .venv/bin/python tests/smoke.py
 ```
+
+CI runs the same suite on every push. A weekly launchd job
+(`launchd/com.contextd.backup.plist`) runs `ctx backup --keep 8`.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

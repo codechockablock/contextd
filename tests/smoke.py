@@ -347,14 +347,19 @@ last = json.loads(conn.execute(
 ).fetchone()["meta"])
 assert last == {"egress_id": r_eg["egress_id"], "verdict": "hit", "note": "smoke"}
 
-# 28. backup is a consistent WAL-safe snapshot
+# 28. backup is a consistent WAL-safe snapshot, and --keep prunes old ones
 bdir = Path(os.environ["CONTEXTD_HOME"]) / "bk"
-cmd_backup(_ap.Namespace(dest=str(bdir)))
+cmd_backup(_ap.Namespace(dest=str(bdir), keep=0))
 bk = list(bdir.glob("contextd-*.db"))
 assert len(bk) == 1
 bconn = sqlite3.connect(bk[0])
 n_live = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 assert bconn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == n_live
 assert bconn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+(bdir / "contextd-20200101-000000.db").write_bytes(b"old")
+(bdir / "contextd-20200102-000000.db").write_bytes(b"old")
+cmd_backup(_ap.Namespace(dest=str(bdir), keep=2))
+left = sorted(p.name for p in bdir.glob("contextd-*.db"))
+assert len(left) == 2 and "contextd-20200101-000000.db" not in left, left
 
 print("ALL SMOKE TESTS PASSED")

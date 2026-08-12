@@ -171,11 +171,21 @@ def cmd_backup(args):
     dest_dir = Path(args.dest).expanduser() if args.dest else home() / "backups"
     dest_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(dest_dir, 0o700)
-    dest = dest_dir / f"contextd-{time.strftime('%Y%m%d-%H%M%S')}.db"
+    stamp, i = time.strftime("%Y%m%d-%H%M%S"), 0
+    dest = dest_dir / f"contextd-{stamp}.db"
+    while dest.exists():
+        i += 1
+        dest = dest_dir / f"contextd-{stamp}-{i}.db"
     conn.execute("VACUUM INTO ?", (str(dest),))  # WAL-safe consistent snapshot
     os.chmod(dest, 0o600)
     n = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     print(f"backed up {n} events -> {dest} ({dest.stat().st_size // 1024} KB)")
+    if args.keep:
+        old = sorted(dest_dir.glob("contextd-*.db"))[:-args.keep]
+        for f in old:
+            f.unlink()
+        if old:
+            print(f"pruned {len(old)} old backup(s), keeping newest {args.keep}")
     if any((home() / "store").rglob("*")):
         print("note: blob store not included — copy ~/.contextd/store separately")
 
@@ -228,6 +238,8 @@ def main():
     sp.add_argument("--note", default="")
     sp = sub.add_parser("backup", help="WAL-safe snapshot via VACUUM INTO")
     sp.add_argument("dest", nargs="?")
+    sp.add_argument("--keep", type=int, default=0,
+                    help="after backing up, prune to the newest N snapshots")
     sub.add_parser("verify", help="recompute the event hash chain; detect rewrites")
     sub.add_parser("serve", help="run the MCP server (stdio)")
 
