@@ -146,6 +146,22 @@ measurement. Still deliberately deferred until evidence earns them:
 embeddings, sync, encryption at rest, supersession relations, and hard OS
 isolation.
 
+## Semantic provenance — 2026-08-12 (later the same day)
+
+The anchor experiments proved a distillate's event ids must resolve; the
+provenance work asked the harder question: does the claim *carrying* the id
+actually rest on that event? The answer is split honestly in two. The
+structural half is closed: derived events carry kernel-written derivation
+records binding them to the exact disclosed bytes, `ctx why` reconstructs the
+full closure to leaf evidence, and a pinned adversarial suite shows forged
+chains mechanically rejected and provenance-visibility laundering flagged.
+The semantic half — whether a claim's wording is entailed by its evidence —
+is deliberately NOT claimed: the kernel's level vocabulary cannot express
+semantic support, and the boundary cases that pass every mechanical layer are
+pinned in tests so no future change can quietly overclaim. Measured trials:
+the reconciler now anchors its notes (88.9% compliance, no coverage cost);
+see [PROVENANCE.md](PROVENANCE.md) for the full boundary statement.
+
 ## One line
 
 > Twenty-five hours from a sentence about undo to a running daemon that records
