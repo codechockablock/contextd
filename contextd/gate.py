@@ -39,6 +39,23 @@ def est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+ANCHOR_RX = re.compile(r"\[(\d+)\]")
+
+
+def verify_anchors(text: str, allowed_ids) -> dict:
+    """Anchor integrity for compressed disclosures. Measured basis (ledger
+    exps #41325..#41485): a distilled bundle carries synthesis capability if
+    and only if its claims keep bracketed event ids that resolve — and an
+    anchor pointing at an event that was never supplied is worse than none,
+    because it launders authority the archive never granted. Callers serving
+    distilled bundles must refuse on any invalid anchor."""
+    allowed = set(allowed_ids)
+    uniq = sorted({int(m) for m in ANCHOR_RX.findall(text)})
+    return {"ids": uniq,
+            "valid": [i for i in uniq if i in allowed],
+            "invalid": [i for i in uniq if i not in allowed]}
+
+
 def spent_today(conn) -> int:
     day = now_iso()[:10]
     row = conn.execute(

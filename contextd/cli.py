@@ -4,6 +4,7 @@ recall always produces a gated, logged egress bundle — same path MCP uses."""
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -92,6 +93,20 @@ def cmd_search(args):
 
 
 def cmd_recall(args):
+    if getattr(args, "mode", "detail") == "synthesis":
+        # model-assisted mode lives in hooks/ on purpose: the kernel never
+        # calls models, so this command only delegates to the harness script
+        hook = Path(__file__).resolve().parent.parent / "hooks" / "synthesis_recall.py"
+        if not hook.exists():
+            sys.exit("synthesis mode needs hooks/synthesis_recall.py (repo "
+                     "checkout with -e install); plain recall works without it")
+        cmd = [sys.executable, str(hook), *args.query,
+               "--budget", str(args.budget), "--purpose", args.purpose]
+        if args.since:
+            cmd += ["--since", args.since]
+        if args.until:
+            cmd += ["--until", args.until]
+        sys.exit(subprocess.call(cmd))
     try:
         r = assemble(connect(), load_config(), " ".join(args.query),
                      budget=args.budget, purpose=args.purpose,
@@ -265,6 +280,9 @@ def main():
     sp.add_argument("--purpose", default="")
     sp.add_argument("--since", help="ISO date; filters by occurrence (visit) time")
     sp.add_argument("--until", help="ISO date, exclusive")
+    sp.add_argument("--mode", choices=["detail", "synthesis"], default="detail",
+                    help="synthesis: anchor-verified distilled bundle via "
+                         "hooks/synthesis_recall.py (model-assisted, ~150 words)")
     sp = sub.add_parser("timeline", help="browse events by time")
     sp.add_argument("--since")
     sp.add_argument("--until")

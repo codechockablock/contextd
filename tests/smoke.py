@@ -595,4 +595,74 @@ assert "smoke-ladder" in format_report(rep2) or True
 assert "ctx ~400tok" in format_report(rep2), "efficiency missing from format"
 assert verify_chain(conn)["ok"]
 
+# 40. synthesis recall: anchors verified, both disclosures logged, refusal
+# on unresolvable anchors — pipeline exercised with a fake distiller binary
+from contextd.gate import verify_anchors
+
+a = verify_anchors("claims [12] and [34], again [12]", [12, 34, 56])
+assert a == {"ids": [12, 34], "valid": [12, 34], "invalid": []}
+a = verify_anchors("claim [12] and bogus [99]", [12])
+assert a["invalid"] == [99], a
+assert verify_anchors("no anchors here", [1]) == {"ids": [], "valid": [], "invalid": []}
+
+home = Path(os.environ["CONTEXTD_HOME"])
+fake_py = home / "fake_distiller.py"
+fake_py.write_text(
+    "import sys, json, re\n"
+    "data = sys.stdin.read()\n"
+    "ids = re.findall(r'--- \\[(\\d+)\\]', data)[:2]\n"
+    "out = 'Fused claim citing [' + ids[0] + '] and also [' + ids[1] + '].'\n"
+    "print(json.dumps({'result': out, 'total_cost_usd': 0.0}))\n")
+fake_bin = home / "fake_claude"
+fake_bin.write_text(f"#!/bin/sh\nexec {sys.executable} {fake_py}\n")
+os.chmod(fake_bin, 0o755)
+hook = Path(__file__).resolve().parent.parent / "hooks" / "synthesis_recall.py"
+env = os.environ.copy()
+env["SYNTH_CLAUDE_BIN"] = str(fake_bin)
+r = __import__("subprocess").run(
+    [sys.executable, str(hook), "ferret", "parser", "--purpose", "smoke"],
+    capture_output=True, text=True, env=env)
+assert r.returncode == 0, r.stderr
+assert "Fused claim citing [" in r.stdout, r.stdout
+assert "anchors" in r.stderr and "both logged" in r.stderr, r.stderr
+syn = [json.loads(x["meta"]) for x in conn.execute(
+    "SELECT meta FROM events WHERE kind='egress' ORDER BY id").fetchall()
+    if json.loads(x["meta"]).get("mode") in ("synthesis", "synthesis_source")]
+assert len(syn) == 2, f"expected source+served egress pair, got {len(syn)}"
+served = next(m for m in syn if m["mode"] == "synthesis")
+source = next(m for m in syn if m["mode"] == "synthesis_source")
+assert served["anchors"] and set(served["anchors"]) <= set(served["items"])
+assert served["source_egress"] and served["distiller"]
+assert source["items"] == served["items"]
+
+bad_py = home / "bad_distiller.py"
+bad_py.write_text("import json,sys; sys.stdin.read(); "
+                  "print(json.dumps({'result': 'Claim [999999].'}))\n")
+bad_bin = home / "bad_claude"
+bad_bin.write_text(f"#!/bin/sh\nexec {sys.executable} {bad_py}\n")
+os.chmod(bad_bin, 0o755)
+env["SYNTH_CLAUDE_BIN"] = str(bad_bin)
+n_before = conn.execute("SELECT COUNT(*) FROM events WHERE kind='egress' AND "
+                        "json_extract(meta,'$.mode')='synthesis'").fetchone()[0]
+r = __import__("subprocess").run(
+    [sys.executable, str(hook), "ferret", "parser", "--retries", "0"],
+    capture_output=True, text=True, env=env)
+assert r.returncode != 0, "unresolvable anchor served"
+assert "anchor verification" in r.stderr + r.stdout
+n_after = conn.execute("SELECT COUNT(*) FROM events WHERE kind='egress' AND "
+                       "json_extract(meta,'$.mode')='synthesis'").fetchone()[0]
+assert n_after == n_before, "refused distillate still logged as served"
+
+# dispatch: ctx recall --mode synthesis delegates to the hook
+os.environ["SYNTH_CLAUDE_BIN"] = str(fake_bin)
+from contextd.cli import cmd_recall
+try:
+    cmd_recall(_ap.Namespace(query=["ferret", "parser"], budget=6000,
+                             purpose="dispatch", since="", until="",
+                             mode="synthesis"))
+    raise AssertionError("dispatch should sys.exit with hook's code")
+except SystemExit as e:
+    assert (e.code or 0) == 0, f"dispatch failed: {e.code}"
+assert verify_chain(conn)["ok"]
+
 print("ALL SMOKE TESTS PASSED")

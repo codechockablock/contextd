@@ -130,6 +130,29 @@ their place; time confusion → better windows; and so on).
 Back up the archive with `ctx backup` (WAL-safe `VACUUM INTO`; copying the
 bare .db file while the daemon runs loses whatever is still in the WAL).
 
+## Synthesis-mode recall
+
+Plain recall serves raw items. Synthesis mode serves a ~150-word distillate
+in which **every claim carries a bracketed event id that resolves** — the
+representation the ablation experiments found carries cross-item synthesis
+capability at ~12% of the raw tokens, and the one thing that could not be
+compressed away (exps #41325–#41485: id-free summaries scored zero;
+id-anchored ones matched per-item granular bundles).
+
+```bash
+ctx recall --mode synthesis "what did we decide about the trust model" --purpose "..."
+```
+
+The kernel never calls models, so `--mode synthesis` delegates to
+[hooks/synthesis_recall.py](hooks/synthesis_recall.py) (same rule as the
+reconciler), which shells out to `claude -p` for the distillation. Honesty
+properties, enforced not promised: the raw bundle disclosed *to the
+distiller* is itself a logged egress; the served distillate is a second
+logged egress linking back to the first; and `gate.verify_anchors` refuses
+any distillate whose anchors don't all resolve to supplied events — an
+anchor pointing nowhere launders authority the archive never granted.
+Judge it like any recall: `ctx outcome <egress-id> hit|partial|miss`.
+
 ## Measuring whether context matters
 
 The outcome tally judges recalls by hand. The experiment layer asks the harder
