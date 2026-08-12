@@ -130,6 +130,33 @@ their place; time confusion → better windows; and so on).
 Back up the archive with `ctx backup` (WAL-safe `VACUUM INTO`; copying the
 bare .db file while the daemon runs loses whatever is still in the WAL).
 
+## Measuring whether context matters
+
+The outcome tally judges recalls by hand. The experiment layer asks the harder
+question with controls: **which recorded context actually changed a downstream
+result?** `contextd/experiment.py` freezes one retrieval, intervenes on it
+(drop an event, drop a provenance class, substitute a distilled summary), and
+records the whole design — task, arms, rubric, frozen items, model, planned n —
+as ledger events *before* any run. The harness in [experiments/](experiments/)
+replays the task through `claude -p` per arm, scores outputs against a
+preregistered deterministic rubric, and reports marginal effects with an exact
+permutation test against the measured run-to-run noise. Every bundle an arm
+discloses passes the real gate and lands as an egress event; experiment records
+are content-NULL so they can never leak into FTS and feed a later recall.
+
+```bash
+.venv/bin/python experiments/runner.py plan experiments/tasks/contextd-decisions.json
+.venv/bin/python experiments/runner.py run  experiments/tasks/contextd-decisions.json
+.venv/bin/ctx exp list      # every experiment, from the ledger
+.venv/bin/ctx exp report 41054
+```
+
+A negative control task (one the model aces with no archive) ships alongside
+the real one, and came back Δ 0.00, p=1.0 — the harness demonstrably can
+answer "this context barely matters," which keeps the positive answers honest.
+See [experiments/README.md](experiments/README.md) for the method and its
+stated limits.
+
 ## Tests
 
 ```bash

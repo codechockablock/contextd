@@ -1,0 +1,37 @@
+{
+  "task_id": "control-sqlite-wal-v1",
+  "title": "Negative control: a task the model should ace without any archive",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "query": "sqlite wal backup vacuum snapshot checkpoint",
+  "budget": 2000,
+  "prompt": "Explain how SQLite's WAL (write-ahead logging) mode interacts with backups. Cover precisely:\n\n1. Why can copying a live .db file alone lose recently committed data?\n2. Name at least one safe way to take a consistent snapshot of a WAL-mode database.\n3. What does a checkpoint do?\n\nBe precise and technical. If you are unsure of a detail, say so rather than guessing.",
+  "arms": [
+    {"name": "full"},
+    {"name": "no_context", "no_context": true}
+  ],
+  "rubric": {
+    "facts": [
+      {"id": "wal_pending",
+       "desc": "recent commits live in the -wal sidecar, not yet in the main db file",
+       "all": [["-wal|wal file|write-ahead log"],
+               ["recent|not yet|still in|pending|sidecar|separate file"]]},
+      {"id": "safe_snapshot",
+       "desc": "a safe snapshot method: VACUUM INTO, the backup API, or .backup",
+       "all": [["VACUUM INTO|backup API|sqlite3_backup|\\.backup"]]},
+      {"id": "checkpoint_moves",
+       "desc": "a checkpoint transfers WAL contents into the main database file",
+       "all": [["checkpoint"],
+               ["(into|back to|to) the (main )?(database|db)( file)?|merge|transfer|appli|writes? the (wal|changes)"]]}
+    ],
+    "fixtures": [
+      {"text": "In WAL mode recent commits are written to the -wal file first and are not yet in the main database file. A safe snapshot uses VACUUM INTO or the sqlite3_backup API. A checkpoint transfers the WAL contents back into the main database file.",
+       "expect": {"wal_pending": true, "safe_snapshot": true, "checkpoint_moves": true}},
+      {"text": "I am not sure how SQLite handles this; I would have to check the documentation.",
+       "expect": {"wal_pending": false, "safe_snapshot": false, "checkpoint_moves": false}},
+      {"text": "You can copy the database file at any time with cp; SQLite automatically keeps the file consistent, so no data is ever lost. There is no need for special tools.",
+       "expect": {"wal_pending": false, "safe_snapshot": false, "checkpoint_moves": false}}
+    ]
+  },
+  "expectation": "Preregistered: delta approximately 0. Haiku knows SQLite WAL semantics cold; supplying archive context about contextd's own backup work should not materially change the score. This control exists so the harness demonstrably CAN return 'context barely matters' — if it shows a large positive delta here, suspect a scoring artifact or a prompt-wrapper effect before believing any positive result on the real task."
+}

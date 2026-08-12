@@ -362,4 +362,133 @@ cmd_backup(_ap.Namespace(dest=str(bdir), keep=2))
 left = sorted(p.name for p in bdir.glob("contextd-*.db"))
 assert len(left) == 2 and "contextd-20200101-000000.db" not in left, left
 
+# 29. experiments: freeze is exactly what recall would disclose
+from contextd.experiment import (apply_arm, attribute_facts, build_report,
+                                 disclose_for_run, freeze, p_floor, perm_test,
+                                 provenance_class, register_experiment,
+                                 record_run, render_bundle, score_output,
+                                 validate_rubric, verdict)
+
+frozen = freeze(conn, cfg, "zebra service", budget=4000)
+ref = assemble(conn, cfg, "zebra service", budget=4000, purpose="parity check")
+assert [it["id"] for it in frozen["items"]] == ref["items"], "freeze/recall diverged"
+assert render_bundle(frozen["items"]) == ref["bundle"], "frozen bytes != recall bytes"
+assert "[REDACTED:api_key]" in render_bundle(frozen["items"]), "freeze skipped redaction"
+
+# 30. provenance classes derive from what ingestion already recorded
+assert provenance_class("note", "note", {"actor": "human"}) == "human"
+assert provenance_class("note", "note", {"actor": "mcp"}) == "model"
+assert provenance_class("claude_code", "message", {"role": "user"}) == "human"
+assert provenance_class("claude_code", "message", {"role": "assistant"}) == "model"
+assert provenance_class("claude_code", "message", {"role": "subagent"}) == "model"
+assert provenance_class("chrome", "page_visit", {}) == "activity"
+assert provenance_class("fs", "file_write", {}) == "human"
+
+# 31. interventions: drop by id, drop by class, no context, substitute
+append_event(conn, "note", "note", content="ferret decision: ship the v2 parser",
+             meta={"actor": "human"})
+append_event(conn, "note", "note", content="ferret summary: parser rewrite planned",
+             meta={"actor": "mcp"})
+fz = freeze(conn, cfg, "ferret parser", budget=4000)
+assert len(fz["items"]) == 2
+provs = {it["id"]: it["provenance"] for it in fz["items"]}
+human_id = next(i for i, p in provs.items() if p == "human")
+kept = apply_arm(fz["items"], {"name": "d", "drop_ids": [human_id]})
+assert [it["provenance"] for it in kept] == ["model"]
+kept = apply_arm(fz["items"], {"name": "nh", "drop_classes": ["human"]})
+assert all(it["provenance"] != "human" for it in kept)
+assert apply_arm(fz["items"], {"name": "none", "no_context": True}) == []
+kept = apply_arm(fz["items"], {"name": "sub", "replace": {
+    "text": "distilled: ferret parser work", "provenance": "model", "origin": "test"}})
+assert len(kept) == 1 and kept[0]["id"] is None and "distilled" in kept[0]["text"]
+
+# 32. disclosure for a run passes the real gate; drift is a refusal
+d = disclose_for_run(conn, cfg, 999, {"name": "full"}, 0, fz["items"])
+assert d["egress_id"] is not None
+egmeta = json.loads(conn.execute("SELECT meta FROM events WHERE id = ?",
+                                 (d["egress_id"],)).fetchone()["meta"])
+assert egmeta["type"] == "experiment" and egmeta["arm"] == "full"
+d = disclose_for_run(conn, cfg, 999, {"name": "none", "no_context": True}, 0, fz["items"])
+assert d["egress_id"] is None, "no-context arm must disclose nothing"
+tampered = [dict(it) for it in fz["items"]]
+tampered[0]["text"] += " drifted"
+try:
+    disclose_for_run(conn, cfg, 999, {"name": "full"}, 1, tampered)
+    raise AssertionError("drifted frozen item not refused")
+except ValueError:
+    pass
+
+# 33. scorer: deterministic, self-testing; a rubric without fixtures is refused
+rubric = {
+    "facts": [
+        {"id": "decision", "all": [["ship"], ["v2 parser|parser v2"]]},
+        {"id": "plan", "all": [["rewrite"]]},
+    ],
+    "fixtures": [
+        {"text": "we will ship the v2 parser after the rewrite",
+         "expect": {"decision": True, "plan": True}},
+        {"text": "I do not know anything about this project",
+         "expect": {"decision": False, "plan": False}},
+    ],
+}
+assert validate_rubric(rubric) == [], validate_rubric(rubric)
+s = score_output(rubric, "decision was to ship the V2 parser; rewrite planned")
+assert s["score"] == 1.0 and s["hits"]["decision"]
+s = score_output(rubric, "the parser exists")
+assert s["score"] == 0.0
+bad = {"facts": rubric["facts"], "fixtures": [rubric["fixtures"][0]]}
+assert any("no fact hits" in p for p in validate_rubric(bad)), "missing-miss fixture accepted"
+
+# 34. attribution names which frozen items carry which facts
+att = attribute_facts(fz["items"], rubric)
+assert att["decision"] == [human_id], att
+assert att["plan"] != [], att
+
+# 35. the null is measured: exact permutation p, and the design's floor
+assert perm_test([1, 1, 1, 1], [0, 0, 0, 0]) == round(2 / 70, 4)
+assert perm_test([0.5, 0.5], [0.5, 0.5]) == 1.0
+assert p_floor(4, 4) == round(2 / 70, 4)
+assert p_floor(3, 3) == 0.1, "3v3 can never reach p=0.05 and must say so"
+assert verdict(0.02) == "distinguishable" and verdict(0.1) == "suggestive"
+assert verdict(0.5) == "within noise"
+
+# 36. registration refuses a broken rubric, records a valid one; runs and
+# reports are ledger events; a no-effect world yields 'within noise'
+spec = {
+    "task_id": "smoke-task", "title": "smoke", "prompt_template": "answer: {context}",
+    "query": "ferret parser", "budget": 4000, "model": "haiku",
+    "model_settings": {"note": "test"}, "n_per_arm": 2,
+    "arms": [{"name": "full"}, {"name": "no_context", "no_context": True},
+             {"name": "drop_human", "drop_ids": [human_id]}],
+    "rubric": rubric, "frozen": fz, "attribution": att,
+    "expectation": "smoke only",
+}
+try:
+    register_experiment(conn, {**spec, "rubric": bad})
+    raise AssertionError("broken rubric registered")
+except ValueError:
+    pass
+exp_id = register_experiment(conn, spec)
+assert not search(conn, "smoke-task"), "experiment record leaked into FTS"
+for arm, scores in [("full", [1.0, 1.0]), ("no_context", [0.0, 0.5]),
+                    ("drop_human", [1.0, 0.5])]:
+    for i, sc in enumerate(scores):
+        record_run(conn, exp_id, {
+            "arm": arm, "run": i, "egress_id": None, "session_id": f"t-{arm}-{i}",
+            "model": "haiku", "duration_ms": 1, "exit": 0, "output": "x",
+            "output_sha": "x", "score": sc,
+            "hits": {"decision": sc >= 1.0, "plan": sc > 0}})
+rep = build_report(conn, exp_id)
+assert rep["arms"]["full"]["mean"] == 1.0
+none_cmp = next(c for c in rep["comparisons"] if c["arm"] == "no_context")
+assert none_cmp["estimated_contribution"] == 0.75
+drop_cmp = next(c for c in rep["comparisons"] if c["arm"] == "drop_human")
+assert drop_cmp["verdict"] == "within noise", \
+    "a 2v2 wiggle must not be reported as a detected effect"
+assert rep["not_licensed"], "report missing its scope statement"
+from contextd.experiment import format_report, record_report
+record_report(conn, exp_id, rep)
+assert "within noise" in format_report(rep)
+assert verify_chain(conn)["ok"], "experiment events broke the chain"
+
 print("ALL SMOKE TESTS PASSED")

@@ -1,0 +1,58 @@
+{
+  "task_id": "contextd-decisions-v1",
+  "title": "Brief a collaborator on contextd's settled design decisions",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "query": "gate audit layer security boundary epoch quiescence abandonment outcome hit partial miss backup vacuum hash chain tamper evident actor provenance",
+  "budget": 3500,
+  "prompt": "You are helping Joseph, the author of contextd — a personal context daemon he built (an append-only local event log with an index and a disclosure gate, served to AI clients over MCP). Brief a new collaborator on the project's settled design decisions. Cover precisely:\n\n1. What does the gate actually promise, and what is it explicitly NOT?\n2. How does the archive make tampering detectable, and what is the honest limit of that mechanism?\n3. How are recall outcomes evaluated, and what determines which retrieval features get built next?\n4. How are backups taken, and why that method?\n5. How are AI work episodes (epochs) bounded, and why that boundary?\n\nBe specific to what this project actually decided. If you do not know what the project decided on a point, write 'unknown' for that point rather than guessing.",
+  "arms": [
+    {"name": "full"},
+    {"name": "no_context", "no_context": true},
+    {"name": "drop_human_37804", "drop_ids": [37804]},
+    {"name": "drop_reconciler_41050", "drop_ids": [41050]},
+    {"name": "no_human", "drop_classes": ["human"]},
+    {"name": "no_model", "drop_classes": ["model"]},
+    {"name": "summary_only", "replace_from": "distill"}
+  ],
+  "rubric": {
+    "facts": [
+      {"id": "gate_audit_layer",
+       "desc": "the gate is an audit layer",
+       "all": [["audit layer|audit-layer|an audit mechanism, not"]]},
+      {"id": "gate_not_boundary",
+       "desc": "explicitly not a security boundary: local processes can bypass it",
+       "all": [["not a security (boundary|guarantee)|isn't a security (boundary|guarantee)|local process(es)? can (bypass|rewrite|read)|raw SQL INSERT|owner-level process"]]},
+      {"id": "hash_chain",
+       "desc": "each event commits to its predecessor's hash; rewrites detectable via ctx verify",
+       "all": [["hash of (its|the) predecessor|previous event'?s hash|commits to the hash|hash chain"],
+               ["tamper[- ]?eviden|detectable|ctx verify"]]},
+      {"id": "chain_honest_limit",
+       "desc": "tamper-evident, not tamper-proof: an owner-level process can recompute the chain",
+       "all": [["not tamper[- ]?proof|tamper[- ]?evident, not|recompute (the |every )?(chain|hash)"]]},
+      {"id": "eval_outcomes",
+       "desc": "recalls judged hit/partial/miss into an append-only scoreboard",
+       "all": [["hit\\W{0,3}partial\\W{0,3}miss|hit, partial,? (or |and )?miss"],
+               ["scoreboard|ctx outcome|judg"]]},
+      {"id": "miss_driven_growth",
+       "desc": "documented misses (e.g. vocabulary mismatch) are what earn new features like embeddings",
+       "all": [["earn(s|ed)? embeddings|vocabulary mismatch|misses (are|tell)"]]},
+      {"id": "backup_wal",
+       "desc": "backups via VACUUM INTO because copying a live db loses the WAL",
+       "all": [["VACUUM INTO"], ["WAL|write-ahead"]]},
+      {"id": "epoch_quiescence",
+       "desc": "epochs bounded by ~20min quiescence because sessions end by abandonment, not exit",
+       "all": [["quiescen|20[- ]min(ute)?s? (of )?(quiet|silence|inactivity)|quiet_seconds"],
+               ["abandon"]]}
+    ],
+    "fixtures": [
+      {"text": "The gate is an audit layer, not a security boundary — any local process can bypass it with raw SQL INSERT. Every event commits to the hash of its predecessor and ctx verify makes rewrites detectable; the honest limit is that it is tamper-evident, not tamper-proof, since an owner-level process can recompute the chain. Recalls are judged hit/partial/miss on a scoreboard, and documented vocabulary mismatch misses are what earn embeddings. Backups use VACUUM INTO because copying the live db loses the WAL. Epochs close after 20 minutes of quiet (quiescence) because sessions end by abandonment.",
+       "expect": {"gate_audit_layer": true, "gate_not_boundary": true, "hash_chain": true, "chain_honest_limit": true, "eval_outcomes": true, "miss_driven_growth": true, "backup_wal": true, "epoch_quiescence": true}},
+      {"text": "I don't have specific information about this project's internal decisions. 1: unknown. 2: unknown. 3: unknown. 4: unknown. 5: unknown.",
+       "expect": {"gate_audit_layer": false, "gate_not_boundary": false, "hash_chain": false, "chain_honest_limit": false, "eval_outcomes": false, "miss_driven_growth": false, "backup_wal": false, "epoch_quiescence": false}},
+      {"text": "The gate provides strong security guarantees and encrypts all data end to end. Tampering is prevented by strict file permissions. Evaluation uses standard accuracy metrics on a test set. Backups are taken nightly with rsync to a NAS. Sessions end when the user closes the terminal.",
+       "expect": {"gate_audit_layer": false, "gate_not_boundary": false, "hash_chain": false, "chain_honest_limit": false, "eval_outcomes": false, "miss_driven_growth": false, "backup_wal": false, "epoch_quiescence": false}}
+    ]
+  },
+  "expectation": "Preregistered: full >> no_context overall, because these decisions are archive-only (the repo is not in training data; the none arm measures guessability directly). Within-context ablations are expected to be muted by redundancy: frozen item 41050 is a reconciler prompt that embeds much of 40993's text, so drop-one and class arms may legitimately land within noise — that would be a true finding about redundancy, not a failure. Known construct wart, stated up front: 41050 is mechanically 'human' (role=user) but substantively harness machinery quoting model text, so the class ablation tests provenance-as-recorded, not authorship-in-substance. Fact epoch_quiescence has no source in the frozen set (its carrier, event 40857, matched the query but lost the budget race) and should stay near zero in every arm — present-but-not-retrieved. We are not optimizing for any particular report shape; 'this context barely matters' is an equally valid outcome."
+}

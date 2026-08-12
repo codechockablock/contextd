@@ -63,11 +63,13 @@ def log_egress(conn, cfg, content: str, meta: dict) -> int:
     return append_event(conn, "gate", "egress", content=content, meta=meta)
 
 
-def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "",
-             since: str = "", until: str = "", client: str = "cli") -> dict:
-    budget = min(budget, cfg["gate"]["max_recall_budget"])
-    check_budget(conn, cfg, upcoming=budget)
-    parts, ids, used = [], [], 0
+def select_items(conn, cfg, query: str, budget: int, since: str = "",
+                 until: str = "") -> list:
+    """The one selection walk behind every recall: ranked search hits, filtered
+    by never_leave, deduped by uri, redacted, greedily packed to budget. Each
+    item is returned fully rendered so a caller (or an experiment) holds the
+    exact bytes a bundle would carry."""
+    items, used = [], 0
     seen_uris = set()
     for hit in search(conn, query, limit=40, since=since or None, until=until or None):
         if never_leave(cfg, hit["uri"]):
@@ -93,12 +95,24 @@ def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "",
             text = text[:room] + "\n[truncated]"
             cost = est_tokens(header + text)
             truncated = True
-        parts.append(header + "\n" + text)
-        ids.append(ev["id"])
+        items.append({"id": ev["id"], "ts": ev["ts"], "source": ev["source"],
+                      "kind": ev["kind"], "uri": ev["uri"], "meta": ev["meta"],
+                      "header": header, "text": text, "est_tokens": cost})
         used += cost
         if truncated or used >= budget:
             break
-    bundle = "\n\n".join(parts) if parts else "(no matching events)"
+    return items
+
+
+def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "",
+             since: str = "", until: str = "", client: str = "cli") -> dict:
+    budget = min(budget, cfg["gate"]["max_recall_budget"])
+    check_budget(conn, cfg, upcoming=budget)
+    items = select_items(conn, cfg, query, budget, since, until)
+    ids = [it["id"] for it in items]
+    used = sum(it["est_tokens"] for it in items)
+    bundle = "\n\n".join(
+        it["header"] + "\n" + it["text"] for it in items) if items else "(no matching events)"
     meta = {"type": "recall", "query": query, "purpose": purpose,
             "budget": budget, "items": ids, "client": client}
     if since or until:

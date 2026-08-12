@@ -166,6 +166,47 @@ def cmd_outcome(args):
     print(f"recorded: egress #{args.egress_id} -> {args.verdict} (event #{eid})")
 
 
+def cmd_exp(args):
+    from .experiment import build_report, format_report, get_experiment, runs_for
+    conn = connect()
+    if args.action == "list":
+        rows = conn.execute(
+            "SELECT id, ts, meta FROM events WHERE kind='experiment' ORDER BY id").fetchall()
+        for r in rows:
+            m = json.loads(r["meta"])
+            n = len(runs_for(conn, r["id"]))
+            print(f"[{r['id']}] {r['ts']} {m['task_id']!r} model={m['model']} "
+                  f"arms={len(m['arms'])} runs={n} spec={m.get('spec_sha', '')[:12]}")
+        if not rows:
+            print("no experiments recorded")
+        return
+    if not args.exp_id:
+        sys.exit("experiment id required")
+    if args.action == "show":
+        m = get_experiment(conn, args.exp_id)
+        print(f"experiment #{args.exp_id}: {m['task_id']!r}")
+        print(f"  model: {m['model']}  n_per_arm: {m['n_per_arm']}  "
+              f"spec: {m.get('spec_sha', '')[:12]}")
+        print(f"  query: {m['query']!r}  budget: {m['budget']}")
+        print(f"  frozen: {len(m['frozen']['items'])} items "
+              f"(+{len(m['frozen']['matched_not_included'])} matched but not included)")
+        for it in m["frozen"]["items"]:
+            print(f"    [{it['id']}] {it['provenance']:<8} {it['source']}/{it['kind']} "
+                  f"~{it['est_tokens']}tok {it['uri'] or ''}")
+        for a in m["arms"]:
+            print(f"  arm: {json.dumps({k: v for k, v in a.items() if k != 'replace'})}"
+                  + ("  [replace: distilled substitute]" if a.get("replace") else ""))
+        print(f"  rubric: {len(m['rubric']['facts'])} facts, "
+              f"{len(m['rubric'].get('fixtures', []))} fixtures")
+        if m.get("expectation"):
+            print(f"  preregistered expectation: {m['expectation']}")
+        return
+    if args.action == "report":
+        print(format_report(build_report(conn, args.exp_id)))
+        return
+    sys.exit(f"unknown action {args.action!r}")
+
+
 def cmd_backup(args):
     conn = connect()
     dest_dir = Path(args.dest).expanduser() if args.dest else home() / "backups"
@@ -236,6 +277,9 @@ def main():
     sp.add_argument("egress_id", nargs="?", type=int)
     sp.add_argument("verdict", nargs="?", choices=["hit", "partial", "miss"])
     sp.add_argument("--note", default="")
+    sp = sub.add_parser("exp", help="context ablation experiments: list | show | report")
+    sp.add_argument("action", choices=["list", "show", "report"])
+    sp.add_argument("exp_id", nargs="?", type=int)
     sp = sub.add_parser("backup", help="WAL-safe snapshot via VACUUM INTO")
     sp.add_argument("dest", nargs="?")
     sp.add_argument("--keep", type=int, default=0,
@@ -247,7 +291,8 @@ def main():
     {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
      "search": cmd_search, "recall": cmd_recall, "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
-     "backup": cmd_backup, "verify": cmd_verify, "serve": cmd_serve}[args.cmd](args)
+     "exp": cmd_exp, "backup": cmd_backup, "verify": cmd_verify,
+     "serve": cmd_serve}[args.cmd](args)
 
 
 if __name__ == "__main__":
