@@ -149,11 +149,13 @@ def superseded_by(conn, event_id) -> list:
         "AND id > ? ORDER BY id", (event_id, event_id))]
 
 
-def verify_derivation(conn, event_id: int) -> dict:
+def verify_derivation(conn, event_id: int, quotes: bool = True) -> dict:
     """Verify one derived event against its recorded source disclosure.
     Returns {"derived": False} for leaf events. For derived events, returns
     per-claim mechanical levels and every structural error found. Never
-    invokes a model; never emits a semantic judgment."""
+    invokes a model; never emits a semantic judgment. quotes=False evaluates
+    structure only, ignoring span grounding (claims then cap at 'anchored') —
+    the experiment suite uses it to measure the two layers separately."""
     row = _row(conn, event_id)
     if row is None:
         return {"derived": False, "exists": False,
@@ -193,20 +195,20 @@ def verify_derivation(conn, event_id: int) -> dict:
     if not _hash_ok(row):
         errors.append("content_hash_mismatch")
 
-    quotes = {}  # event id -> verified quote status
-    for entry in derivation.get("support", []):
+    verified_quotes = {}  # event id -> verified quote status
+    for entry in derivation.get("support", []) if quotes else []:
         if not isinstance(entry, dict) or "event" not in entry \
                 or not entry.get("quote"):
             errors.append("malformed_derivation")
             continue
         ev = entry["event"]
         if ev not in segments:
-            quotes[ev] = "unsegmentable_disclosure"
+            verified_quotes[ev] = "unsegmentable_disclosure"
             errors.append("unsegmentable_disclosure")
         elif entry["quote"] in segments[ev]:
-            quotes[ev] = "verified"
+            verified_quotes[ev] = "verified"
         else:
-            quotes[ev] = "quote_not_in_disclosure"
+            verified_quotes[ev] = "quote_not_in_disclosure"
             errors.append("quote_not_in_disclosure")
 
     for claim in parse_claims(row["content"] or ""):
@@ -226,8 +228,8 @@ def verify_derivation(conn, event_id: int) -> dict:
             level = "unanchored"
         elif claim_errors:
             level = None  # malformed, not merely weak
-        elif all(quotes.get(a) == "verified" for a in claim["anchors"]) \
-                and claim["anchors"]:
+        elif all(verified_quotes.get(a) == "verified"
+                 for a in claim["anchors"]):
             level = "structurally_grounded"
         else:
             level = "anchored"
@@ -238,7 +240,7 @@ def verify_derivation(conn, event_id: int) -> dict:
     # a support entry for an event the text never anchors is itself suspect:
     # evidence attached to nothing launders by adjacency
     anchored_ids = {a for c in claim_reports for a in c["anchors"]}
-    for ev in quotes:
+    for ev in verified_quotes:
         if ev not in anchored_ids:
             errors.append("quote_missing_event")
 
@@ -250,10 +252,10 @@ def verify_derivation(conn, event_id: int) -> dict:
                else "unanchored")
     return {"derived": True, "exists": True, "source_egress": src_id,
             "errors": sorted(set(errors)), "claims": claim_reports,
-            "quotes": quotes, "level": overall}
+            "quotes": verified_quotes, "level": overall}
 
 
-def closure(conn, event_id: int, _visited=None) -> dict:
+def closure(conn, event_id: int, quotes: bool = True, _visited=None) -> dict:
     """Walk the full derivation closure of an event down to leaf archive
     events. Each node reports its own verification, its epistemic type, any
     supersession, and its children (one per distinct cited event). The
@@ -283,7 +285,7 @@ def closure(conn, event_id: int, _visited=None) -> dict:
         return node
     visited = visited | {event_id}
 
-    report = verify_derivation(conn, event_id)
+    report = verify_derivation(conn, event_id, quotes=quotes)
     if not report["derived"]:
         grounded = node["epistemic_type"] in GROUNDED_TYPES
         node.update(
@@ -300,7 +302,7 @@ def closure(conn, event_id: int, _visited=None) -> dict:
     cited = sorted({a for c in report["claims"] for a in c["anchors"]})
     verdicts = set()
     for child_id in cited:
-        child = closure(conn, child_id, _visited=visited)
+        child = closure(conn, child_id, quotes=quotes, _visited=visited)
         node["children"][child_id] = child
         verdicts.add(child["verdict"])
     if any(c["text"] and not c["anchors"] for c in report["claims"]):
