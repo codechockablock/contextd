@@ -9,7 +9,7 @@ from mcp.server.mcpserver import MCPServer
 
 from . import load_config
 from .db import connect
-from .gate import GateError, assemble, disclose, never_leave, redact
+from .gate import GateError, assemble, disclose, never_leave, redact, verify_anchors
 from .ingest import ingest_note
 from .search import search as do_search
 from .search import timeline as do_timeline
@@ -17,6 +17,43 @@ from .search import timeline as do_timeline
 # each connecting client identifies itself so the audit trail records who drew
 # on the archive; a stdio client sets it per-subprocess via CONTEXTD_CLIENT
 CLIENT = os.environ.get("CONTEXTD_CLIENT", "mcp").strip() or "mcp"
+
+
+def _derivation_binding(conn, text: str):
+    """Kernel-verified derivation for notes written under a dispatch binding.
+
+    A harness that feeds a model a gated disclosure (the reconciler) exports
+    CONTEXTD_DERIVATION_SOURCE=<egress_id> into the model subprocess; every
+    note written during that dispatch is then bound to the exact disclosed
+    bytes. The kernel — not the model — verifies the note's bracketed anchors
+    against the egress item list and stamps meta.derivation itself, so a note
+    can never claim more lineage than the record supports. Like
+    CONTEXTD_CLIENT this is same-owner attribution, not authentication.
+
+    Returns (derivation, error): derivation may be None (no binding active);
+    a non-None error means the note must be refused so the model can retry
+    with valid anchors — an anchor pointing at an undisclosed event launders
+    authority and is worse than no note this round (the epoch stays
+    retryable).
+    """
+    raw = os.environ.get("CONTEXTD_DERIVATION_SOURCE", "").strip()
+    if not raw:
+        return None, None
+    if not raw.isdigit():
+        return None, f"REFUSED: invalid derivation binding {raw!r}"
+    egress_id = int(raw)
+    row = conn.execute(
+        "SELECT kind, meta FROM events WHERE id = ?", (egress_id,)).fetchone()
+    meta = json.loads(row["meta"]) if row and row["meta"] else {}
+    if not row or row["kind"] != "egress" or not isinstance(meta.get("items"), list):
+        return None, (f"REFUSED: derivation binding #{egress_id} is not a "
+                      "disclosure with an item list")
+    anchors = verify_anchors(text, meta["items"])
+    if anchors["invalid"]:
+        return None, (f"REFUSED: anchors {anchors['invalid']} were not in the "
+                      "supplied dialogue; cite only bracketed event ids that "
+                      "appear in the input, then retry")
+    return {"source_egress": egress_id, "anchors": anchors["valid"]}, None
 
 
 def recall(
@@ -64,8 +101,16 @@ def search(query: str, limit: int = 10) -> str:
 def note(text: str) -> str:
     """Append a note event, stamped with this client's identity. Model-written
     notes pass capture-side redaction: the archive never stores credentials.
-    (Human CLI notes stay raw on purpose; the gate still redacts them at egress.)"""
-    return f"noted as event #{ingest_note(connect(), redact(load_config(), text), actor=CLIENT)}"
+    (Human CLI notes stay raw on purpose; the gate still redacts them at egress.)
+    Under a CONTEXTD_DERIVATION_SOURCE binding, the note's bracketed anchors
+    are kernel-verified against that disclosure and recorded as lineage;
+    invalid anchors refuse the note so the model can retry."""
+    conn = connect()
+    text = redact(load_config(), text)
+    derivation, err = _derivation_binding(conn, text)
+    if err:
+        return err
+    return f"noted as event #{ingest_note(conn, text, actor=CLIENT, derivation=derivation)}"
 
 
 def timeline(

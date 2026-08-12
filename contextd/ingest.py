@@ -31,10 +31,14 @@ def _never(cfg, path: str) -> bool:
     )
 
 
-def ingest_note(conn, text: str, tags=None, actor: str = "human") -> int:
+def ingest_note(conn, text: str, tags=None, actor: str = "human",
+                derivation: dict | None = None) -> int:
     meta = {"actor": actor}
     if tags:
         meta["tags"] = tags
+    if derivation:
+        # kernel-verified lineage (see mcp_server.note); never model-asserted
+        meta["derivation"] = derivation
     return append_event(conn, "note", "note", content=text, meta=meta)
 
 

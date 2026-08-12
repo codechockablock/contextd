@@ -30,13 +30,17 @@ MAX_EPOCHS_PER_RUN = 5
 MAX_DIALOGUE_CHARS = 300_000
 
 PROMPT = """You are the archivist for a personal context daemon. Below is the \
-dialogue from one work episode (roles: user, assistant, delegation, subagent). \
+dialogue from one work episode (roles: user, assistant, delegation, subagent); \
+each message is prefixed with its bracketed archive event id, e.g. [41234]. \
 Using the contextd note tool, write 3-10 standalone notes capturing only what \
 is durable: decisions made, facts established, preferences the user expressed, \
 artifacts built, and open questions. Each note must make sense on its own, \
-months from now, to a reader without this transcript. Skip pleasantries, \
-process chatter, and anything transient. Never include credentials. If nothing \
-durable happened, write no notes. When finished, reply with only: DONE"""
+months from now, to a reader without this transcript. Immediately after each \
+claim in a note, cite the bracketed event id(s) of the message(s) that support \
+it, exactly as given — cite only ids that appear in this dialogue; never \
+invent one. Skip pleasantries, process chatter, and anything transient. Never \
+include credentials. If nothing durable happened, write no notes. When \
+finished, reply with only: DONE"""
 
 
 def unreconciled_epochs(conn):
@@ -75,19 +79,25 @@ def reconcile(conn, epoch_id, meta) -> dict:
     if live_notes(conn, meta.get("start_event_id") or 0, epoch_id) >= LIVE_NOTE_SKIP:
         return {"skipped": "self_documented", "messages": len(msgs)}
     dialogue = "\n\n".join(
-        f"{m['role']}: {m['content']}" for m in msgs)[:MAX_DIALOGUE_CHARS]
+        f"[{m['id']}] {m['role']}: {m['content']}" for m in msgs)[:MAX_DIALOGUE_CHARS]
     payload = f"{PROMPT}\n\n{dialogue}"
     disclosure = disclose(conn, load_config(), payload, {
         "type": "reconcile_dialogue", "epoch_id": epoch_id,
         "model": MODEL, "items": [m["id"] for m in msgs],
         "client": "reconciler",
     })
+    # The model subprocess (and the ctx serve it spawns) inherits this env:
+    # every note written during this dispatch is kernel-bound to the exact
+    # disclosed dialogue, and its anchors are verified against that egress.
+    env = os.environ.copy()
+    env["CONTEXTD_DERIVATION_SOURCE"] = str(disclosure["egress_id"])
+    env["CONTEXTD_CLIENT"] = "reconciler"
     before = conn.execute("SELECT COUNT(*) FROM events WHERE kind='note'").fetchone()[0]
     try:
         r = subprocess.run(
             [CLAUDE_BIN, "-p", "--model", MODEL,
              "--allowedTools", "mcp__contextd__note"],
-            input=disclosure["content"],
+            input=disclosure["content"], env=env,
             capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:
         record_dispatch_outcome(
