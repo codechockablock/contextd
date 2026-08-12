@@ -59,8 +59,10 @@ def search(query: str, limit: int = 10) -> str:
 
 @mcp.tool()
 def note(text: str) -> str:
-    """Append a note event to the archive, stamped as model-written (actor=mcp)."""
-    return f"noted as event #{ingest_note(connect(), text, actor=CLIENT)}"
+    """Append a note event, stamped with this client's identity. Model-written
+    notes pass capture-side redaction: the archive never stores credentials.
+    (Human CLI notes stay raw on purpose; the gate still redacts them at egress.)"""
+    return f"noted as event #{ingest_note(connect(), redact(load_config(), text), actor=CLIENT)}"
 
 
 @mcp.tool()

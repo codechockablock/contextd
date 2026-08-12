@@ -308,4 +308,16 @@ from contextd.ingest import ingest_note as _note
 nid = _note(conn, "client-tagged note", actor="openclaw")
 assert json.loads(conn.execute("SELECT meta FROM events WHERE id=?", (nid,)).fetchone()["meta"])["actor"] == "openclaw"
 
+# 25. model-written notes are redacted at capture; human CLI notes stay raw,
+# but the gate still redacts them at egress
+nid = int(mcp_note("rotate gateway key sk-qqqqqqqqqqqqqqqq1234 tomorrow").rsplit("#", 1)[1])
+row = conn.execute("SELECT content FROM events WHERE id = ?", (nid,)).fetchone()
+assert "sk-qqqqqqqqqqqqqqqq1234" not in row["content"], "model note stored a credential"
+assert "[REDACTED:api_key]" in row["content"]
+hid = _note(conn, "human kept raw key sk-wwwwwwwwwwwwwwww5678 on purpose")
+raw = conn.execute("SELECT content FROM events WHERE id = ?", (hid,)).fetchone()["content"]
+assert "sk-wwwwwwwwwwwwwwww5678" in raw, "human deliberate notes should stay raw"
+r = assemble(conn, cfg, "human kept purpose", budget=2000)
+assert "sk-wwwwwwwwwwwwwwww5678" not in r["bundle"], "egress redaction failed on raw note"
+
 print("ALL SMOKE TESTS PASSED")
