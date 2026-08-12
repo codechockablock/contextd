@@ -1,0 +1,127 @@
+{
+  "task_id": "synthesis-rubricv2-confirm-v1",
+  "title": "Confirmation: granular vs retrieved vs fused under preregistered rubric v2",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "retrieved_detail",
+  "context_sets": {
+    "retrieved": {
+      "query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    },
+    "full": {
+      "query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust",
+      "budget": 6000,
+      "until": "2026-08-12T02:10:00"
+    },
+    "irrelevant": {
+      "query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    }
+  },
+  "arms": [
+    {
+      "name": "no_history",
+      "no_context": true
+    },
+    {
+      "name": "fused_connective",
+      "replace": {
+        "text": "Bet on the kernel: contextd as local audit-layer, not OB1-style cloud platform. Rationale: unpriced trust liabilities (mutable rows, self-certified provenance, destructible audit trails) become mandatory-to-fix when incidents arrive\u2014retrofitting enforcement to a platform is impossible. Kernels survive by solving permanent problems with foundation-first design; platforms die when governance becomes cost. Adopt OB1's memory contract (evidence/instruction distinction, recall traces, epistemic types) as gate policy, reject its infrastructure (cloud, extraction, remote APIs). The moat is neutrality and verification, not code. Launched v0 in month-long evaluation (\u226530% of \"what was that\" questions hitting recall = v0.1 earned). Urgent earned work: recall-outcome traces (evaluation lacks denominator), backup, hash chain (tamper-evidence). Defer vectors until lexical search fails\u2014hasn't yet. One person builds kernels; platforms require teams. Value concentrates where trust isn't yet mandatory.",
+        "provenance": "model",
+        "origin": "claude -p haiku connective distillation of set 'full'"
+      }
+    },
+    {
+      "name": "granular_distilled",
+      "replace": {
+        "text": "[40859] 2026 note: Chose kernel over market for agent memory. Market platforms have unpriced trust liabilities; enforcement can't be retrofitted. Kernel wins via neutrality, verification, composability. Monetization via Obsidian-model sync and enterprise agent audit (DLP).\n\n[40858] 2026 note: OB1's agent-memory schema better; contextd's enforcement better. Adopt OB1's ideas (evidence/instruction split, append-only events) as gate policy. Reject infrastructure (cloud capture via OpenRouter/Supabase, shared-key provenance, destructible audit).\n\n[40871] 2026 claude_code: Launched v0 successfully\u2014all four kernel jobs live, no unearned features. Gaps: backup story, recall-outcome traces, Safari permission, file-watching ingester. V0 completion is one-month evaluation (\u226530% recall wins); clock started; early data promising.\n\n[37820] 2026 claude_code: Market wins on convenience; kernel wins on permanence and trust. Cloud platforms borrow against unpriced liabilities. Kernels survive via embedding in downstream products. One person can build/maintain kernels; market platforms cannot.\n\n[40993] 2026 claude_code: Verified thesis against code. Earned queue: (1) outcome tracing, (2) backup, (3) hash chain, (4) epistemic types. Skip features with no logged failure. Reconciler paths need real-data testing before shipping.\n\n[41003] 2026 claude_code: Implemented outcomes (13 recalled, 0 judged; misses drive embeddings), backup via VACUUM INTO (40k events, 85MB), hash chain (0.34s verification, tamper-evident). Removed scratch file after absorbing into commits.\n\n[37818] 2026 claude_code: OB1 better product; contextd better kernel. Both fail identically: stated contract enforcement doesn't hold. contextd's 1,700-line auditability enables evening bug-fix; OB1's shared-key architecture requires structural change.\n\n[37816] 2026 claude_code: OB1 excels at semantic search (pgvector/HNSW), metadata extraction, cross-client access, memory schema. contextd excels at local-only privacy and egress control. OB1 sends queries to OpenRouter; contextd enforces gate locally.",
+        "provenance": "model",
+        "origin": "claude -p haiku granular distillation of set 'full'"
+      }
+    },
+    {
+      "name": "retrieved_detail",
+      "context_set": "retrieved"
+    }
+  ],
+  "prompt": "Below you may receive context from the personal archive of Joseph, a developer. Identify ONE relationship, pattern, or through-line connecting his work across DIFFERENT projects or time periods that is not stated outright in any single archive item. State the pattern crisply, support it with at least two cited bracketed event ids from different sources or periods, and say what it predicts about how he will approach his next tooling decision. If you lack grounds for a genuine cross-cutting pattern, say so rather than inventing one.",
+  "rubric": {
+    "facts": [
+      {
+        "id": "receipts_over_walls",
+        "weight": 1.0,
+        "loss_class": "causal_relationship",
+        "desc": "v2: evidence/verifiability preferred over prevention OR convenience/features \u2014 widened foil axis, frozen before these runs",
+        "all": [
+          [
+            "receipts?|evidence|audit|verifiab|tamper[- ]?evident|on the record"
+          ],
+          [
+            "(?:not|over|rather than|instead of|versus|, not)\\s*(?:a\\s+|the\\s+|building\\s+|conventionally\\s+)?(?:walls?|prevention|blocking|enforc|boundar|tamper[- ]?proof|guarantee|isolation|convenien|feature|opaqu|product|easier|trade-?off)|binding constraint|first-class value|prerequisite, not"
+          ]
+        ]
+      },
+      {
+        "id": "earned_complexity",
+        "weight": 0.75,
+        "loss_class": "rationale",
+        "desc": "unchanged from v1",
+        "all": [
+          [
+            "earn|only when.{0,40}(?:failure|incident|documented)|admission criter|documented failure"
+          ]
+        ]
+      },
+      {
+        "id": "measure_first",
+        "weight": 0.75,
+        "loss_class": "negative_evidence",
+        "desc": "unchanged from v1",
+        "all": [
+          [
+            "measured null|measure(?:d)? (?:before|first)|validated against|synthetic ground truth|not assumed"
+          ]
+        ]
+      }
+    ],
+    "fixtures": [
+      {
+        "text": "The through-line is receipts over walls: he builds evidence rather than prevention \u2014 the gate audits instead of enforcing a boundary, features are earned by documented failure, and thresholds are measured before believed, never assumed.",
+        "expect": {
+          "receipts_over_walls": true,
+          "earned_complexity": true,
+          "measure_first": true
+        }
+      },
+      {
+        "text": "He treats verifiability as a binding constraint: auditability over convenience, even when the feature-rich path is easier.",
+        "expect": {
+          "receipts_over_walls": true,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      },
+      {
+        "text": "I don't see enough cross-project material here to claim a genuine pattern, so I won't invent one.",
+        "expect": {
+          "receipts_over_walls": false,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      },
+      {
+        "text": "Good engineers value simplicity over complexity and quality over speed. He prefers simple, reliable tools and writes careful code.",
+        "expect": {
+          "receipts_over_walls": false,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      }
+    ]
+  },
+  "expectation": "Preregistered CONFIRMATION of the exploratory rescore in the 2x2 follow-up: rubric v2 (widened receipts_over_walls foil axis) is frozen in this event BEFORE any run; arms are byte-identical artifacts (fused from exp 41386, granular from exp 41408, retrieved set from exp 41325) under the ORIGINAL synthesis prompt; model/n unchanged. Predictions from the exploratory lens: receipts_over_walls rate granular ~1.0 >= retrieved ~0.75 >> fused ~0.0; no_history is the guessability control for the widened pattern \u2014 if it exceeds ~0.3 the widened rubric is hittable by eloquence and the exploratory claim is discounted regardless of the other cells. v2 scores are NOT comparable to v1 scores; only within-experiment ordering and the deep-pattern rates are read. Failure to reproduce granular's 8/8 (e.g. rate <= retrieved's) kills the 'granular concentrates signal' hypothesis and we keep the conservative claim only. Indifferent between outcomes.",
+  "detail_arm": "retrieved_detail"
+}
