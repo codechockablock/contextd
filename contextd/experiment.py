@@ -83,7 +83,7 @@ def _sha(text: str) -> str:
 
 
 def freeze(conn, cfg, query: str, budget: int, since: str = "", until: str = "",
-           origin_overrides: dict | None = None) -> dict:
+           origin_overrides: dict | None = None, ranked_ids=None) -> dict:
     """Run the selection walk once and freeze its result. Every arm of an
     experiment is a subset of a frozen set — never a re-retrieval, so
     intervention effects are not confounded with retrieval variance. Items
@@ -94,7 +94,8 @@ def freeze(conn, cfg, query: str, budget: int, since: str = "", until: str = "",
     prompt-as-role=user case). Overrides are recorded, never silent."""
     origin_overrides = origin_overrides or {}
     items = []
-    for it in select_items(conn, cfg, query, budget, since, until):
+    for it in select_items(conn, cfg, query, budget, since, until,
+                           ranked_ids=ranked_ids):
         meta = json.loads(it["meta"]) if it["meta"] else {}
         prov = provenance_class(it["source"], it["kind"], meta)
         ov = origin_overrides.get(str(it["id"])) or origin_overrides.get(it["id"])

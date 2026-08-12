@@ -1,0 +1,180 @@
+{
+  "task_id": "retrieval-threeway-contradiction-v1",
+  "title": "Three-way retrieval, constraint-mode discriminant",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "bm25",
+  "detail_arm": "bm25",
+  "context_sets": {
+    "retrieved": {
+      "query": "append-only immutability triggers delete egress logged disclosure audit gate local-first cloud sync hash chain predecessor tamper models write notes budget",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    },
+    "full": {
+      "query": "append-only immutability triggers delete egress logged disclosure audit gate local-first cloud sync hash chain predecessor tamper models write notes budget",
+      "budget": 5000,
+      "until": "2026-08-12T02:10:00"
+    },
+    "irrelevant": {
+      "query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    }
+  },
+  "origin_overrides": {
+    "41050": {
+      "origin": "mixed",
+      "reason": "reconciler prompt ingested as role=user; embeds model-authored report text"
+    }
+  },
+  "arms": [
+    {
+      "name": "bm25",
+      "context_set": "bm25"
+    },
+    {
+      "name": "connective_weighted",
+      "context_set": "connective"
+    },
+    {
+      "name": "connective_stripped",
+      "context_set": "stripped"
+    }
+  ],
+  "prompt": "A proposal for contextd (Joseph's personal context daemon: append-only local event log + index + disclosure gate over MCP) is under review.\n\nPROPOSAL 'Resilience & Reach':\n(a) Nightly automatic replication of the archive database to an encrypted S3 bucket, for disaster durability.\n(b) To control database growth, once the reconciler distills a work episode into notes, the raw dialogue events for that episode are deleted, keeping only the distilled notes.\n(c) For performance, the MCP server caches assembled recall bundles for 24 hours and serves repeat queries from cache without writing additional egress events.\n(d) Model clients may continue writing notes directly to the archive, tagged with their client identity.\n(e) The daily disclosure token budget becomes configurable per-client in config.toml.\n\nYour task: identify which elements GENUINELY contradict the project's recorded decisions or principles, which merely look risky but are actually CONSISTENT with them, and any real unresolved tensions. Address each element (a)-(e) explicitly. Cite archive evidence by bracketed event id where you can. If you lack grounds on an element, say so rather than guessing.",
+  "rubric": {
+    "facts": [
+      {
+        "id": "flag_cloud",
+        "weight": 1.0,
+        "loss_class": "contextual_framing",
+        "desc": "(a) genuinely conflicts with local-first / no-cloud commitment",
+        "all": [
+          [
+            "(?:s3|cloud|off-?site replic)(?:(?!consistent|fine|acceptable|allowed|aligns|\\(b\\)|\\(c\\)|\\(d\\)|\\(e\\))[\\s\\S]){0,140}(?:contradict|violat|conflict|against|breaks|incompatible)|(?:contradict|violat|conflict)(?:(?!\\(b\\)|\\(c\\)|\\(d\\)|\\(e\\))[\\s\\S]){0,100}(?:s3|cloud)"
+          ]
+        ]
+      },
+      {
+        "id": "flag_delete",
+        "weight": 1.0,
+        "loss_class": "factual_detail",
+        "desc": "(b) violates append-only immutability (deletes abort at the DB level)",
+        "all": [
+          [
+            "(?:delet|remov|prun)(?:(?!consistent|fine|acceptable|allowed|\\(c\\)|\\(d\\)|\\(e\\))[\\s\\S]){0,160}(?:append-?only|immutab|contradict|violat|triggers?|impossible)|append-?only(?:(?!\\(c\\)|\\(d\\)|\\(e\\))[\\s\\S]){0,120}(?:delet|contradict|violat)"
+          ]
+        ]
+      },
+      {
+        "id": "flag_cache",
+        "weight": 1.0,
+        "loss_class": "causal_relationship",
+        "desc": "(c) subtly defeats the self-auditing gate: disclosures without egress events",
+        "all": [
+          [
+            "cach"
+          ],
+          [
+            "(?:contradict|violat|conflict|breaks|undermin|defeat|bypass|unrecorded|off the books)(?:[\\s\\S]){0,120}(?:egress|logg|audit|disclosure)|(?:egress|logg|audit|disclosure)(?:[\\s\\S]){0,120}(?:contradict|violat|undermin|breaks|defeat|bypass)"
+          ]
+        ]
+      },
+      {
+        "id": "clear_model_notes",
+        "weight": 0.75,
+        "loss_class": "provenance",
+        "desc": "(d) correctly cleared: models writing provenance-tagged notes is the recorded decision",
+        "all": [
+          [
+            "\\(d\\)(?:(?!contradict|violat|conflict|danger)[\\s\\S]){0,140}(?:consistent|allowed|fine|already|permitted|acceptable|aligns|established|precedent|recorded decision)"
+          ]
+        ]
+      },
+      {
+        "id": "clear_budget",
+        "weight": 0.75,
+        "loss_class": "contextual_framing",
+        "desc": "(e) correctly cleared: the budget is metering config, not a principle",
+        "all": [
+          [
+            "\\(e\\)(?:(?!contradict|violat|conflict|danger)[\\s\\S]){0,140}(?:consistent|allowed|fine|config|acceptable|aligns|not a (?:principle|commitment)|metering|tunable)"
+          ]
+        ]
+      },
+      {
+        "id": "false_flag_d",
+        "weight": -0.75,
+        "desc": "PENALTY: calls (d) a contradiction \u2014 shallow paranoia about model writes",
+        "all": [
+          [
+            "\\(d\\)(?:(?!consistent|fine|allowed|acceptable|aligns|permitted)[\\s\\S]){0,110}(?:contradict|violat|conflict|must be removed|dangerous|unacceptable)"
+          ]
+        ]
+      },
+      {
+        "id": "false_flag_e",
+        "weight": -0.75,
+        "desc": "PENALTY: calls (e) a contradiction \u2014 mistakes metering config for principle",
+        "all": [
+          [
+            "\\(e\\)(?:(?!consistent|fine|allowed|acceptable|aligns|permitted)[\\s\\S]){0,110}(?:contradict|violat|conflict|must be removed|dangerous|unacceptable)"
+          ]
+        ]
+      }
+    ],
+    "fixtures": [
+      {
+        "text": "(a) The S3 replication contradicts the local-first commitment: no cloud, zero network code in the kernel. (b) Deleting raw dialogue events violates append-only immutability \u2014 deletes abort at the trigger level, and receipts are the point. (c) is the subtle one: serving cached bundles without egress events breaks the self-auditing gate; every disclosure must be logged. (d) is consistent with the recorded decision \u2014 models may write notes with actor provenance. (e) is fine: the budget is metering config, not a principle.",
+        "expect": {
+          "flag_cloud": true,
+          "flag_delete": true,
+          "flag_cache": true,
+          "clear_model_notes": true,
+          "clear_budget": true,
+          "false_flag_d": false,
+          "false_flag_e": false
+        }
+      },
+      {
+        "text": "I don't know this project's decisions, so I cannot say which elements conflict. Each would need review against its history.",
+        "expect": {
+          "flag_cloud": false,
+          "flag_delete": false,
+          "flag_cache": false,
+          "clear_model_notes": false,
+          "clear_budget": false,
+          "false_flag_d": false,
+          "false_flag_e": false
+        }
+      },
+      {
+        "text": "All five are risky. (d) violates basic AI-safety trust boundaries \u2014 model writes are dangerous. (e) is a serious conflict too: budgets must never be configurable. The rest need security review.",
+        "expect": {
+          "flag_cloud": false,
+          "flag_delete": false,
+          "flag_cache": false,
+          "clear_model_notes": false,
+          "clear_budget": false,
+          "false_flag_d": true,
+          "false_flag_e": true
+        }
+      },
+      {
+        "text": "(a) copies the database to S3. (b) deleting raw events violates the append-only design.",
+        "expect": {
+          "flag_cloud": false,
+          "flag_delete": true,
+          "flag_cache": false,
+          "clear_model_notes": false,
+          "clear_budget": false,
+          "false_flag_d": false,
+          "false_flag_e": false
+        }
+      }
+    ]
+  },
+  "expectation": "Preregistered: the three planted conflicts differ in depth \u2014 (a) is guessable from 'local-first' in the task preamble, (b) requires knowing immutability is trigger-enforced, (c) requires the self-auditing-gate principle (disclosure must be logged) and is the real reasoning test. Decoys (d)/(e) punish shallow flag-everything behavior; no_history is expected to trip them most. The cross-element fixture guards the scorer against adjacency false-credit. A result where context arms flag (c) no better than no_history would count against the reasoning-value hypothesis and is fully reportable.",
+  "design_notes": "Three-way retrieval trial: all arms draw from the same bm25 top-40 match set at the same 2200-token budget, differing ONLY in ranking. bm25 = the frozen retrieved set already measured; connective_weighted = descending connective-marker density (31-marker lexicon in experiments/connective.py, written at step-0 BEFORE this trial); connective_stripped = ascending density (the 'merely semantically similar facts' condition). EARNING CRITERION, preregistered: the connective ranker enters the kernel as a recall mode ONLY if connective_weighted beats bm25 beyond noise (p<=0.05) on the synthesis family; suggestive means more data before building; anything else means unearned and it stays in experiments/. Discriminant prediction from step-0's sign reversal: on the contradiction family connective ranking should be neutral-to-HARMFUL and stripped may match or beat it. Indifferent between outcomes."
+}

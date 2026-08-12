@@ -166,7 +166,9 @@ def freeze_sets(conn, cfg, task, reuse: int | None = None) -> dict:
     the archive grows, and a contrast against old runs is only clean when the
     bundles are the recorded bytes."""
     if reuse:
-        return get_experiment(conn, reuse)["frozen_sets"]
+        if isinstance(reuse, str) and not reuse.isdigit():
+            return json.loads(Path(reuse).read_text())  # precomputed sets file
+        return get_experiment(conn, int(reuse))["frozen_sets"]
     ov = task.get("origin_overrides", {})
     return {name: freeze(conn, cfg, cs["query"], cs["budget"],
                          cs.get("since", ""), cs.get("until", ""),
@@ -271,6 +273,7 @@ def cmd_run(args):
         "detail_arm": task.get("detail_arm"),
         "ladder": task.get("ladder", []),
         "origin_overrides": task.get("origin_overrides", {}),
+        "design_notes": task.get("design_notes"),
         "frozen_from": args.reuse_frozen,
         "expectation": task.get("expectation", ""),
         "registered": now_iso(),
@@ -347,14 +350,16 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("plan", help="freeze + show, no model calls, no registration")
     sp.add_argument("task")
-    sp.add_argument("--reuse-frozen", type=int, metavar="EXP_ID",
-                    help="adopt a prior experiment's frozen sets byte-for-byte")
+    sp.add_argument("--reuse-frozen", metavar="EXP_ID|FILE",
+                    help="adopt frozen sets byte-for-byte from a prior "
+                         "experiment id or a precomputed JSON file")
     sp = sub.add_parser("run", help="register and run the full experiment")
     sp.add_argument("task")
     sp.add_argument("--jobs", type=int, default=3)
     sp.add_argument("--allow-empty", action="store_true")
-    sp.add_argument("--reuse-frozen", type=int, metavar="EXP_ID",
-                    help="adopt a prior experiment's frozen sets byte-for-byte")
+    sp.add_argument("--reuse-frozen", metavar="EXP_ID|FILE",
+                    help="adopt frozen sets byte-for-byte from a prior "
+                         "experiment id or a precomputed JSON file")
     args = p.parse_args()
     {"plan": cmd_plan, "run": cmd_run}[args.cmd](args)
 

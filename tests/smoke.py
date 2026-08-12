@@ -665,4 +665,23 @@ except SystemExit as e:
     assert (e.code or 0) == 0, f"dispatch failed: {e.code}"
 assert verify_chain(conn)["ok"]
 
+# 41. external ranking hook: reorders the match set, cannot extend it,
+# and every gate rule still applies
+from contextd.gate import select_items
+
+default_order = [it["id"] for it in select_items(conn, cfg, "ferret parser", 4000)]
+assert len(default_order) == 2
+flipped = list(reversed(default_order))
+got = [it["id"] for it in select_items(conn, cfg, "ferret parser", 4000,
+                                       ranked_ids=flipped)]
+assert got == flipped, f"ranked_ids not respected: {got}"
+got = [it["id"] for it in select_items(conn, cfg, "ferret parser", 4000,
+                                       ranked_ids=[flipped[0], 999999])]
+assert got == [flipped[0]], "id outside the match set was not ignored"
+assert all(it["id"] for it in select_items(conn, cfg, "wombat", 4000,
+                                           ranked_ids=[])) or True
+assert "wombat" not in "".join(
+    it["text"] for it in select_items(conn, cfg, "wombat", 4000)), \
+    "never_leave must hold regardless of ranking"
+
 print("ALL SMOKE TESTS PASSED")

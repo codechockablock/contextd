@@ -1,0 +1,116 @@
+{
+  "task_id": "retrieval-threeway-synthesis-v1",
+  "title": "Three-way retrieval: does connective ranking cause better synthesis?",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "bm25",
+  "context_sets": {
+    "retrieved": {
+      "query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    },
+    "full": {
+      "query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust",
+      "budget": 6000,
+      "until": "2026-08-12T02:10:00"
+    },
+    "irrelevant": {
+      "query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    }
+  },
+  "arms": [
+    {
+      "name": "bm25",
+      "context_set": "bm25"
+    },
+    {
+      "name": "connective_weighted",
+      "context_set": "connective"
+    },
+    {
+      "name": "connective_stripped",
+      "context_set": "stripped"
+    }
+  ],
+  "prompt": "Below you may receive context from the personal archive of Joseph, a developer. Identify ONE relationship, pattern, or through-line connecting his work across DIFFERENT projects or time periods that is not stated outright in any single archive item. State the pattern crisply, support it with at least two cited bracketed event ids from different sources or periods, and say what it predicts about how he will approach his next tooling decision. If you lack grounds for a genuine cross-cutting pattern, say so rather than inventing one.",
+  "rubric": {
+    "facts": [
+      {
+        "id": "receipts_over_walls",
+        "weight": 1.0,
+        "loss_class": "causal_relationship",
+        "desc": "v2: evidence/verifiability preferred over prevention OR convenience/features \u2014 widened foil axis, frozen before these runs",
+        "all": [
+          [
+            "receipts?|evidence|audit|verifiab|tamper[- ]?evident|on the record"
+          ],
+          [
+            "(?:not|over|rather than|instead of|versus|, not)\\s*(?:a\\s+|the\\s+|building\\s+|conventionally\\s+)?(?:walls?|prevention|blocking|enforc|boundar|tamper[- ]?proof|guarantee|isolation|convenien|feature|opaqu|product|easier|trade-?off)|binding constraint|first-class value|prerequisite, not"
+          ]
+        ]
+      },
+      {
+        "id": "earned_complexity",
+        "weight": 0.75,
+        "loss_class": "rationale",
+        "desc": "unchanged from v1",
+        "all": [
+          [
+            "earn|only when.{0,40}(?:failure|incident|documented)|admission criter|documented failure"
+          ]
+        ]
+      },
+      {
+        "id": "measure_first",
+        "weight": 0.75,
+        "loss_class": "negative_evidence",
+        "desc": "unchanged from v1",
+        "all": [
+          [
+            "measured null|measure(?:d)? (?:before|first)|validated against|synthetic ground truth|not assumed"
+          ]
+        ]
+      }
+    ],
+    "fixtures": [
+      {
+        "text": "The through-line is receipts over walls: he builds evidence rather than prevention \u2014 the gate audits instead of enforcing a boundary, features are earned by documented failure, and thresholds are measured before believed, never assumed.",
+        "expect": {
+          "receipts_over_walls": true,
+          "earned_complexity": true,
+          "measure_first": true
+        }
+      },
+      {
+        "text": "He treats verifiability as a binding constraint: auditability over convenience, even when the feature-rich path is easier.",
+        "expect": {
+          "receipts_over_walls": true,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      },
+      {
+        "text": "I don't see enough cross-project material here to claim a genuine pattern, so I won't invent one.",
+        "expect": {
+          "receipts_over_walls": false,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      },
+      {
+        "text": "Good engineers value simplicity over complexity and quality over speed. He prefers simple, reliable tools and writes careful code.",
+        "expect": {
+          "receipts_over_walls": false,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      }
+    ]
+  },
+  "expectation": "Preregistered CONFIRMATION of the exploratory rescore in the 2x2 follow-up: rubric v2 (widened receipts_over_walls foil axis) is frozen in this event BEFORE any run; arms are byte-identical artifacts (fused from exp 41386, granular from exp 41408, retrieved set from exp 41325) under the ORIGINAL synthesis prompt; model/n unchanged. Predictions from the exploratory lens: receipts_over_walls rate granular ~1.0 >= retrieved ~0.75 >> fused ~0.0; no_history is the guessability control for the widened pattern \u2014 if it exceeds ~0.3 the widened rubric is hittable by eloquence and the exploratory claim is discounted regardless of the other cells. v2 scores are NOT comparable to v1 scores; only within-experiment ordering and the deep-pattern rates are read. Failure to reproduce granular's 8/8 (e.g. rate <= retrieved's) kills the 'granular concentrates signal' hypothesis and we keep the conservative claim only. Indifferent between outcomes.",
+  "detail_arm": "bm25",
+  "design_notes": "Three-way retrieval trial: all arms draw from the same bm25 top-40 match set at the same 2200-token budget, differing ONLY in ranking. bm25 = the frozen retrieved set already measured; connective_weighted = descending connective-marker density (31-marker lexicon in experiments/connective.py, written at step-0 BEFORE this trial); connective_stripped = ascending density (the 'merely semantically similar facts' condition). EARNING CRITERION, preregistered: the connective ranker enters the kernel as a recall mode ONLY if connective_weighted beats bm25 beyond noise (p<=0.05) on the synthesis family; suggestive means more data before building; anything else means unearned and it stays in experiments/. Discriminant prediction from step-0's sign reversal: on the contradiction family connective ranking should be neutral-to-HARMFUL and stripped may match or beat it. Indifferent between outcomes."
+}

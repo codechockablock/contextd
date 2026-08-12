@@ -81,14 +81,23 @@ def log_egress(conn, cfg, content: str, meta: dict) -> int:
 
 
 def select_items(conn, cfg, query: str, budget: int, since: str = "",
-                 until: str = "") -> list:
+                 until: str = "", ranked_ids=None) -> list:
     """The one selection walk behind every recall: ranked search hits, filtered
     by never_leave, deduped by uri, redacted, greedily packed to budget. Each
     item is returned fully rendered so a caller (or an experiment) holds the
-    exact bytes a bundle would carry."""
+    exact bytes a bundle would carry.
+
+    ranked_ids optionally replaces bm25 order with an externally computed one
+    — restricted to ids the search actually matched, so a ranking can reorder
+    the candidate pool but never smuggle events into it. The ranking policies
+    themselves live outside the kernel until an experiment earns them."""
     items, used = [], 0
     seen_uris = set()
-    for hit in search(conn, query, limit=40, since=since or None, until=until or None):
+    hits = search(conn, query, limit=40, since=since or None, until=until or None)
+    if ranked_ids is not None:
+        by_id = {h["id"]: h for h in hits}
+        hits = [by_id[i] for i in ranked_ids if i in by_id]
+    for hit in hits:
         if never_leave(cfg, hit["uri"]):
             continue
         if hit["uri"] and hit["uri"] in seen_uris:
