@@ -19,6 +19,14 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["contextd"]
 
+[tool.pytest.ini_options]
+# experiments/ and hooks/ are harness-side scripts deliberately outside the
+# installed contextd package (models call the kernel; the kernel never calls
+# models), so tests can only import them with the repo root on sys.path.
+# Local `python -m pytest` got that from the CWD; the bare `pytest` script in
+# CI does not, hence this explicit rootdir-relative entry.
+pythonpath = ["."]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 88
