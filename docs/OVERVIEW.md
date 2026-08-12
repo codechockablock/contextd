@@ -160,7 +160,12 @@ is deliberately NOT claimed: the kernel's level vocabulary cannot express
 semantic support, and the boundary cases that pass every mechanical layer are
 pinned in tests so no future change can quietly overclaim. Measured trials:
 the reconciler now anchors its notes (88.9% compliance, no coverage cost);
-see [PROVENANCE.md](PROVENANCE.md) for the full boundary statement.
+recursive distillation's one observed failure mode — citing transitive ids
+the model never read — is refused loudly; and serving the verified evidence
+next to a laundered claim dropped a downstream model's poison-following
+from 1.00 to 0.20 (earned for further development, not yet for production
+serving). See [PROVENANCE.md](PROVENANCE.md) for the full boundary
+statement.
 
 ## One line
 

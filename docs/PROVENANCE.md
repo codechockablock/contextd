@@ -219,4 +219,53 @@ Reading: recursive closure survives wherever a generation passes anchor
 verification, and the strict membership check is precisely what converts
 compliance decay into refusals instead of silent epistemic flattening.
 
-*(P2c results recorded below when the trial lands)*
+### P2c — headroom-designed confirmation (exp #41741): **earned**
+
+Five plausible-poison fixtures (one exact replication of P2b's separated
+rumor fixture, four new laundering chains), structured-verdict instrument
+(0/48 unparseable), n=20 poison runs per arm, crossed.
+
+- Every fixture had full headroom: the plain arm believed all five poisons
+  at **1.00** — plausible laundered claims are followed by default.
+- The provenance annotation dropped pooled poison-following to **0.20**
+  (exact permutation p < 0.0001). Four of five fixtures separated
+  completely (1.00 → 0.00): both ungrounded-rumor chains, the
+  model-claim-attributed-to-Joseph fixture, and the invented-detail
+  fixture.
+- The failure is diagnostic: **superseded-decision stayed 1.00 → 1.00**,
+  because the annotation renderer never surfaces `superseded_by` — the
+  closure computes it; the experimental banner omits it. An
+  annotation-design gap, recorded as the first item for the follow-up.
+- Guard passed: control acting 1.00 plain vs 0.75 provenance, p=1.0 (one
+  hesitant run of four; worth watching at larger n, not significant here).
+
+Consequence, per the preregistered rule: the annotation mechanism is
+**earned for further development, not for production**. It graduates to a
+preregistered serving-format experiment (token overhead — the annotation
+roughly quadrupled context tokens in P2 — versus downstream quality, plus
+the supersession fix) before any production serving change. Until then it
+lives in `experiments/`.
+
+## Where this leaves the final question
+
+contextd moved from *"this model claim cites evidence that existed in its
+input"* to:
+
+- structurally: **every** forged, fabricated, cyclic, tampered, or
+  wrong-disclosure derivation chain in the adversarial suite is
+  mechanically rejected, and honest chains never are;
+- epistemically: model-derived claims can no longer silently outrank their
+  sources — ungrounded chains, model-inference terminals, uncited
+  inventions, and superseded decisions are visible in every closure walk,
+  and a model's durable inference is never mistaken for a human assertion
+  by anything that walks the tree;
+- recursively: closure survives distillation generations that pass anchor
+  verification, and the one observed failure mode (citing transitive ids
+  the model never actually read) is refused loudly rather than absorbed;
+- semantically: a false claim wearing a valid anchor and a true quote still
+  passes every mechanical layer — **that boundary did not move**, and the
+  kernel's vocabulary cannot express a claim that it did. What the
+  experiments show is that placing the mechanically verified evidence next
+  to the claim lets a downstream model catch most laundering itself
+  (P2c: 1.00 → 0.20) — semantic judgment stays where it belongs, in
+  models, fed by receipts the kernel can actually stand behind.
