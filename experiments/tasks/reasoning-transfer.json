@@ -1,0 +1,54 @@
+{
+  "task_id": "reasoning-transfer-v1",
+  "title": "Transfer: apply a lesson from other past work to the recall scoreboard",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "full_relevant",
+  "detail_arm": "retrieved_detail",
+  "ladder": ["no_history", "distilled", "retrieved_detail", "full_relevant"],
+  "context_sets": {
+    "retrieved": {"query": "threshold measured null baseline confound nesting crossed validator sample size synthetic ground truth estimator catalog order gpu paper", "budget": 2200, "until": "2026-08-12T02:10:00"},
+    "full": {"query": "threshold measured null baseline confound nesting crossed validator sample size synthetic ground truth estimator catalog order gpu paper draft balance survived", "budget": 5000, "until": "2026-08-12T02:10:00"},
+    "irrelevant": {"query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile", "budget": 2200, "until": "2026-08-12T02:10:00"}
+  },
+  "origin_overrides": {
+    "36752": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"},
+    "36394": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"},
+    "35746": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"},
+    "36813": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"}
+  },
+  "arms": [
+    {"name": "no_history", "no_context": true},
+    {"name": "distilled", "replace_from": {"distill_of": "full"}},
+    {"name": "retrieved_detail", "context_set": "retrieved"},
+    {"name": "full_relevant", "context_set": "full"},
+    {"name": "irrelevant", "context_set": "irrelevant"}
+  ],
+  "prompt": "Joseph's contextd project evaluates its recall feature like this: every recall outcome is judged hit/partial/miss by the operator into an append-only scoreboard, and the stated plan is 'if the hit rate beats 30%, v0.1 features (like embeddings) are earned.'\n\nDrawing on methodological lessons from Joseph's OTHER projects and past work episodes — not from contextd itself — identify the single biggest methodological risk in trusting this scoreboard's verdict, and propose one concrete fix. Cite archive evidence by bracketed event id where you can. If you lack grounds, say so rather than guessing.",
+  "rubric": {
+    "facts": [
+      {"id": "unanchored_threshold", "weight": 1.0, "loss_class": "causal_relationship",
+       "desc": "identifies the 30% bar as a threshold with no measured null/baseline behind it",
+       "all": [["threshold|30\\s?%|the bar"],
+               ["measured null|no (?:baseline|null|denominator)|arbitrary|unanchored|against (?:grep|what|nothing)|calibrat|where does.{0,20}(?:30|number)"]]},
+      {"id": "prior_lesson", "weight": 1.0, "loss_class": "provenance",
+       "desc": "invokes the recorded prior-work principle: thresholds after the null, measured not assumed",
+       "all": [["after the null|null, not before|measured, not assumed|trace(?:s|d)? to a measured null|synthetic ground truth|estimator.{0,80}validated|validator|nesting|crossed"]]},
+      {"id": "selection_bias", "weight": 0.5, "loss_class": "negative_evidence",
+       "desc": "notes the judged-set selection problem (only noticed recalls get judged; missing denominator)",
+       "all": [["selection|only judged?|unjudged|denominator|which recalls|noticed|survivorship"]]},
+      {"id": "concrete_fix", "weight": 1.0, "loss_class": "causal_relationship",
+       "desc": "proposes a measured-baseline fix (grep baseline, calibration, judge-everything protocol)",
+       "all": [["grep baseline|compare.{0,40}grep|baseline (?:rate|hit)|calibrat|blind|null (?:distribution|calibration|model)|judge every|denominator"]]}
+    ],
+    "fixtures": [
+      {"text": "The biggest risk: the 30% bar is an unanchored threshold — no measured null behind it. His own prior work says thresholds trace to a measured null, set after the null, not before, and sample size measured against synthetic ground truth, not assumed. Also only judged recalls enter the tally, so the denominator is a selection. Fix: measure a grep baseline on the same queries and calibrate the bar against that null distribution, and judge every recall in a fixed window.",
+       "expect": {"unanchored_threshold": true, "prior_lesson": true, "selection_bias": true, "concrete_fix": true}},
+      {"text": "I don't have information about Joseph's other projects, so I cannot transfer a specific lesson. The setup sounds reasonable.",
+       "expect": {"unanchored_threshold": false, "prior_lesson": false, "selection_bias": false, "concrete_fix": false}},
+      {"text": "The main risk is that people forget to fill in evaluations. He should collect more data over a longer period and use standard accuracy metrics to be safe.",
+       "expect": {"unanchored_threshold": false, "prior_lesson": false, "selection_bias": false, "concrete_fix": false}}
+    ]
+  },
+  "expectation": "Preregistered: the target connection — the 30% bar is exactly the 'threshold with no measured null' failure his other work documented — was checked at design time and is not stated in any single archive item (the bar and the discipline live in different projects' events). no_history can name generic selection bias but should miss the specific prior-work principle (prior_lesson is the discriminating key). KNOWN DESIGN FACT: the full set adds near-duplicate copies of the same skill text (~2.7k extra tokens of redundancy), so full-over-retrieved is preregistered to gain ~nothing — a measured instance of 'more history stops helping'. All lesson-carrying items are origin=mixed (operator-curated skill text on the user channel); no clean human-vs-model claim is available in this family and none will be made."
+}

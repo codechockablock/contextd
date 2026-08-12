@@ -1,0 +1,50 @@
+{
+  "task_id": "reasoning-prediction-v1",
+  "title": "Prediction: Joseph's verdict on the novel 'ctx forget' proposal",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "full_relevant",
+  "detail_arm": "retrieved_detail",
+  "ladder": ["no_history", "distilled", "retrieved_detail", "full_relevant"],
+  "context_sets": {
+    "retrieved": {"query": "never_leave skip domains blocklist privacy stance append-only receipts recall disclosure trust model incident", "budget": 2200, "until": "2026-08-12T02:10:00"},
+    "full": {"query": "never_leave skip domains blocklist privacy stance append-only receipts recall disclosure trust model incident", "budget": 5000, "until": "2026-08-12T02:10:00"},
+    "irrelevant": {"query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile", "budget": 2200, "until": "2026-08-12T02:10:00"}
+  },
+  "origin_overrides": {
+    "41050": {"origin": "mixed", "reason": "reconciler prompt ingested as role=user; embeds model-authored report text"}
+  },
+  "arms": [
+    {"name": "no_history", "no_context": true},
+    {"name": "distilled", "replace_from": {"distill_of": "full"}},
+    {"name": "retrieved_detail", "context_set": "retrieved"},
+    {"name": "full_relevant", "context_set": "full"},
+    {"name": "irrelevant", "context_set": "irrelevant"}
+  ],
+  "prompt": "A new proposal for contextd (Joseph's personal context daemon: append-only local event log + index + disclosure gate over MCP) has NOT previously been evaluated:\n\nPROPOSAL 'ctx forget': a command that tombstones an event — the event stays in the ledger (hash chain untouched) but is permanently excluded from search, recall, and timeline outputs. Tombstones are themselves ledger events, so forgetting is on the record. Motivation: some ingested content (an embarrassing browsing session, a vented message) is something the operator may never want resurfacing in bundles.\n\nPredict Joseph's verdict: ACCEPT, REJECT, or MODIFY (and if MODIFY, state the modification you expect him to require). Then explain the reasoning you attribute to him, grounded in his recorded principles and prior decisions. If you lack grounds, say so rather than guessing.",
+  "rubric": {
+    "facts": [
+      {"id": "grounds_existing_mech", "weight": 1.0, "loss_class": "factual_detail",
+       "desc": "grounds the prediction in the existing suppression machinery (never_leave / skip_domains / blocklists)",
+       "all": [["never_leave|skip_domains|blocklist|never ingested|domain (?:blocklist|policy)"]]},
+      {"id": "grounds_receipts", "weight": 1.0, "loss_class": "rationale",
+       "desc": "grounds it in append-only/receipts/tamper-evidence values",
+       "all": [["append-?only|receipts|hash chain|tamper|on the record|immutab"]]},
+      {"id": "grounds_incident", "weight": 0.5, "loss_class": "rationale",
+       "desc": "recognizes the features-earned-by-incident pattern",
+       "all": [["until (?:a|an) (?:incident|failure)|incident earns|earn|no approval workflow"]]},
+      {"id": "states_verdict", "weight": 0.5, "loss_class": "factual_detail",
+       "desc": "commits to an explicit verdict",
+       "all": [["\\b(?:ACCEPT|REJECT|MODIFY)\\b"]]}
+    ],
+    "fixtures": [
+      {"text": "MODIFY — Joseph would keep the ledger untouched but fold this into the existing never_leave/blocklist machinery rather than a new command: the archive already has 'never ingested, never disclosed' domains. He'd insist the tombstone is itself an append-only receipt (on the record, hash chain intact) and would likely defer building it until an incident earns it.",
+       "expect": {"grounds_existing_mech": true, "grounds_receipts": true, "grounds_incident": true, "states_verdict": true}},
+      {"text": "I cannot predict this person's judgment; I have no information about how he weighs privacy against durability.",
+       "expect": {"grounds_existing_mech": false, "grounds_receipts": false, "grounds_incident": false, "states_verdict": false}},
+      {"text": "Everyone loves delete features; it is standard GDPR practice and users expect it, so he will surely add it as designed.",
+       "expect": {"grounds_existing_mech": false, "grounds_receipts": false, "grounds_incident": false, "states_verdict": false}}
+    ]
+  },
+  "expectation": "Preregistered two-stage protocol. Stage 1 (now): rubric scores only reasoning-GROUNDING (does the prediction invoke his actual recorded principles); each run's explicit verdict (ACCEPT/REJECT/MODIFY) is recorded and frozen via output hashes in the ledger. Stage 2 (later): Joseph states his real verdict + brief reason WITHOUT reading any outputs (blind); verdict-match rate per arm is then computed against the frozen outputs and recorded as outcome events. The model's predictions must not influence the reference: the ask to Joseph names the proposal only, never the predictions. Design-time check: 'ctx forget'/tombstoning has no prior discussion in the archive (searches returned only hash-table interview content). The grounding keys deliberately do not require any particular verdict — a well-grounded REJECT and a well-grounded MODIFY both score."
+}

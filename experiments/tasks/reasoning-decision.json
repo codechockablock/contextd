@@ -1,0 +1,61 @@
+{
+  "task_id": "reasoning-decision-v1",
+  "title": "Decision: next architectural investment, and the tempting one to reject",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "full_relevant",
+  "detail_arm": "retrieved_detail",
+  "ladder": ["no_history", "distilled", "retrieved_detail", "full_relevant"],
+  "context_sets": {
+    "retrieved": {"query": "epistemic types provenance actor laundering reconciler recall earned embeddings vocabulary mismatch misses scoreboard documented failure kernel", "budget": 2200, "until": "2026-08-12T02:10:00"},
+    "full": {"query": "epistemic types provenance actor laundering reconciler recall earned embeddings vocabulary mismatch misses scoreboard documented failure kernel", "budget": 5000, "until": "2026-08-12T02:10:00"},
+    "irrelevant": {"query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile", "budget": 2200, "until": "2026-08-12T02:10:00"}
+  },
+  "origin_overrides": {
+    "41050": {"origin": "mixed", "reason": "reconciler prompt ingested as role=user; embeds model-authored report text"},
+    "36752": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"},
+    "36394": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"},
+    "35746": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"},
+    "36813": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"}
+  },
+  "arms": [
+    {"name": "no_history", "no_context": true},
+    {"name": "distilled", "replace_from": {"distill_of": "full"}},
+    {"name": "retrieved_detail", "context_set": "retrieved"},
+    {"name": "full_relevant", "context_set": "full"},
+    {"name": "irrelevant", "context_set": "irrelevant"}
+  ],
+  "prompt": "You are advising Joseph, the author of contextd — a personal context daemon he built (an append-only local event log with an index and a disclosure gate, served to AI clients over MCP). Recommend the NEXT major architectural investment for this project, and name one tempting investment that should be REJECTED right now. Justify both from the project's own philosophy and history as you understand them. Be concrete and decisive. If you lack grounds for a recommendation, say what you would need to know rather than guessing.",
+  "rubric": {
+    "facts": [
+      {"id": "rec_provenance", "weight": 1.0, "loss_class": "rationale",
+       "desc": "recommends first-class epistemic/origin/provenance typing — the archive's own earned next step",
+       "all": [["epistemic types?|origin (?:field|tracking|label|typing)|provenance (?:field|types?|labels?|typing)|first-class.{0,30}(?:provenance|epistemic|origin)"]]},
+      {"id": "earned_criterion", "weight": 1.0, "loss_class": "rationale",
+       "desc": "grounds the choice in the earned-by-documented-failure principle",
+       "all": [["earn|documented (?:failure|miss|incident)|only when.{0,40}(?:failure|incident|demands)|until (?:a|an|the).{0,30}(?:incident|failure|miss)"]]},
+      {"id": "reject_embeddings", "weight": 1.0, "loss_class": "rejected_alternative",
+       "desc": "names embeddings/semantic search as the tempting move to reject as unearned",
+       "all": [["embedding|semantic search|vector"],
+               ["reject|not yet|defer|premature|unearned|resist|until.{0,40}(?:fail|miss|documented)"]]},
+      {"id": "local_kernel", "weight": 0.5, "loss_class": "contextual_framing",
+       "desc": "keeps the recommendation inside the local-first, model-free-kernel philosophy",
+       "all": [["local[- ]first|no cloud|kernel never (?:calls|invokes)|model-free kernel|no sockets|zero network"]]},
+      {"id": "viol_cloud", "weight": -1.0,
+       "desc": "PENALTY: recommends cloud/sync/hosted as the investment",
+       "all": [["(?:should|recommend|invest|prioriti[sz]e|next (?:major|big))(?:(?!reject|avoid|not |don'?t|resist|defer|rather than)[\\s\\S]){0,80}(?:cloud|saas|hosted service|multi-?device sync)"]]},
+      {"id": "viol_embed", "weight": -1.0,
+       "desc": "PENALTY: recommends embeddings/vector search as the investment",
+       "all": [["(?:should|recommend|invest|prioriti[sz]e|next (?:major|big))(?:(?!reject|avoid|not |don'?t|resist|defer|rather than)[\\s\\S]){0,80}(?:embedding|vector (?:search|database|db)|semantic search)"]]}
+    ],
+    "fixtures": [
+      {"text": "The next major investment: first-class epistemic types — an origin field distinguishing observation, human assertion, and model inference — because the reconciler laundering loop is a documented failure mode and features here are earned by documented failure, not roadmap. Reject embeddings for now: they are unearned until lexical search fails in a documented way. Both moves keep the kernel local-first and model-free.",
+       "expect": {"rec_provenance": true, "earned_criterion": true, "reject_embeddings": true, "local_kernel": true, "viol_cloud": false, "viol_embed": false}},
+      {"text": "I don't know enough about this project's history to ground a recommendation. I would need its decision log and constraints first.",
+       "expect": {"rec_provenance": false, "earned_criterion": false, "reject_embeddings": false, "local_kernel": false, "viol_cloud": false, "viol_embed": false}},
+      {"text": "You should invest in vector embeddings for semantic search, plus cloud sync for durability across devices. Modern memory products treat these as table stakes.",
+       "expect": {"rec_provenance": false, "earned_criterion": false, "reject_embeddings": false, "local_kernel": false, "viol_cloud": true, "viol_embed": true}}
+    ]
+  },
+  "expectation": "Preregistered: no_history should recommend generic memory-product moves (embeddings, sync) and trip penalties; context arms should recover the earned-queue logic. The key facts live in model-authored assistant reports (40993 names the epistemic-types queue), so this family also tests whether model-written history steers decisions. Distillation risk: the earned-criterion RATIONALE and the rejected-alternative are exactly the kinds of content summaries drop — preregistered loss classes rationale/rejected_alternative. Irrelevant arm should behave like no_history (token count alone buys nothing). Honest note: nearly all decision-narrative in this archive is model-written; a null or reversed result on any human-vs-model contrast is reportable as-is."
+}

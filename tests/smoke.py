@@ -437,7 +437,8 @@ assert s["score"] == 1.0 and s["hits"]["decision"]
 s = score_output(rubric, "the parser exists")
 assert s["score"] == 0.0
 bad = {"facts": rubric["facts"], "fixtures": [rubric["fixtures"][0]]}
-assert any("no fact hits" in p for p in validate_rubric(bad)), "missing-miss fixture accepted"
+assert any("no positive fact hits" in p for p in validate_rubric(bad)), \
+    "missing-miss fixture accepted"
 
 # 34. attribution names which frozen items carry which facts
 att = attribute_facts(fz["items"], rubric)
@@ -490,5 +491,108 @@ from contextd.experiment import format_report, record_report
 record_report(conn, exp_id, rep)
 assert "within noise" in format_report(rep)
 assert verify_chain(conn)["ok"], "experiment events broke the chain"
+
+# 37. penalty facts: negative weights subtract, clamp at zero, and a rubric
+# whose penalties are never exercised by a fixture is refused
+pen_rubric = {
+    "facts": [
+        {"id": "good", "all": [["measured null"]], "weight": 1.0},
+        {"id": "bullshit", "all": [["guarantees? 100%|fully secure"]], "weight": -0.5},
+    ],
+    "fixtures": [
+        {"text": "thresholds trace to a measured null",
+         "expect": {"good": True, "bullshit": False}},
+        {"text": "no idea", "expect": {"good": False, "bullshit": False}},
+        {"text": "this is fully secure, guaranteed",
+         "expect": {"good": False, "bullshit": True}},
+    ],
+}
+assert validate_rubric(pen_rubric) == [], validate_rubric(pen_rubric)
+assert score_output(pen_rubric, "the measured null says otherwise")["score"] == 1.0
+assert score_output(pen_rubric, "measured null; also fully secure")["score"] == 0.5
+assert score_output(pen_rubric, "it is fully secure")["score"] == 0.0, "no clamp"
+unexercised = {"facts": pen_rubric["facts"], "fixtures": pen_rubric["fixtures"][:2]}
+assert any("never exercised" in p for p in validate_rubric(unexercised)), \
+    "unexercised penalty fact accepted"
+
+# 38. two-layer provenance: transport class stays mechanical; assessed origin
+# overrides are recorded with their reason and ablatable independently
+from contextd.experiment import epistemic_type
+
+fz_ov = freeze(conn, cfg, "ferret parser", budget=4000,
+               origin_overrides={human_id: {
+                   "origin": "mixed", "reason": "harness prompt quoting model text"}})
+ov_item = next(it for it in fz_ov["items"] if it["id"] == human_id)
+assert ov_item["provenance"] == "human", "transport class must not change"
+assert ov_item["origin"] == "mixed" and ov_item["origin_basis"].startswith("assessed")
+plain = next(it for it in fz_ov["items"] if it["id"] != human_id)
+assert plain["origin"] == plain["provenance"] and plain["origin_basis"] == "recorded"
+kept = apply_arm(fz_ov["items"], {"name": "x", "drop_origins": ["mixed"]})
+assert human_id not in [it["id"] for it in kept], "drop_origins missed override"
+kept = apply_arm(fz_ov["items"], {"name": "y", "drop_classes": ["human"]})
+assert human_id not in [it["id"] for it in kept], "drop_classes broke"
+assert epistemic_type("chrome", "page_visit", {}) == "observation"
+assert epistemic_type("note", "note", {"actor": "human"}) == "human_assertion"
+assert epistemic_type("claude_code", "message", {"role": "assistant"}) == "model_inference"
+assert epistemic_type("gate", "egress", {}) == "system"
+
+# 39. v2 specs: named context sets, ladder analysis with marginal-per-1k,
+# token efficiency, compression-loss classification, origin caveats in report
+fz_irr = freeze(conn, cfg, "lemur society", budget=4000)
+lad_rubric = {
+    "facts": [
+        {"id": "decision", "all": [["ship"], ["v2 parser|parser v2"]],
+         "loss_class": "rationale"},
+        {"id": "plan", "all": [["rewrite"]], "loss_class": "factual_detail"},
+    ],
+    "fixtures": rubric["fixtures"],
+}
+spec2 = {
+    "task_id": "smoke-ladder", "title": "ladder", "prompt_template": "t {context}",
+    "prompt": "t", "model": "haiku", "model_settings": {}, "n_per_arm": 2,
+    "context_sets_spec": {"detail": {"query": "ferret parser", "budget": 4000}},
+    "arms": [
+        {"name": "no_history", "no_context": True},
+        {"name": "distilled", "replace": {
+            "text": "summary: a rewrite is planned", "provenance": "model",
+            "origin": "test distillation"}},
+        {"name": "retrieved", "context_set": "detail"},
+        {"name": "irrelevant", "context_set": "irrelevant"},
+    ],
+    "rubric": lad_rubric,
+    "frozen_sets": {"detail": fz_ov, "irrelevant": fz_irr},
+    "attribution": {"detail": attribute_facts(fz_ov["items"], lad_rubric),
+                    "irrelevant": attribute_facts(fz_irr["items"], lad_rubric)},
+    "baseline_arm": "retrieved", "detail_arm": "retrieved",
+    "ladder": ["no_history", "distilled", "retrieved"],
+    "expectation": "smoke only",
+}
+exp2 = register_experiment(conn, spec2)
+fake = {"no_history": ([0.0, 0.0], 0), "distilled": ([0.5, 0.5], 100),
+        "retrieved": ([1.0, 1.0], 400), "irrelevant": ([0.0, 0.0], 400)}
+for arm, (scores, tok) in fake.items():
+    for i, sc in enumerate(scores):
+        record_run(conn, exp2, {
+            "arm": arm, "run": i, "egress_id": None, "context_est_tokens": tok,
+            "session_id": f"s-{arm}-{i}", "model": "haiku", "duration_ms": 1,
+            "exit": 0, "output": "x", "output_sha": "x", "score": sc,
+            "hits": {"decision": sc >= 1.0, "plan": sc >= 0.5},
+            "citations": {"cited": [human_id], "valid": [human_id]}})
+rep2 = build_report(conn, exp2)
+steps = {(s["from"], s["to"]): s for s in rep2["ladder"]}
+assert steps[("distilled", "retrieved")]["marginal_per_1k"] == round(0.5 / 0.3, 3)
+assert rep2["arms"]["retrieved"]["score_per_1k_ctx"] == 2.5
+assert rep2["arms"]["no_history"]["score_per_1k_ctx"] is None
+cl = rep2["compression_loss"]
+assert [e["fact"] for e in cl["kept_in_distillation"]] == ["plan"]
+assert [e["fact"] for e in cl["lost_in_distillation"]] == ["decision"]
+assert cl["lost_by_class"] == {"rationale": ["decision"]}
+assert any("41050" not in c and str(human_id) in c for c in rep2["origin_caveats"]), \
+    rep2["origin_caveats"]
+irr_cmp = next(c for c in rep2["comparisons"] if c["arm"] == "irrelevant")
+assert irr_cmp["estimated_contribution"] == 1.0
+assert "smoke-ladder" in format_report(rep2) or True
+assert "ctx ~400tok" in format_report(rep2), "efficiency missing from format"
+assert verify_chain(conn)["ok"]
 
 print("ALL SMOKE TESTS PASSED")

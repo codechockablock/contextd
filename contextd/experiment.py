@@ -1,13 +1,14 @@
-"""Context ablation experiments: freeze one retrieval, intervene on it, and
+"""Context ablation experiments: freeze retrievals, intervene on them, and
 account for every disclosure, run, and score as ledger events.
 
 The question this module exists to answer is harder than "where did this come
 from?" — it is "which recorded context actually mattered to the outcome?" The
 kernel side stays model-free on principle: it freezes what recall would have
-disclosed, applies interventions (drop an event, drop a provenance class,
-substitute a distillation), scores outputs against a preregistered rubric, and
-does the arithmetic. A harness (experiments/) invokes models and reports back;
-models call the kernel, the kernel never calls models.
+disclosed, applies interventions (drop an event, drop a provenance class or
+origin, substitute a distillation, swap in an irrelevant token-matched set),
+scores outputs against a preregistered rubric, and does the arithmetic. A
+harness (experiments/) invokes models and reports back; models call the
+kernel, the kernel never calls models.
 
 Honesty constraints, enforced here rather than promised:
 - Every bundle an arm sends to a model passes the real gate (budget, redaction)
@@ -19,6 +20,10 @@ Honesty constraints, enforced here rather than promised:
   scorer that cannot tell a perfect answer from an empty one never runs.
 - The null is measured, not assumed: an exact permutation test over the
   observed runs, and the report states the smallest p the design can produce.
+- Provenance is two-layered: what the transport recorded (mechanical) and
+  what the designer assessed the origin to be (recorded with its reason).
+  Class claims are labeled with which layer they rest on; an item whose
+  origin is 'mixed' or 'uncertain' blocks clean human-vs-model claims.
 - A changed score is not a causal proof. Reports label effects as
   "distinguishable" / "suggestive" / "within noise" and say what the result
   does not license.
@@ -30,17 +35,20 @@ import random
 from itertools import combinations
 
 from .db import append_event
-from .gate import check_budget, est_tokens, log_egress, redact, select_items
+from .gate import check_budget, est_tokens, log_egress, select_items
 from .search import search
 
 PROVENANCE_CLASSES = ("human", "model", "activity", "other")
 
 
 def provenance_class(source, kind, meta: dict) -> str:
-    """Derive who a stored event speaks for. 'human': the operator's own words
-    (CLI notes, watched files, user dialogue turns). 'model': model-written
-    text (mcp/client notes, assistant/delegation/subagent turns). 'activity':
-    behavioral traces (browser visits). 'other': anything unclassified."""
+    """Transport-derived class: who the *channel* says an event speaks for.
+    'human': the operator's own words as recorded (CLI notes, watched files,
+    user dialogue turns). 'model': model-written text (mcp/client notes,
+    assistant/delegation/subagent turns). 'activity': behavioral traces.
+    This is mechanical and can be wrong in substance — e.g. a harness prompt
+    ingested as role=user — which is why frozen items also carry an assessed
+    `origin` with its basis stated."""
     if kind == "note":
         return "human" if meta.get("actor") == "human" else "model"
     if source == "claude_code" and kind == "message":
@@ -52,22 +60,52 @@ def provenance_class(source, kind, meta: dict) -> str:
     return "other"
 
 
+def epistemic_type(source, kind, meta: dict) -> str:
+    """Best-effort epistemic type from what ingestion already recorded:
+    observation (behavioral/file traces), human_assertion (deliberate human
+    text), model_inference (model-written text), system (kernel bookkeeping).
+    A first-class ingest-time field remains future work; this derivation is
+    honest about resting on transport metadata."""
+    if kind in ("page_visit", "file_write", "file_delete"):
+        return "observation"
+    if kind == "note":
+        return "human_assertion" if meta.get("actor") == "human" else "model_inference"
+    if source == "claude_code" and kind == "message":
+        return "human_assertion" if meta.get("role") == "user" else "model_inference"
+    if kind in ("epoch", "reconcile", "egress", "experiment", "exp_run",
+                "exp_report", "outcome"):
+        return "system"
+    return "unknown"
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def freeze(conn, cfg, query: str, budget: int, since: str = "", until: str = "") -> dict:
+def freeze(conn, cfg, query: str, budget: int, since: str = "", until: str = "",
+           origin_overrides: dict | None = None) -> dict:
     """Run the selection walk once and freeze its result. Every arm of an
-    experiment is a subset of this one frozen set — never a re-retrieval, so
+    experiment is a subset of a frozen set — never a re-retrieval, so
     intervention effects are not confounded with retrieval variance. Items
-    carry their rendered bytes; render-time drift is a refusal, not a warning."""
+    carry their rendered bytes; render-time drift is a refusal, not a warning.
+
+    origin_overrides maps event id -> {"origin": ..., "reason": ...} for items
+    whose transport class misstates their substantive origin (the reconciler-
+    prompt-as-role=user case). Overrides are recorded, never silent."""
+    origin_overrides = origin_overrides or {}
     items = []
     for it in select_items(conn, cfg, query, budget, since, until):
         meta = json.loads(it["meta"]) if it["meta"] else {}
+        prov = provenance_class(it["source"], it["kind"], meta)
+        ov = origin_overrides.get(str(it["id"])) or origin_overrides.get(it["id"])
         items.append({
             "id": it["id"], "ts": it["ts"], "source": it["source"],
             "kind": it["kind"], "uri": it["uri"],
-            "provenance": provenance_class(it["source"], it["kind"], meta),
+            "provenance": prov,
+            "transport_role": meta.get("role") or meta.get("actor") or it["source"],
+            "origin": ov["origin"] if ov else prov,
+            "origin_basis": f"assessed: {ov['reason']}" if ov else "recorded",
+            "epistemic_type": epistemic_type(it["source"], it["kind"], meta),
             "est_tokens": it["est_tokens"],
             "header": it["header"], "text": it["text"],
             "sha": _sha(it["header"] + "\n" + it["text"]),
@@ -81,7 +119,8 @@ def freeze(conn, cfg, query: str, budget: int, since: str = "", until: str = "")
 
 
 def apply_arm(frozen_items: list, arm: dict) -> list:
-    """Intervene on the frozen set. Arms compose drop_ids and drop_classes;
+    """Intervene on a frozen set. Arms compose drop_ids, drop_classes
+    (transport-derived provenance), and drop_origins (assessed origin);
     'no_context' yields nothing; 'replace' substitutes a single synthetic item
     (e.g. a distilled summary) whose provenance is declared, not inferred."""
     if arm.get("no_context"):
@@ -92,13 +131,18 @@ def apply_arm(frozen_items: list, arm: dict) -> list:
         header = (f"--- [substitute] {rep.get('provenance', 'model')}-derived "
                   f"{rep.get('origin', 'substitute context')} ---")
         return [{"id": None, "provenance": rep.get("provenance", "model"),
+                 "origin": rep.get("provenance", "model"),
+                 "origin_basis": "declared", "epistemic_type": "model_inference",
                  "header": header, "text": text,
                  "est_tokens": est_tokens(header + text),
                  "sha": _sha(header + "\n" + text)}]
     drop_ids = set(arm.get("drop_ids", []))
     drop_classes = set(arm.get("drop_classes", []))
+    drop_origins = set(arm.get("drop_origins", []))
     return [it for it in frozen_items
-            if it["id"] not in drop_ids and it["provenance"] not in drop_classes]
+            if it["id"] not in drop_ids
+            and it["provenance"] not in drop_classes
+            and it.get("origin", it["provenance"]) not in drop_origins]
 
 
 def render_bundle(items: list) -> str:
@@ -108,12 +152,13 @@ def render_bundle(items: list) -> str:
 def disclose_for_run(conn, cfg, exp_id: int, arm: dict, run_idx: int,
                      frozen_items: list, client: str = "experiment") -> dict:
     """Render an arm's bundle and log it through the real gate before anything
-    reaches a model. Returns {bundle, egress_id, items, sha}; a no-context arm
-    discloses nothing and logs nothing. Frozen shas are re-verified so a bundle
-    can never silently drift from what was registered."""
+    reaches a model. Returns {bundle, egress_id, items, sha, est_tokens}; a
+    no-context arm discloses nothing and logs nothing. Frozen shas are
+    re-verified so a bundle can never silently drift from what was registered."""
     kept = apply_arm(frozen_items, arm)
     if not kept:
-        return {"bundle": None, "egress_id": None, "items": [], "sha": None}
+        return {"bundle": None, "egress_id": None, "items": [], "sha": None,
+                "est_tokens": 0}
     for it in kept:
         if _sha(it["header"] + "\n" + it["text"]) != it["sha"]:
             raise ValueError(f"frozen item {it['id']} drifted since registration")
@@ -123,7 +168,8 @@ def disclose_for_run(conn, cfg, exp_id: int, arm: dict, run_idx: int,
         "type": "experiment", "exp_id": exp_id, "arm": arm["name"],
         "run": run_idx, "items": [it["id"] for it in kept], "client": client})
     return {"bundle": bundle, "egress_id": egress_id,
-            "items": [it["id"] for it in kept], "sha": _sha(bundle)}
+            "items": [it["id"] for it in kept], "sha": _sha(bundle),
+            "est_tokens": est_tokens(bundle)}
 
 
 # --- scoring: deterministic, preregistered, self-testing ---------------------
@@ -135,16 +181,26 @@ def _fact_hit(fact: dict, text: str) -> bool:
 
 
 def score_output(rubric: dict, text: str) -> dict:
+    """Weighted fraction of rubric facts matched. Negative-weight facts are
+    penalties (e.g. recommending a recorded settled-negative, or flagging a
+    decoy as a violation): they subtract from the score, which is clamped to
+    [0, 1]. The denominator is the sum of positive weights only, so a perfect
+    answer that trips no penalty scores 1.0."""
     hits = {f["id"]: _fact_hit(f, text) for f in rubric["facts"]}
-    total = sum(f.get("weight", 1.0) for f in rubric["facts"])
+    pos_total = sum(f.get("weight", 1.0) for f in rubric["facts"]
+                    if f.get("weight", 1.0) > 0)
     got = sum(f.get("weight", 1.0) for f in rubric["facts"] if hits[f["id"]])
-    return {"score": round(got / total, 4) if total else 0.0, "hits": hits}
+    score = got / pos_total if pos_total else 0.0
+    return {"score": round(min(1.0, max(0.0, score)), 4), "hits": hits}
 
 
 def validate_rubric(rubric: dict) -> list:
-    """A scorer earns the right to run by passing known-answer fixtures:
-    at least one where every fact should hit and one where none should.
-    Returns a list of problems; empty means valid."""
+    """A scorer earns the right to run by passing known-answer fixtures: at
+    least one where every positive-weight fact hits (a perfect answer) and one
+    where none do (an empty/evasive answer). Rubrics with penalty facts should
+    also include a plausible-bullshit fixture that trips them — enforced as a
+    warning-level check: a penalty fact never exercised by any fixture is an
+    error. Returns a list of problems; empty means valid."""
     import re
     problems = []
     facts = rubric.get("facts", [])
@@ -159,21 +215,30 @@ def validate_rubric(rubric: dict) -> list:
                     re.compile(alt, re.I | re.S)
                 except re.error as e:
                     problems.append(f"fact {f.get('id')}: bad pattern {alt!r}: {e}")
+    pos = [f["id"] for f in facts if f.get("weight", 1.0) > 0]
+    neg = [f["id"] for f in facts if f.get("weight", 1.0) < 0]
     fixtures = rubric.get("fixtures", [])
     saw_all_hit = saw_all_miss = False
+    neg_exercised = set()
     for i, fx in enumerate(fixtures):
         got = score_output({"facts": facts}, fx["text"])["hits"]
         for fid, want in fx["expect"].items():
             if got.get(fid) != want:
                 problems.append(f"fixture {i}: fact {fid} expected {want}, got {got.get(fid)}")
-        if fx["expect"] and all(fx["expect"].values()):
+        pos_expect = {k: v for k, v in fx["expect"].items() if k in pos}
+        if pos_expect and all(pos_expect.values()):
             saw_all_hit = True
-        if fx["expect"] and not any(fx["expect"].values()):
+        if pos_expect and not any(pos_expect.values()):
             saw_all_miss = True
+        neg_exercised |= {k for k, v in fx["expect"].items() if k in neg and v}
     if not saw_all_hit:
-        problems.append("no fixture where every fact hits (perfect answer)")
+        problems.append("no fixture where every positive fact hits (perfect answer)")
     if not saw_all_miss:
-        problems.append("no fixture where no fact hits (empty/evasive answer)")
+        problems.append("no fixture where no positive fact hits (empty/evasive answer)")
+    for fid in neg:
+        if fid not in neg_exercised:
+            problems.append(f"penalty fact {fid} never exercised by any fixture "
+                            "(add a plausible-bullshit fixture that trips it)")
     return problems
 
 
@@ -255,19 +320,27 @@ def verdict(p: float) -> str:
 
 # --- ledger records ----------------------------------------------------------
 
+def _spec_sets(spec: dict) -> dict:
+    """Frozen sets by name; legacy single-freeze specs appear as {'default': ...}."""
+    if "frozen_sets" in spec:
+        return spec["frozen_sets"]
+    return {"default": spec["frozen"]}
+
+
 def register_experiment(conn, spec: dict) -> int:
-    """Preregister the whole design — task, prompt, frozen items, arms, rubric,
+    """Preregister the whole design — task, prompt, frozen sets, arms, rubric,
     model, planned n — as one ledger event before any run happens. Refuses a
     rubric that fails its fixtures. The spec_sha names the design; reruns of
     the same sha are replications."""
     problems = validate_rubric(spec["rubric"])
     if problems:
         raise ValueError("rubric failed validation: " + "; ".join(problems))
+    sets = _spec_sets(spec)
     canonical = json.dumps({
         "task_id": spec["task_id"], "prompt_template": spec["prompt_template"],
-        "query": spec["query"], "budget": spec["budget"],
         "arms": spec["arms"], "rubric": spec["rubric"],
-        "frozen_shas": [it["sha"] for it in spec["frozen"]["items"]],
+        "frozen_shas": {name: [it["sha"] for it in fz["items"]]
+                        for name, fz in sets.items()},
         "model": spec["model"], "n_per_arm": spec["n_per_arm"],
     }, sort_keys=True)
     spec = {**spec, "spec_sha": _sha(canonical)}
@@ -313,49 +386,129 @@ def build_report(conn, exp_id: int) -> dict:
     arms = {}
     for name, rs in by_arm.items():
         scores = [r["score"] for r in rs]
+        ctx = [r.get("context_est_tokens", 0) for r in rs]
+        cited = [len(r.get("citations", {}).get("cited", [])) for r in rs]
+        valid = [len(r.get("citations", {}).get("valid", [])) for r in rs]
         arms[name] = {
             "n": len(rs), "mean": round(_mean(scores), 4),
             "sd": round(_sd(scores), 4),
             "min": min(scores), "max": max(scores),
             "scores": scores,
+            "context_tokens": round(_mean(ctx)) if ctx else 0,
+            "score_per_1k_ctx": (round(_mean(scores) / (_mean(ctx) / 1000), 3)
+                                 if ctx and _mean(ctx) > 0 else None),
+            "citations_mean": round(_mean(cited), 1) if any(cited) else 0,
+            "hallucinated_citations": sum(c - v for c, v in zip(cited, valid)),
             "run_event_ids": [r["event_id"] for r in rs],
             "egress_ids": [r.get("egress_id") for r in rs],
         }
-    baseline = arms.get("full")
+    baseline_name = spec.get("baseline_arm", "full")
+    baseline = arms.get(baseline_name)
     comparisons = []
     for arm_spec in spec["arms"]:
         name = arm_spec["name"]
-        if baseline is None or name == "full" or name not in arms:
+        if baseline is None or name == baseline_name or name not in arms:
             continue
         a, b = baseline["scores"], arms[name]["scores"]
         p = perm_test(a, b)
         comparisons.append({
-            "arm": name,
-            "delta_vs_full": round(arms[name]["mean"] - baseline["mean"], 4),
+            "arm": name, "baseline": baseline_name,
+            "delta_vs_baseline": round(arms[name]["mean"] - baseline["mean"], 4),
             "estimated_contribution": round(baseline["mean"] - arms[name]["mean"], 4),
             "p": p, "p_floor": p_floor(len(a), len(b)),
             "verdict": verdict(p),
             "removed": _describe_removal(arm_spec, spec),
         })
+    ladder = _ladder_analysis(spec, arms)
     fact_rates = _fact_table(spec, by_arm)
-    return {
-        "generated": None,  # stamped by record_report's event timestamp
+    compression = _compression_loss(spec, arms, fact_rates)
+    report = {
         "task_id": spec["task_id"], "model": spec["model"],
         "spec_sha": spec.get("spec_sha"),
         "n_runs": len(runs), "arms": arms, "comparisons": comparisons,
-        "fact_rates": fact_rates,
-        "interpretation": _interpret(spec, arms, comparisons, fact_rates),
+        "ladder": ladder, "fact_rates": fact_rates,
+        "compression_loss": compression,
+        "origin_caveats": _origin_caveats(spec),
+        "interpretation": _interpret(spec, arms, comparisons, fact_rates, ladder,
+                                     compression),
         "not_licensed": [
             "a single task on a single model; nothing here generalizes beyond it",
             "decoding is stochastic and temperature is not controllable via "
             "claude -p; per-run variance is measured, not eliminated",
-            "rubric facts are lexical matches; a correct paraphrase the "
-            "patterns miss scores as absent",
+            "rubric facts are lexical proxies for judgment quality; a correct "
+            "paraphrase the patterns miss scores as absent, and a lexical hit "
+            "is not proof of understanding",
             "verdict tiers (0.05/0.15) are conventions — the raw p and the "
             "design's p-floor are reported so readers can apply their own",
             "'within noise' means not detected at this n, not 'no effect'",
         ],
     }
+    return report
+
+
+def _origin_caveats(spec: dict) -> list:
+    out = []
+    for name, fz in _spec_sets(spec).items():
+        for it in fz["items"]:
+            if it.get("origin_basis", "recorded") != "recorded":
+                out.append(f"item {it['id']} in set '{name}': transport says "
+                           f"{it['provenance']}, origin {it['origin']} "
+                           f"({it['origin_basis']})")
+            elif it.get("origin") in ("mixed", "uncertain"):
+                out.append(f"item {it['id']} in set '{name}': origin {it['origin']}")
+    return out
+
+
+def _ladder_analysis(spec: dict, arms: dict) -> list:
+    """Consecutive contrasts along the declared context ladder (e.g. none ->
+    distilled -> retrieved -> full): delta, p, and marginal score per extra
+    1k context tokens. This is where 'more context stopped helping' shows up."""
+    ladder = spec.get("ladder", [])
+    out = []
+    for lo, hi in zip(ladder, ladder[1:]):
+        if lo not in arms or hi not in arms:
+            continue
+        a, b = arms[lo], arms[hi]
+        p = perm_test(a["scores"], b["scores"])
+        dtok = b["context_tokens"] - a["context_tokens"]
+        delta = round(b["mean"] - a["mean"], 4)
+        out.append({
+            "from": lo, "to": hi, "delta": delta, "p": p,
+            "verdict": verdict(p),
+            "added_ctx_tokens": dtok,
+            "marginal_per_1k": round(delta / (dtok / 1000), 3) if dtok else None,
+        })
+    return out
+
+
+def _compression_loss(spec: dict, arms: dict, fact_rates: dict) -> dict | None:
+    """When a distilled arm exists: which positive facts' evidence survived
+    distillation, which were destroyed, and — via the preregistered loss_class
+    on each fact — what *kind* of information the compression lost. Mechanical:
+    a fact is 'lost in distillation' when its patterns no longer match the
+    distillation text; the per-arm hit rates then show whether that loss cost
+    anything downstream."""
+    distilled = next((a for a in spec["arms"] if a.get("replace")), None)
+    if not distilled or distilled["name"] not in arms:
+        return None
+    dtext = distilled["replace"]["text"]
+    detail_arm = spec.get("detail_arm") or spec.get("baseline_arm", "full")
+    lost, kept = [], []
+    for f in spec["rubric"]["facts"]:
+        if f.get("weight", 1.0) <= 0:
+            continue
+        entry = {
+            "fact": f["id"], "loss_class": f.get("loss_class", "unclassified"),
+            "rate_detail": fact_rates.get(f["id"], {}).get("rates", {}).get(detail_arm),
+            "rate_distilled": fact_rates.get(f["id"], {}).get("rates", {}).get(distilled["name"]),
+        }
+        (kept if _fact_hit(f, dtext) else lost).append(entry)
+    by_class = {}
+    for e in lost:
+        by_class.setdefault(e["loss_class"], []).append(e["fact"])
+    return {"distilled_arm": distilled["name"], "detail_arm": detail_arm,
+            "kept_in_distillation": kept, "lost_in_distillation": lost,
+            "lost_by_class": by_class}
 
 
 def _describe_removal(arm_spec: dict, spec: dict) -> str:
@@ -366,10 +519,16 @@ def _describe_removal(arm_spec: dict, spec: dict) -> str:
         return (f"all detailed items, replaced by {rep.get('provenance', 'model')}"
                 f"-derived {rep.get('origin', 'substitute')}")
     parts = []
+    if arm_spec.get("context_set") and arm_spec["context_set"] != spec.get(
+            "baseline_set", next(iter(_spec_sets(spec)))):
+        parts.append(f"baseline set, using set '{arm_spec['context_set']}' instead")
     if arm_spec.get("drop_classes"):
-        parts.append(f"provenance class(es): {', '.join(arm_spec['drop_classes'])}")
+        parts.append("transport class(es): " + ", ".join(arm_spec["drop_classes"]))
+    if arm_spec.get("drop_origins"):
+        parts.append("assessed origin(s): " + ", ".join(arm_spec["drop_origins"]))
     if arm_spec.get("drop_ids"):
-        by_id = {it["id"]: it for it in spec["frozen"]["items"]}
+        by_id = {it["id"]: it for fz in _spec_sets(spec).values()
+                 for it in fz["items"]}
         names = [f"#{i} ({by_id[i]['provenance']} {by_id[i]['source']}/{by_id[i]['kind']})"
                  if i in by_id else f"#{i}" for i in arm_spec["drop_ids"]]
         parts.append("event(s) " + ", ".join(names))
@@ -381,35 +540,64 @@ def _fact_table(spec: dict, by_arm: dict) -> dict:
     no-context rate is already high is model-knowable, and its presence in the
     archive proves little; a fact that appears only when its source event is in
     the bundle is being read, not remembered."""
+    att = spec.get("attribution", {})
+    if att and isinstance(next(iter(att.values()), None), dict):
+        merged = {}
+        for per_set in att.values():
+            for fid, ids in per_set.items():
+                merged.setdefault(fid, [])
+                merged[fid] += [i for i in ids if i not in merged[fid]]
+        att = merged
     table = {}
     for f in spec["rubric"]["facts"]:
         fid = f["id"]
         table[fid] = {
-            "sources": spec.get("attribution", {}).get(fid, []),
+            "weight": f.get("weight", 1.0),
+            "sources": att.get(fid, []),
             "rates": {arm: round(sum(1 for r in rs if r["hits"].get(fid)) / len(rs), 3)
                       for arm, rs in by_arm.items()},
         }
     return table
 
 
-def _interpret(spec, arms, comparisons, fact_rates) -> list:
+def _none_arm(spec: dict):
+    return next((a["name"] for a in spec["arms"] if a.get("no_context")), None)
+
+
+def _interpret(spec, arms, comparisons, fact_rates, ladder, compression) -> list:
     lines = []
-    if "full" in arms and "no_context" in arms:
-        full, none = arms["full"], arms["no_context"]
-        comp = next((c for c in comparisons if c["arm"] == "no_context"), None)
+    none_name = _none_arm(spec)
+    base_name = spec.get("baseline_arm", "full")
+    if base_name in arms and none_name in arms:
+        full, none = arms[base_name], arms[none_name]
+        comp = next((c for c in comparisons if c["arm"] == none_name), None)
         if comp:
             lines.append(
-                f"Full context scored {full['mean']:.2f} vs {none['mean']:.2f} "
-                f"without contextd (Δ {comp['estimated_contribution']:+.2f}, "
+                f"{base_name} scored {full['mean']:.2f} vs {none['mean']:.2f} "
+                f"with no context (Δ {comp['estimated_contribution']:+.2f}, "
                 f"p={comp['p']}, {comp['verdict']}).")
+    for step in ladder:
+        if step["verdict"] == "within noise":
+            lines.append(
+                f"Ladder {step['from']} -> {step['to']}: Δ {step['delta']:+.2f} "
+                f"for {step['added_ctx_tokens']:+d} context tokens — within "
+                f"run-to-run noise (p={step['p']}); the extra context bought "
+                f"nothing detectable at this n.")
+        else:
+            lines.append(
+                f"Ladder {step['from']} -> {step['to']}: Δ {step['delta']:+.2f} "
+                f"for {step['added_ctx_tokens']:+d} context tokens "
+                f"({step['marginal_per_1k']} per 1k, p={step['p']}, "
+                f"{step['verdict']}).")
     for c in comparisons:
-        if c["arm"] == "no_context":
+        if c["arm"] == none_name or any(
+                s["to"] == c["arm"] or s["from"] == c["arm"] for s in ladder):
             continue
         if c["verdict"] == "within noise":
             lines.append(
                 f"Removing {c['removed']} moved the mean by "
-                f"{c['delta_vs_full']:+.2f} — indistinguishable from run-to-run "
-                f"noise at this n (p={c['p']}); no causal claim licensed.")
+                f"{c['delta_vs_baseline']:+.2f} — indistinguishable from "
+                f"run-to-run noise at this n (p={c['p']}); no causal claim licensed.")
         elif c["estimated_contribution"] > 0:
             lines.append(
                 f"Removing {c['removed']} cost {c['estimated_contribution']:+.2f} "
@@ -420,21 +608,26 @@ def _interpret(spec, arms, comparisons, fact_rates) -> list:
                 f"Removing {c['removed']} improved the score by "
                 f"{-c['estimated_contribution']:+.2f} (p={c['p']}, {c['verdict']}): "
                 f"this material appears harmful to this task.")
-    knowable = [fid for fid, row in fact_rates.items()
-                if row["rates"].get("no_context", 0) >= 0.5]
-    if knowable:
-        lines.append(
-            "Facts already knowable without context (no-context hit rate ≥ 50%): "
-            + ", ".join(knowable)
-            + " — their presence in the archive is not evidence the archive mattered.")
-    sole_source = [fid for fid, row in fact_rates.items()
-                   if row["rates"].get("no_context", 1) == 0
-                   and row["rates"].get("full", 0) >= 0.75 and row["sources"]]
-    if sole_source:
-        lines.append(
-            "Facts stated only when their source events were supplied: "
-            + ", ".join(sole_source)
-            + " — consistent with the archive being the sole source.")
+    if compression and compression["lost_by_class"]:
+        classes = ", ".join(f"{k} ({', '.join(v)})"
+                            for k, v in compression["lost_by_class"].items())
+        lines.append(f"Distillation destroyed evidence for: {classes}.")
+    if none_name:
+        knowable = [fid for fid, row in fact_rates.items()
+                    if row["weight"] > 0 and row["rates"].get(none_name, 0) >= 0.5]
+        if knowable:
+            lines.append(
+                "Facts already knowable without context (no-context hit rate ≥ 50%): "
+                + ", ".join(knowable)
+                + " — their presence in the archive is not evidence the archive mattered.")
+        sole_source = [fid for fid, row in fact_rates.items()
+                       if row["weight"] > 0 and row["rates"].get(none_name, 1) == 0
+                       and row["rates"].get(base_name, 0) >= 0.75 and row["sources"]]
+        if sole_source:
+            lines.append(
+                "Facts stated only when their source events were supplied: "
+                + ", ".join(sole_source)
+                + " — consistent with the archive being the sole source.")
     return lines
 
 
@@ -443,23 +636,48 @@ def format_report(report: dict) -> str:
            f"runs={report['n_runs']}  spec={str(report.get('spec_sha'))[:12]}"]
     out.append("")
     width = max(len(a) for a in report["arms"])
-    for name, a in sorted(report["arms"].items(),
-                          key=lambda kv: -kv[1]["mean"]):
+    for name, a in sorted(report["arms"].items(), key=lambda kv: -kv[1]["mean"]):
+        eff = (f"  {a['score_per_1k_ctx']}/1k" if a.get("score_per_1k_ctx")
+               else "")
         out.append(f"  {name:<{width}}  score {a['mean']:.2f} ± {a['sd']:.2f}  "
-                   f"(n={a['n']}, range {a['min']:.2f}–{a['max']:.2f})")
+                   f"(n={a['n']}, range {a['min']:.2f}–{a['max']:.2f})  "
+                   f"ctx ~{a.get('context_tokens', 0)}tok{eff}")
+    if report.get("ladder"):
+        out.append("")
+        out.append("  context ladder:")
+        for s in report["ladder"]:
+            marg = (f"  marginal {s['marginal_per_1k']}/1k"
+                    if s.get("marginal_per_1k") is not None else "")
+            out.append(f"    {s['from']} -> {s['to']}: Δ {s['delta']:+.2f} "
+                       f"({s['added_ctx_tokens']:+d} ctx tok){marg}  "
+                       f"p={s['p']}  {s['verdict']}")
     out.append("")
     for c in report["comparisons"]:
-        out.append(f"  {c['arm']:<{width}}  Δ {c['delta_vs_full']:+.2f}  "
+        out.append(f"  {c['arm']:<{width}}  Δ {c['delta_vs_baseline']:+.2f}  "
                    f"contribution {c['estimated_contribution']:+.2f}  "
                    f"p={c['p']} (floor {c['p_floor']})  {c['verdict']}")
     out.append("")
+    arm_names = sorted(report["arms"])
     out.append("  fact                     " + "  ".join(
-        f"{a[:10]:>10}" for a in sorted(report["arms"])))
+        f"{a[:10]:>10}" for a in arm_names))
     for fid, row in report["fact_rates"].items():
-        rates = "  ".join(f"{row['rates'].get(a, 0):>10.2f}"
-                          for a in sorted(report["arms"]))
+        rates = "  ".join(f"{row['rates'].get(a, 0):>10.2f}" for a in arm_names)
         src = ",".join(str(s) for s in row["sources"]) or "none"
-        out.append(f"  {fid:<24} {rates}   src: {src}")
+        w = "" if row["weight"] > 0 else "  [penalty]"
+        out.append(f"  {fid:<24} {rates}   src: {src}{w}")
+    if report.get("compression_loss"):
+        cl = report["compression_loss"]
+        out.append("")
+        out.append(f"  distillation kept: "
+                   + (", ".join(e['fact'] for e in cl['kept_in_distillation']) or "nothing"))
+        out.append(f"  distillation lost: "
+                   + (", ".join(f"{e['fact']} [{e['loss_class']}]"
+                                for e in cl['lost_in_distillation']) or "nothing"))
+    if report.get("origin_caveats"):
+        out.append("")
+        out.append("  origin caveats:")
+        for c in report["origin_caveats"]:
+            out.append(f"    - {c}")
     out.append("")
     out.append("Interpretation:")
     for line in report["interpretation"]:

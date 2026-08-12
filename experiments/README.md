@@ -25,16 +25,27 @@ disclosure, scoring, statistics, ledger records — lives in
 
 ## Anatomy of an experiment
 
-1. **Freeze**: one retrieval (`gate.select_items`, the same walk `recall`
-   uses), frozen with rendered bytes and per-item provenance
-   (`human` / `model` / `activity` derived from `meta.actor` and `meta.role`).
+1. **Freeze**: one or more named retrievals (`gate.select_items`, the same
+   walk `recall` uses), frozen with rendered bytes and two provenance layers
+   per item: the transport class (`human` / `model` / `activity`, mechanical,
+   from `meta.actor`/`meta.role`) and an assessed **origin** (`mixed`,
+   `uncertain`, …) recorded with its reason wherever the channel misstates
+   substance — e.g. a reconciler prompt or skill-file text arriving on the
+   user channel. Class ablations can target either layer, and reports say
+   which one a claim rests on. Items also carry a derived epistemic type
+   (observation / human_assertion / model_inference / system).
 2. **Preregister**: task prompt, arms, rubric, model, and n are recorded as an
    `experiment` event *before* any run. The rubric must pass its own
    known-answer fixtures (a perfect answer, an empty answer, and ideally a
    plausible-bullshit answer) or registration refuses.
-3. **Intervene**: each arm drops events, drops provenance classes, or
-   substitutes a distilled summary. Arms are subsets of the frozen set —
-   intervention effects are never confounded with retrieval variance.
+3. **Intervene**: each arm drops events, drops transport classes or assessed
+   origins, substitutes a distilled summary, references a different frozen
+   set (an irrelevant, token-matched control), or supplies nothing. Arms are
+   subsets of frozen sets — intervention effects are never confounded with
+   retrieval variance. A declared **ladder** (no_history → distilled →
+   retrieved_detail → full_relevant) gets consecutive contrasts with
+   marginal-score-per-1k-context-tokens, so "more history stopped helping"
+   is a measured row, not an impression.
 4. **Disclose honestly**: every bundle an arm sends passes the real gate —
    budgeted, redacted, logged as an `egress` event. Experiments cannot
    disclose off the books.
@@ -43,9 +54,17 @@ disclosure, scoring, statistics, ledger records — lives in
    quietly refill an ablated arm. Fresh tempdir cwd, no settings, no session
    persistence. Temperature is not exposed; repeated runs measure the variance
    instead.
-6. **Score**: deterministic lexical rubric, no LLM judge. Per-fact hits feed
+6. **Score**: deterministic lexical rubric, no LLM judge. Facts may carry
+   negative weights — penalties for recommending a recorded settled-negative
+   or flagging a planted decoy — so shallow flag-everything or generic
+   product-brain answers lose points instead of passing. Per-fact hits feed
    the used/knowable analysis; the no-context arm measures each fact's
-   guessability directly.
+   guessability directly. Each positive fact carries a preregistered
+   `loss_class` (rationale, rejected_alternative, causal_relationship,
+   negative_evidence, …) so when distillation costs points, the report can
+   say what *kind* of information the compression destroyed. Outputs' bracketed
+   event-id citations are checked against the ids actually supplied to that
+   run; citations of never-supplied ids are counted as hallucinated.
 7. **Report**: exact permutation test per comparison, the design's p-floor
    stated (4v4 runs bottom out at p=0.0286; 3v3 can never reach 0.05), verdict
    tiers (distinguishable ≤0.05 / suggestive ≤0.15 / within noise) reported

@@ -1,0 +1,50 @@
+{
+  "task_id": "reasoning-synthesis-v1",
+  "title": "Synthesis: an unstated through-line across projects and periods",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "full_relevant",
+  "detail_arm": "retrieved_detail",
+  "ladder": ["no_history", "distilled", "retrieved_detail", "full_relevant"],
+  "context_sets": {
+    "retrieved": {"query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust", "budget": 2200, "until": "2026-08-12T02:10:00"},
+    "full": {"query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust", "budget": 6000, "until": "2026-08-12T02:10:00"},
+    "irrelevant": {"query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile", "budget": 2200, "until": "2026-08-12T02:10:00"}
+  },
+  "origin_overrides": {
+    "41050": {"origin": "mixed", "reason": "reconciler prompt ingested as role=user; embeds model-authored report text"},
+    "36752": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"},
+    "36394": {"origin": "mixed", "reason": "skill-file text injected on the user channel; operator-curated, not operator-typed"}
+  },
+  "arms": [
+    {"name": "no_history", "no_context": true},
+    {"name": "distilled", "replace_from": {"distill_of": "full"}},
+    {"name": "retrieved_detail", "context_set": "retrieved"},
+    {"name": "full_relevant", "context_set": "full"},
+    {"name": "irrelevant", "context_set": "irrelevant"}
+  ],
+  "prompt": "Below you may receive context from the personal archive of Joseph, a developer. Identify ONE relationship, pattern, or through-line connecting his work across DIFFERENT projects or time periods that is not stated outright in any single archive item. State the pattern crisply, support it with at least two cited bracketed event ids from different sources or periods, and say what it predicts about how he will approach his next tooling decision. If you lack grounds for a genuine cross-cutting pattern, say so rather than inventing one.",
+  "rubric": {
+    "facts": [
+      {"id": "receipts_over_walls", "weight": 1.0, "loss_class": "causal_relationship",
+       "desc": "the strongest latent through-line: evidence/receipts preferred over prevention/walls, recurring across gate, chain, scoreboard, append-only design",
+       "all": [["receipts?|evidence|audit|tamper[- ]?evident|on the record"],
+               ["(?:not|over|rather than|instead of|versus|, not)\\s*(?:build(?:ing)?\\s+)?(?:walls?|prevention|blocking|enforc|boundar|tamper[- ]?proof|guarantee|isolation)|walls"]]},
+      {"id": "earned_complexity", "weight": 0.75, "loss_class": "rationale",
+       "desc": "second latent pattern: complexity must be earned by documented failure (embeddings gate, ingester admission, approval workflow)",
+       "all": [["earn|only when.{0,40}(?:failure|incident|documented)|admission criter|documented failure"]]},
+      {"id": "measure_first", "weight": 0.75, "loss_class": "negative_evidence",
+       "desc": "third latent pattern: measure before believing (nulls, validators, ground truth) recurring across projects",
+       "all": [["measured null|measure(?:d)? (?:before|first)|validated against|synthetic ground truth|not assumed"]]}
+    ],
+    "fixtures": [
+      {"text": "The through-line is receipts over walls: he consistently builds evidence rather than prevention — the gate audits instead of enforcing a boundary [40856], the chain is tamper-evident, not tamper-proof [41003], and features are earned by documented failure rather than roadmap. It predicts his next tooling decision will favor a measured null over an assumed threshold, measured before believed.",
+       "expect": {"receipts_over_walls": true, "earned_complexity": true, "measure_first": true}},
+      {"text": "I don't see enough cross-project material here to claim a genuine pattern, so I won't invent one.",
+       "expect": {"receipts_over_walls": false, "earned_complexity": false, "measure_first": false}},
+      {"text": "He works on databases, AI tools, and some games. He likes Python and writes many notes. His projects are technical and local.",
+       "expect": {"receipts_over_walls": false, "earned_complexity": false, "measure_first": false}}
+    ]
+  },
+  "expectation": "Preregistered: three latent through-lines were keyed at design time (receipts-over-walls, earned-complexity, measure-first); each is distributed across items and periods, stated fully in none (checked at design time against the frozen sets). The task asks for ONE pattern, so absolute scores are not meaningful — only arm contrasts are interpreted, and a run stating one pattern well scores partial by construction. Citation validity (cited ids ∩ supplied ids) is the evidence-support measure; no_history and irrelevant arms have no valid ids available, so any bracketed citations they emit are fabrications and will show in the hallucinated-citations count. The honest failure mode this family can surface: models pattern-matching 'wisdom-shaped' prose without the archive — if no_history scores near the context arms, the synthesis rubric is measuring eloquence, not synthesis, and that verdict is reportable."
+}
