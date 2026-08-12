@@ -1,0 +1,114 @@
+{
+  "task_id": "synthesis-prompt-strength-v1",
+  "title": "Does prompt strength recover synthesis from fused context? (permissive prompt)",
+  "model": "haiku",
+  "n_per_arm": 4,
+  "baseline_arm": "fused_connective",
+  "context_sets": {
+    "retrieved": {
+      "query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    },
+    "full": {
+      "query": "gate audit receipts tamper evident earned embeddings documented failure measured null admission criterion append only evidence kernel market bet cloud memory borrowed trust",
+      "budget": 6000,
+      "until": "2026-08-12T02:10:00"
+    },
+    "irrelevant": {
+      "query": "replication lag clock skew burst primary replica failover tombstone open addressing load factor cache eviction latency percentile",
+      "budget": 2200,
+      "until": "2026-08-12T02:10:00"
+    }
+  },
+  "arms": [
+    {
+      "name": "fused_connective",
+      "replace": {
+        "text": "Bet on the kernel: contextd as local audit-layer, not OB1-style cloud platform. Rationale: unpriced trust liabilities (mutable rows, self-certified provenance, destructible audit trails) become mandatory-to-fix when incidents arrive\u2014retrofitting enforcement to a platform is impossible. Kernels survive by solving permanent problems with foundation-first design; platforms die when governance becomes cost. Adopt OB1's memory contract (evidence/instruction distinction, recall traces, epistemic types) as gate policy, reject its infrastructure (cloud, extraction, remote APIs). The moat is neutrality and verification, not code. Launched v0 in month-long evaluation (\u226530% of \"what was that\" questions hitting recall = v0.1 earned). Urgent earned work: recall-outcome traces (evaluation lacks denominator), backup, hash chain (tamper-evidence). Defer vectors until lexical search fails\u2014hasn't yet. One person builds kernels; platforms require teams. Value concentrates where trust isn't yet mandatory.",
+        "provenance": "model",
+        "origin": "claude -p haiku connective distillation of set 'full'"
+      }
+    },
+    {
+      "name": "granular_distilled",
+      "replace": {
+        "text": "[40859] 2026 note: Chose kernel over market for agent memory. Market platforms have unpriced trust liabilities; enforcement can't be retrofitted. Kernel wins via neutrality, verification, composability. Monetization via Obsidian-model sync and enterprise agent audit (DLP).\n\n[40858] 2026 note: OB1's agent-memory schema better; contextd's enforcement better. Adopt OB1's ideas (evidence/instruction split, append-only events) as gate policy. Reject infrastructure (cloud capture via OpenRouter/Supabase, shared-key provenance, destructible audit).\n\n[40871] 2026 claude_code: Launched v0 successfully\u2014all four kernel jobs live, no unearned features. Gaps: backup story, recall-outcome traces, Safari permission, file-watching ingester. V0 completion is one-month evaluation (\u226530% recall wins); clock started; early data promising.\n\n[37820] 2026 claude_code: Market wins on convenience; kernel wins on permanence and trust. Cloud platforms borrow against unpriced liabilities. Kernels survive via embedding in downstream products. One person can build/maintain kernels; market platforms cannot.\n\n[40993] 2026 claude_code: Verified thesis against code. Earned queue: (1) outcome tracing, (2) backup, (3) hash chain, (4) epistemic types. Skip features with no logged failure. Reconciler paths need real-data testing before shipping.\n\n[41003] 2026 claude_code: Implemented outcomes (13 recalled, 0 judged; misses drive embeddings), backup via VACUUM INTO (40k events, 85MB), hash chain (0.34s verification, tamper-evident). Removed scratch file after absorbing into commits.\n\n[37818] 2026 claude_code: OB1 better product; contextd better kernel. Both fail identically: stated contract enforcement doesn't hold. contextd's 1,700-line auditability enables evening bug-fix; OB1's shared-key architecture requires structural change.\n\n[37816] 2026 claude_code: OB1 excels at semantic search (pgvector/HNSW), metadata extraction, cross-client access, memory schema. contextd excels at local-only privacy and egress control. OB1 sends queries to OpenRouter; contextd enforces gate locally.",
+        "provenance": "model",
+        "origin": "claude -p haiku granular distillation of set 'full'"
+      }
+    },
+    {
+      "name": "no_history",
+      "no_context": true
+    }
+  ],
+  "prompt": "Below you may receive context from the personal archive of Joseph, a developer. Identify ONE relationship, pattern, or through-line connecting his work across different projects or time periods that is not stated outright as a single sentence in the material. The context may be summarized or condensed; that is expected \u2014 infer the pattern from whatever evidence is present and commit to your best-supported answer. Do not decline for lack of material: state the strongest pattern the evidence supports, reference whatever evidence you use (bracketed event ids if present, otherwise describe it), state your confidence, and say what the pattern predicts about how he will approach his next tooling decision.",
+  "rubric": {
+    "facts": [
+      {
+        "id": "receipts_over_walls",
+        "weight": 1.0,
+        "loss_class": "causal_relationship",
+        "desc": "the strongest latent through-line: evidence/receipts preferred over prevention/walls, recurring across gate, chain, scoreboard, append-only design",
+        "all": [
+          [
+            "receipts?|evidence|audit|tamper[- ]?evident|on the record"
+          ],
+          [
+            "(?:not|over|rather than|instead of|versus|, not)\\s*(?:build(?:ing)?\\s+)?(?:walls?|prevention|blocking|enforc|boundar|tamper[- ]?proof|guarantee|isolation)|walls"
+          ]
+        ]
+      },
+      {
+        "id": "earned_complexity",
+        "weight": 0.75,
+        "loss_class": "rationale",
+        "desc": "second latent pattern: complexity must be earned by documented failure (embeddings gate, ingester admission, approval workflow)",
+        "all": [
+          [
+            "earn|only when.{0,40}(?:failure|incident|documented)|admission criter|documented failure"
+          ]
+        ]
+      },
+      {
+        "id": "measure_first",
+        "weight": 0.75,
+        "loss_class": "negative_evidence",
+        "desc": "third latent pattern: measure before believing (nulls, validators, ground truth) recurring across projects",
+        "all": [
+          [
+            "measured null|measure(?:d)? (?:before|first)|validated against|synthetic ground truth|not assumed"
+          ]
+        ]
+      }
+    ],
+    "fixtures": [
+      {
+        "text": "The through-line is receipts over walls: he consistently builds evidence rather than prevention \u2014 the gate audits instead of enforcing a boundary [40856], the chain is tamper-evident, not tamper-proof [41003], and features are earned by documented failure rather than roadmap. It predicts his next tooling decision will favor a measured null over an assumed threshold, measured before believed.",
+        "expect": {
+          "receipts_over_walls": true,
+          "earned_complexity": true,
+          "measure_first": true
+        }
+      },
+      {
+        "text": "I don't see enough cross-project material here to claim a genuine pattern, so I won't invent one.",
+        "expect": {
+          "receipts_over_walls": false,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      },
+      {
+        "text": "He works on databases, AI tools, and some games. He likes Python and writes many notes. His projects are technical and local.",
+        "expect": {
+          "receipts_over_walls": false,
+          "earned_complexity": false,
+          "measure_first": false
+        }
+      }
+    ]
+  },
+  "expectation": "Permissive-prompt row of the preregistered 2x2 (see synthesis-granularity-v1). The no_history arm is the eloquence control: the permissive prompt removes the refusal exit, so we must re-measure what pure wisdom-shaped prose scores with zero evidence. Readings: fused_permissive >> fused_original(=0.00 in exps 41386) AND >> no_history_permissive = prompt conservatism, not structure, produced the earlier zeros (operator's hypothesis); fused_permissive ~ no_history_permissive > 0 = the permissive prompt makes the rubric hittable by eloquence alone, absolute recoveries are uninterpretable, and the honesty instruction earns its place; both ~0.00 = structure claim stands even without the refusal exit. Granular arm text is the byte-identical artifact generated in synthesis-granularity-v1 so the 2x2 cells share materials exactly."
+}

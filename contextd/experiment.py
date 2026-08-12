@@ -411,8 +411,11 @@ def build_report(conn, exp_id: int) -> dict:
             continue
         a, b = baseline["scores"], arms[name]["scores"]
         p = perm_test(a, b)
+        is_removal = bool(arm_spec.get("no_context") or arm_spec.get("drop_ids")
+                          or arm_spec.get("drop_classes") or arm_spec.get("drop_origins"))
         comparisons.append({
             "arm": name, "baseline": baseline_name,
+            "kind": "removal" if is_removal else "substitute",
             "delta_vs_baseline": round(arms[name]["mean"] - baseline["mean"], 4),
             "estimated_contribution": round(baseline["mean"] - arms[name]["mean"], 4),
             "p": p, "p_floor": p_floor(len(a), len(b)),
@@ -593,7 +596,13 @@ def _interpret(spec, arms, comparisons, fact_rates, ladder, compression) -> list
         if c["arm"] == none_name or any(
                 s["to"] == c["arm"] or s["from"] == c["arm"] for s in ladder):
             continue
-        if c["verdict"] == "within noise":
+        if c.get("kind") == "substitute":
+            # a swapped bundle is a comparison, not a removal — "harmful
+            # material" framing would be wrong in both directions
+            lines.append(
+                f"Arm {c['arm']} scored {c['delta_vs_baseline']:+.2f} vs "
+                f"{c['baseline']} (p={c['p']}, {c['verdict']}).")
+        elif c["verdict"] == "within noise":
             lines.append(
                 f"Removing {c['removed']} moved the mean by "
                 f"{c['delta_vs_baseline']:+.2f} — indistinguishable from "

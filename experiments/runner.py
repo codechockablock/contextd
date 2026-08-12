@@ -67,6 +67,18 @@ and mechanisms; drop narrative and repetition. Reply with only the summary.
 
 {bundle}"""
 
+# same total budget, but preserve GRANULARITY: item boundaries and event ids
+# survive so the result stays citable, plural evidence rather than testimony
+GRANULAR_DISTILL_PROMPT = """Compress the following context items into
+per-item micro-summaries. For EACH item produce one entry of at most 35
+words that starts with the item's bracketed event id exactly as given
+(e.g. [37820]) followed by its timestamp year and source, then the item's
+key decision or rationale — prioritize why-nots, rejections, and causal
+reasoning. Keep every item separate; never merge items. Total across all
+entries at most 320 words. Reply with only the entries, one per line.
+
+{bundle}"""
+
 # same word budget, opposite objective: keep the connective tissue that
 # default summarization treats as noise
 CONNECTIVE_DISTILL_PROMPT = """Distill the following context items into one
@@ -190,8 +202,8 @@ def resolve_arms(conn, cfg, task, sets):
             if isinstance(rf, str) and rf == "distill":
                 src = next(iter(sets))
             style = rf.get("style", "naive") if isinstance(rf, dict) else "naive"
-            dprompt = (CONNECTIVE_DISTILL_PROMPT if style == "connective"
-                       else DISTILL_PROMPT)
+            dprompt = {"connective": CONNECTIVE_DISTILL_PROMPT,
+                       "granular": GRANULAR_DISTILL_PROMPT}.get(style, DISTILL_PROMPT)
             bundle = render_bundle(sets[src]["items"])
             check_budget(conn, cfg, upcoming=est_tokens(bundle))
             log_egress(conn, cfg, bundle, {
