@@ -43,9 +43,9 @@ from contextd import load_config  # noqa: E402
 from contextd.db import connect, now_iso  # noqa: E402
 from contextd.experiment import (attribute_facts, build_report,  # noqa: E402
                                  disclose_for_run, format_report, freeze,
-                                 p_floor, record_report, record_run,
-                                 register_experiment, render_bundle,
-                                 score_output, validate_rubric)
+                                 get_experiment, p_floor, record_report,
+                                 record_run, register_experiment,
+                                 render_bundle, score_output, validate_rubric)
 from contextd.gate import check_budget, est_tokens, log_egress  # noqa: E402
 
 CLAUDE_BIN = os.environ.get("EXP_CLAUDE_BIN", "claude")
@@ -64,6 +64,18 @@ a context item, cite its bracketed event id (e.g. [41003]).
 DISTILL_PROMPT = """Distill the following context items into one compact
 summary of at most 150 words. Preserve concrete decisions, names, numbers,
 and mechanisms; drop narrative and repetition. Reply with only the summary.
+
+{bundle}"""
+
+# same word budget, opposite objective: keep the connective tissue that
+# default summarization treats as noise
+CONNECTIVE_DISTILL_PROMPT = """Distill the following context items into one
+compact summary of at most 150 words. Prioritize, in order: WHY decisions
+were made (causal rationale), what was REJECTED or deferred and why not,
+failures and negative results, tensions and uncertainty, and recurring
+principles connecting different decisions. Sacrifice restatement of what was
+built, names, dates, and mechanism details whenever they compete with the
+above. Reply with only the summary.
 
 {bundle}"""
 
@@ -124,7 +136,14 @@ def load_task(path: str) -> dict:
     return task
 
 
-def freeze_sets(conn, cfg, task) -> dict:
+def freeze_sets(conn, cfg, task, reuse: int | None = None) -> dict:
+    """Freeze the task's context sets — or, with reuse, adopt a prior
+    experiment's frozen sets byte-for-byte. Reuse exists because re-freezing
+    the same query later is not identical: bm25 corpus statistics shift as
+    the archive grows, and a contrast against old runs is only clean when the
+    bundles are the recorded bytes."""
+    if reuse:
+        return get_experiment(conn, reuse)["frozen_sets"]
     ov = task.get("origin_overrides", {})
     return {name: freeze(conn, cfg, cs["query"], cs["budget"],
                          cs.get("since", ""), cs.get("until", ""),
@@ -135,7 +154,7 @@ def freeze_sets(conn, cfg, task) -> dict:
 def cmd_plan(args):
     conn, cfg = connect(), load_config()
     task = load_task(args.task)
-    sets = freeze_sets(conn, cfg, task)
+    sets = freeze_sets(conn, cfg, task, getattr(args, "reuse_frozen", None))
     n = task["n_per_arm"]
     print(f"task {task['task_id']!r}")
     for name, fz in sets.items():
@@ -170,19 +189,23 @@ def resolve_arms(conn, cfg, task, sets):
             src = rf["distill_of"] if isinstance(rf, dict) else "default"
             if isinstance(rf, str) and rf == "distill":
                 src = next(iter(sets))
+            style = rf.get("style", "naive") if isinstance(rf, dict) else "naive"
+            dprompt = (CONNECTIVE_DISTILL_PROMPT if style == "connective"
+                       else DISTILL_PROMPT)
             bundle = render_bundle(sets[src]["items"])
             check_budget(conn, cfg, upcoming=est_tokens(bundle))
             log_egress(conn, cfg, bundle, {
                 "type": "experiment", "arm": "_distill", "task_id": task["task_id"],
                 "items": [it["id"] for it in sets[src]["items"]],
                 "client": "exp-runner"})
-            r = run_model(DISTILL_PROMPT.format(bundle=bundle), task["model"])
+            r = run_model(dprompt.format(bundle=bundle), task["model"])
             if r["exit"] != 0 or not r["text"].strip():
                 sys.exit(f"distillation failed: exit {r['exit']} {r['stderr']}")
             arm = {**{k: v for k, v in arm.items() if k != "replace_from"},
                    "replace": {
                        "text": r["text"].strip(), "provenance": "model",
-                       "origin": f"claude -p {task['model']} distillation of set '{src}'"}}
+                       "origin": f"claude -p {task['model']} {style} "
+                                 f"distillation of set '{src}'"}}
         arms.append(arm)
     return arms
 
@@ -199,7 +222,7 @@ def cmd_run(args):
     if os.environ.get("ANTHROPIC_API_KEY"):
         print("note: ANTHROPIC_API_KEY is set — runs will bill the API key, "
               "not the subscription", file=sys.stderr)
-    sets = freeze_sets(conn, cfg, task)
+    sets = freeze_sets(conn, cfg, task, args.reuse_frozen)
     for name, fz in sets.items():
         if not fz["items"] and not args.allow_empty:
             sys.exit(f"set '{name}' froze empty; refusing (--allow-empty to override)")
@@ -224,6 +247,7 @@ def cmd_run(args):
         "detail_arm": task.get("detail_arm"),
         "ladder": task.get("ladder", []),
         "origin_overrides": task.get("origin_overrides", {}),
+        "frozen_from": args.reuse_frozen,
         "expectation": task.get("expectation", ""),
         "registered": now_iso(),
     }
@@ -299,10 +323,14 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("plan", help="freeze + show, no model calls, no registration")
     sp.add_argument("task")
+    sp.add_argument("--reuse-frozen", type=int, metavar="EXP_ID",
+                    help="adopt a prior experiment's frozen sets byte-for-byte")
     sp = sub.add_parser("run", help="register and run the full experiment")
     sp.add_argument("task")
     sp.add_argument("--jobs", type=int, default=3)
     sp.add_argument("--allow-empty", action="store_true")
+    sp.add_argument("--reuse-frozen", type=int, metavar="EXP_ID",
+                    help="adopt a prior experiment's frozen sets byte-for-byte")
     args = p.parse_args()
     {"plan": cmd_plan, "run": cmd_run}[args.cmd](args)
 
