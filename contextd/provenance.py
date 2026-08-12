@@ -315,7 +315,11 @@ def closure(conn, event_id: int, quotes: bool = True, _visited=None) -> dict:
         node["verdict"] = "ungrounded"  # derived, but cites nothing at all
     elif verdicts == {"grounded"}:
         node["verdict"] = "grounded"
-    elif "grounded" in verdicts:
+    elif verdicts & {"grounded", "mixed"}:
+        # a mixed child reaches SOME grounded leaves; the parent inherits
+        # partial grounding, it does not collapse to ungrounded (bug found
+        # by the P3 recursion trial: two-generation chains through mixed
+        # notes were being reported as reaching no evidence at all)
         node["verdict"] = "mixed"
     else:
         node["verdict"] = "ungrounded"

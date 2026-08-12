@@ -327,6 +327,24 @@ def test_two_generation_closure_resolves_to_leaves():
         "human_assertion"
 
 
+def test_mixed_grandchild_propagates_as_mixed_not_ungrounded():
+    """Found by the P3 recursion trial: a distillate citing a note that is
+    itself 'mixed' (one human leaf, one model leaf) must report 'mixed' —
+    partial grounding survives recursion; it does not collapse to
+    'ungrounded'."""
+    conn, cfg = _setup()
+    human = _human_note(conn, "a human decision")
+    rumor = _model_note(conn, "a model aside")
+    e1 = _disclose_ids(conn, cfg, [human, rumor])
+    n1 = _model_note(conn, f"Solid [{human}]. Shaky [{rumor}].",
+                     {"source_egress": e1, "anchors": [human, rumor]})
+    assert closure(conn, n1)["verdict"] == "mixed"
+    e2 = _disclose_ids(conn, cfg, [n1])
+    n2 = _model_note(conn, f"Second generation [{n1}].",
+                     {"source_egress": e2, "anchors": [n1]})
+    assert closure(conn, n2)["verdict"] == "mixed"
+
+
 def test_synthesis_egress_shape_walks_like_a_derivation():
     conn, cfg = _setup()
     h1 = _human_note(conn, "human evidence for synthesis")

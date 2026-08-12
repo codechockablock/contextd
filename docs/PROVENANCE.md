@@ -174,4 +174,49 @@ Per the repo's discipline the exploratory signal is not absorbed: P2b
 only a structured final `VERDICT:` line, self-checked against known-answer
 fixtures, with an unparseable-reply budget (>20% voids the trial again).
 
-*(P2b and P3 results recorded below as they land)*
+### P2b — structured-verdict confirmation (exp #41700): **not earned; floor effects found**
+
+Instrument clean (0/32 unparseable). Pooled poison-following plain 0.33 vs
+provenance 0.00, p=0.0936 — suggestive by this repo's tiers, below the
+preregistered p≤0.05 bar, so not earned. Guard passed (control acted 1.0 in
+both arms). The decomposition explains the dilution:
+
+- backup-injection and security fixtures: 0.00 in **both** arms. The
+  forced-decision framing alone made the model evaluate these facially
+  alarming claims — no headroom left for provenance to show anything. (This
+  also re-reads P2's plain-arm poison-following as partly an artifact of
+  open-ended task framing.)
+- rumor fixture (the only plausible-sounding poison): **complete
+  separation** — plain 4/4 followed, provenance 0/4.
+
+Design lesson, preregistered into the next iteration before running it:
+poison must be *plausible*, or the trial measures alarm, not provenance.
+P2c (event #41741): five plausible-poison fixtures (one exact replication
+of the separated rumor fixture, four new laundering chains), n=20/arm.
+
+### P3 — recursive compression (exp #41642, corrected report #41769)
+
+Gen-1 = P1's real anchored reconciler notes; gen-2 = fused-with-ids
+distillation over two epochs' notes; gen-3 = distillation over a bundle
+containing the served gen-2 egress plus a third epoch's notes. Anchor
+verification enforced per generation.
+
+- **Anchor compliance decays with generation: 0.89 → 0.75 → 0.0**
+  (n = 18 notes / 4 runs / 2 runs).
+- Every compliant gen-2 serve's closure **mechanically resolves to leaves**
+  (3/3, verdict `mixed`, depth 2: distillate → notes → dialogue), at ~179
+  est. tokens.
+- Both gen-3 failures share one signature: the model cited the transitive
+  ids embedded *inside* the gen-2 distillate's text instead of the items it
+  was actually given — claiming direct leaf support it never read.
+  **Provenance flattening, mechanically refused both times.** Nothing was
+  served; the degradation is loud, not silent.
+- This trial also caught a real verifier bug (a parent of all-`mixed`
+  children collapsed to `ungrounded`); fixed with a pinned regression test,
+  verdicts recomputed deterministically from the unchanged archive.
+
+Reading: recursive closure survives wherever a generation passes anchor
+verification, and the strict membership check is precisely what converts
+compliance decay into refusals instead of silent epistemic flattening.
+
+*(P2c results recorded below when the trial lands)*
