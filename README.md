@@ -78,8 +78,11 @@ launchctl load ~/Library/LaunchAgents/com.contextd.reconcile.plist
 
 ## Design commitments
 
-- **Append-only**: `UPDATE`/`DELETE` on `events` abort at the SQLite level.
-  Try it: `sqlite3 ~/.contextd/contextd.db "DELETE FROM events"` → refuses.
+- **Append-only, and tamper-evident**: `UPDATE`/`DELETE` on `events` abort at
+  the SQLite level, and every event commits to the hash of the one before it.
+  `ctx verify` recomputes the chain, so rewrites, deletions, and insertions
+  are *detectable* — not impossible (an owner-level process can recompute the
+  whole chain; see Trust model). Receipts that cannot be silently rewritten.
 - **Self-auditing gate**: the archive records what the archive disclosed.
   Egress events are excluded from search, recall, and the timeline tool
   (audit disclosures with `ctx audit`, or MCP `timeline` with
@@ -113,8 +116,19 @@ only when a concrete, logged failure demands it.
 ## The only evaluation that matters
 
 For one month, every time you think "what was that thing I read/wrote about
-X?", ask `ctx recall` first and keep a tally: did it beat grep and your own
-memory? If it wins ≥30% of the time, v0.1 is earned.
+X?", ask `ctx recall` first and keep the tally in the archive itself:
+
+```bash
+ctx outcome <egress-id> hit      # or: partial | miss  (add --note "why")
+ctx outcome                      # the scoreboard
+```
+
+If it beats grep and your own memory ≥30% of the time, v0.1 is earned — and
+the misses tell you *what* to build (vocabulary mismatch → embeddings earn
+their place; time confusion → better windows; and so on).
+
+Back up the archive with `ctx backup` (WAL-safe `VACUUM INTO`; copying the
+bare .db file while the daemon runs loses whatever is still in the WAL).
 
 ## Tests
 

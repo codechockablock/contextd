@@ -6,9 +6,10 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 from . import __version__, home, load_config
-from .db import connect
+from .db import append_event, connect, verify_chain
 from .gate import GateError, assemble, spent_today
 from .ingest import ingest_note, run_all
 from .search import search, timeline
@@ -133,6 +134,63 @@ def cmd_status(args):
     print(f"  egress today: ~{spent_today(conn)}/{cfg['gate']['daily_token_budget']} est. tokens")
 
 
+def cmd_outcome(args):
+    conn = connect()
+    if not args.egress_id:
+        recalls = {r["id"] for r in conn.execute(
+            "SELECT id FROM events WHERE kind='egress' "
+            "AND json_extract(meta,'$.type')='recall'")}
+        verdicts = {}
+        for r in conn.execute("SELECT meta FROM events WHERE kind='outcome' ORDER BY id"):
+            m = json.loads(r["meta"])
+            verdicts[m["egress_id"]] = m["verdict"]  # append-only: last verdict wins
+        counts = {"hit": 0, "partial": 0, "miss": 0}
+        for eid, v in verdicts.items():
+            if eid in recalls:
+                counts[v] += 1
+        judged = sum(counts.values())
+        print(f"recalls: {len(recalls)}  judged: {judged}  unjudged: {len(recalls) - judged}")
+        if judged:
+            print(f"  hit {counts['hit']}  partial {counts['partial']}  miss {counts['miss']}"
+                  f"  — hit rate {counts['hit'] / judged:.0%} (v0.1 bar: 30%)")
+        return
+    if not args.verdict:
+        sys.exit("verdict required: hit | partial | miss")
+    if not conn.execute("SELECT 1 FROM events WHERE id = ? AND kind='egress'",
+                        (args.egress_id,)).fetchone():
+        sys.exit(f"no egress event #{args.egress_id}")
+    meta = {"egress_id": args.egress_id, "verdict": args.verdict}
+    if args.note:
+        meta["note"] = args.note
+    eid = append_event(conn, "eval", "outcome", meta=meta)
+    print(f"recorded: egress #{args.egress_id} -> {args.verdict} (event #{eid})")
+
+
+def cmd_backup(args):
+    conn = connect()
+    dest_dir = Path(args.dest).expanduser() if args.dest else home() / "backups"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest_dir, 0o700)
+    dest = dest_dir / f"contextd-{time.strftime('%Y%m%d-%H%M%S')}.db"
+    conn.execute("VACUUM INTO ?", (str(dest),))  # WAL-safe consistent snapshot
+    os.chmod(dest, 0o600)
+    n = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    print(f"backed up {n} events -> {dest} ({dest.stat().st_size // 1024} KB)")
+    if any((home() / "store").rglob("*")):
+        print("note: blob store not included — copy ~/.contextd/store separately")
+
+
+def cmd_verify(args):
+    r = verify_chain(connect())
+    if r["ok"]:
+        extra = (f", {r['ts_warnings']} timestamp inversions (concurrent writers)"
+                 if r["ts_warnings"] else "")
+        print(f"chain intact: {r['checked']} events verified{extra}")
+    else:
+        sys.exit(f"CHAIN BROKEN at event #{r['first_bad']} "
+                 f"({r['checked']} events verified before it)")
+
+
 def cmd_serve(args):
     from .mcp_server import main as serve_main
     serve_main()
@@ -164,12 +222,20 @@ def main():
     sp = sub.add_parser("audit", help="list egress events: what left, when, for what")
     sp.add_argument("--limit", type=int, default=20)
     sub.add_parser("status", help="event counts, db size, today's egress spend")
+    sp = sub.add_parser("outcome", help="judge a recall for the evaluation tally; no args = scoreboard")
+    sp.add_argument("egress_id", nargs="?", type=int)
+    sp.add_argument("verdict", nargs="?", choices=["hit", "partial", "miss"])
+    sp.add_argument("--note", default="")
+    sp = sub.add_parser("backup", help="WAL-safe snapshot via VACUUM INTO")
+    sp.add_argument("dest", nargs="?")
+    sub.add_parser("verify", help="recompute the event hash chain; detect rewrites")
     sub.add_parser("serve", help="run the MCP server (stdio)")
 
     args = p.parse_args()
     {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
      "search": cmd_search, "recall": cmd_recall, "timeline": cmd_timeline,
-     "audit": cmd_audit, "status": cmd_status, "serve": cmd_serve}[args.cmd](args)
+     "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
+     "backup": cmd_backup, "verify": cmd_verify, "serve": cmd_serve}[args.cmd](args)
 
 
 if __name__ == "__main__":

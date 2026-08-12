@@ -317,7 +317,44 @@ assert "[REDACTED:api_key]" in row["content"]
 hid = _note(conn, "human kept raw key sk-wwwwwwwwwwwwwwww5678 on purpose")
 raw = conn.execute("SELECT content FROM events WHERE id = ?", (hid,)).fetchone()["content"]
 assert "sk-wwwwwwwwwwwwwwww5678" in raw, "human deliberate notes should stay raw"
-r = assemble(conn, cfg, "human kept purpose", budget=2000)
-assert "sk-wwwwwwwwwwwwwwww5678" not in r["bundle"], "egress redaction failed on raw note"
+r_eg = assemble(conn, cfg, "human kept purpose", budget=2000)
+assert "sk-wwwwwwwwwwwwwwww5678" not in r_eg["bundle"], "egress redaction failed on raw note"
+
+# 26. every event chains to its predecessor; verify detects rewrites exactly
+from contextd.db import verify_chain
+
+r = verify_chain(conn)
+assert r["ok"] and r["checked"] > 50, r
+orig = conn.execute("SELECT content FROM events WHERE id = 1").fetchone()["content"]
+conn.execute("DROP TRIGGER events_no_update")
+conn.execute("UPDATE events SET content = 'rewritten history' WHERE id = 1")
+conn.commit()
+r = verify_chain(conn)
+assert not r["ok"] and r["first_bad"] == 1, "rewrite not detected"
+conn.execute("UPDATE events SET content = ? WHERE id = 1", (orig,))
+conn.executescript("CREATE TRIGGER events_no_update BEFORE UPDATE ON events "
+                   "BEGIN SELECT RAISE(ABORT, 'events are append-only'); END")
+assert verify_chain(conn)["ok"], "restoring original bytes should restore the chain"
+
+# 27. outcomes: judged recalls land in the append-only tally
+import argparse as _ap
+
+from contextd.cli import cmd_backup, cmd_outcome
+
+cmd_outcome(_ap.Namespace(egress_id=r_eg["egress_id"], verdict="hit", note="smoke"))
+last = json.loads(conn.execute(
+    "SELECT meta FROM events WHERE kind='outcome' ORDER BY id DESC LIMIT 1"
+).fetchone()["meta"])
+assert last == {"egress_id": r_eg["egress_id"], "verdict": "hit", "note": "smoke"}
+
+# 28. backup is a consistent WAL-safe snapshot
+bdir = Path(os.environ["CONTEXTD_HOME"]) / "bk"
+cmd_backup(_ap.Namespace(dest=str(bdir)))
+bk = list(bdir.glob("contextd-*.db"))
+assert len(bk) == 1
+bconn = sqlite3.connect(bk[0])
+n_live = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+assert bconn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == n_live
+assert bconn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 print("ALL SMOKE TESTS PASSED")
