@@ -1,15 +1,16 @@
 # contextd
 
 A personal context daemon: an **append-only life log** + **index** + **gate**,
-served to AI clients over **MCP**. One Python process, one SQLite file, no cloud.
+served to AI clients over **MCP**. One local daemon, a SQLite ledger plus a
+small crash-recovery witness, no cloud.
 
 The four kernel jobs, each in its smallest honest form:
 
 | Job | v0 implementation |
 |---|---|
-| **Log** | Append-only `events` table (SQLite WAL); immutability enforced by DB triggers, not discipline; content-addressed blob store for oversized files |
+| **Log** | Append-only `events` table (SQLite WAL); DB triggers enforce immutability; each event extends a hash chain whose external tip detects loss of the final row; oversized files use a content-addressed blob store |
 | **Index** | FTS5 over event content (embeddings are v0.1, only after lexical search fails you in a documented way) |
-| **Gate** | Every outbound bundle passes `assemble()`: never-leave path rules, secret redaction, a daily token budget — and the exact disclosed bundle is logged back into the archive as an `egress` event |
+| **Gate** | Every archive-derived outbound payload passes one disclosure primitive: never-leave rules, redaction, exact-byte token metering, and a pre-dispatch `egress` receipt committed atomically with the budget decision |
 | **Scheduler** | The budget counter, derived entirely from egress events in the log itself |
 
 Four ingesters, on purpose: watched text/markdown directories, deliberate
@@ -54,9 +55,21 @@ Tools exposed: `recall(query, budget, purpose, since, until)`, `search(query)`,
 `note(text)`, `timeline(since, until, source)`. Recall's window filters by
 occurrence time (visit time for browser history), not ingest time.
 
+An operator can restrict a server process at the registry itself:
+
+```bash
+ctx serve --tools recall search timeline
+```
+
+Disallowed tools are absent from MCP `tools/list`. This is a capability
+allowlist, not authentication: `CONTEXTD_CLIENT` is a self-asserted audit
+label. The committed OpenClaw configuration uses this server-side read-only
+surface (and retains its client filter only as defense in depth).
+
 Other clients (OpenClaw, Codex) connect the same way — see [clients/](clients/).
-Each sets `CONTEXTD_CLIENT`, so the audit trail names who took what. Every MCP read is redacted and logged as an
-egress event; `ctx audit` shows the full disclosure history.
+Each sets `CONTEXTD_CLIENT`, so the audit trail attributes who took what. Every
+MCP read is redacted and logged as an egress event; `ctx audit` shows the full
+disclosure history and any locally observable dispatch outcome.
 
 ## AI-session pipeline
 
@@ -71,6 +84,12 @@ is a client like any other, and its notes land with `actor=mcp` provenance.
 (`hooks/` shells out to your Claude subscription; the contextd package itself
 still opens no sockets.)
 
+The exact reconciler prompt is redacted, budgeted, and receipted before the
+subprocess starts. A separate linked `egress_outcome` event records success,
+nonzero exit, or timeout. Failed attempts do not mark an epoch reconciled, so
+they remain retryable; a successful run that writes zero notes is recorded as
+such rather than confused with dispatch failure.
+
 ```bash
 cp launchd/com.contextd.reconcile.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.contextd.reconcile.plist
@@ -80,10 +99,18 @@ launchctl load ~/Library/LaunchAgents/com.contextd.reconcile.plist
 
 - **Append-only, and tamper-evident**: `UPDATE`/`DELETE` on `events` abort at
   the SQLite level, and every event commits to the hash of the one before it.
-  `ctx verify` recomputes the chain, so rewrites, deletions, and insertions
-  are *detectable* — not impossible (an owner-level process can recompute the
-  whole chain; see Trust model). Receipts that cannot be silently rewritten.
-- **Self-auditing gate**: the archive records what the archive disclosed.
+  `chain-witness.json` records the external chain tip, so `ctx verify` detects
+  rewrites, middle or tail deletion, and insertion/reordering. Appends use a
+  durable recovery journal and the lock order witness → SQLite; after a crash,
+  recovery resolves the interrupted append to zero or exactly one committed
+  event. This remains tamper-evident, not tamper-proof (see Trust model).
+- **Self-auditing gate**: the archive records the exact redacted payload it
+  intended to disclose before returning it or starting a model subprocess.
+  The actual token charge and receipt append share one SQLite write
+  transaction, so concurrent readers cannot overspend the daily cap.
+  Subprocesses add a linked immutable outcome when their result is observable.
+  A receipt proves a local dispatch attempt, not delivery or receipt by a
+  remote model.
   Egress events are excluded from search, recall, and the timeline tool
   (audit disclosures with `ctx audit`, or MCP `timeline` with
   `source='gate'`), so disclosures never feed on themselves.
@@ -101,6 +128,12 @@ access can read the SQLite directly; `0700`/`0600` permissions keep other
 accounts out, not your own software. Hard isolation is deliberately not a v0
 goal. The promise is narrower and kept: everything a well-behaved client
 sees is redacted, budgeted, and on the record.
+
+The chain witness has the same owner and filesystem trust boundary as the
+database. It catches DB-only loss and makes interrupted appends recoverable;
+an owner-level process that rewrites both the database and witness can still
+forge a consistent history. Likewise, a server tool allowlist limits that
+process's MCP capabilities but does not prove who launched it.
 
 Models may write notes. Every note records its author in `meta.actor`
 (`human` from the CLI, `mcp` from model clients), so the archive always
@@ -127,8 +160,21 @@ If it beats grep and your own memory ≥30% of the time, v0.1 is earned — and
 the misses tell you *what* to build (vocabulary mismatch → embeddings earn
 their place; time confusion → better windows; and so on).
 
-Back up the archive with `ctx backup` (WAL-safe `VACUUM INTO`; copying the
-bare .db file while the daemon runs loses whatever is still in the WAL).
+Back up the archive as a complete versioned bundle:
+
+```bash
+ctx backup                         # writes ~/.contextd/backups/*.ctxbackup
+ctx backup /safe/location --keep 8
+ctx restore /safe/location/contextd-….ctxbackup /new/empty/contextd-home
+```
+
+The manifest-hashed bundle contains an online WAL-consistent database
+snapshot, config when present, chain witness/recovery state, and every blob
+referenced by that snapshot. Restore treats the bundle as hostile input:
+unexpected, missing, traversing, symlinked, or hash-mismatched payloads are
+refused; it stages and verifies SQLite, FTS, event chain, witness, and blobs
+before one final publish rename. It never merges into a non-empty destination.
+Retention removes complete `.ctxbackup` directories only, never legacy files.
 
 ## Synthesis-mode recall
 
@@ -183,10 +229,17 @@ stated limits.
 ## Tests
 
 ```bash
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/ruff check .
+.venv/bin/python -m pytest -q
 .venv/bin/python tests/smoke.py
 ```
 
-CI runs the same suite on every push. A weekly launchd job
+The pytest suite includes deterministic 32-way budget and append races, crash
+fault injection, a real stdio MCP capability test, model-call inventory, and
+corrupt-backup restore cases. It always installs a temporary `CONTEXTD_HOME`;
+the legacy smoke suite does the same. CI runs pytest, smoke, and Ruff on Python
+3.11 and 3.13. A weekly launchd job
 (`launchd/com.contextd.backup.plist`) runs `ctx backup --keep 8`.
 
 ## License

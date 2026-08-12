@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = ["mcp>=2"]
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.12"]
+
 [project.scripts]
 ctx = "contextd.cli:main"
 
@@ -15,3 +18,17 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["contextd"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+# Ruff's default correctness set, pinned so upgrades do not silently enable
+# stylistic/preview rules across the historical experiment corpus.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# This executable regression script must configure an isolated archive before
+# importing contextd, and deliberately imports later features beside each case.
+"tests/smoke.py" = ["E402"]

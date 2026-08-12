@@ -46,7 +46,7 @@ from contextd.experiment import (attribute_facts, build_report,  # noqa: E402
                                  get_experiment, p_floor, record_report,
                                  record_run, register_experiment,
                                  render_bundle, score_output, validate_rubric)
-from contextd.gate import check_budget, est_tokens, log_egress  # noqa: E402
+from contextd.gate import disclose, record_dispatch_outcome  # noqa: E402
 
 CLAUDE_BIN = os.environ.get("EXP_CLAUDE_BIN", "claude")
 RESULTS = Path(__file__).resolve().parent / "results"
@@ -116,8 +116,21 @@ def run_model(prompt: str, model: str, timeout: int = 600) -> dict:
            "--setting-sources", "", "--output-format", "json",
            "--session-id", sid, "--max-budget-usd", "0.50"]
     t0 = time.time()
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                       timeout=timeout, cwd=tmp, env=env)
+    try:
+        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                           timeout=timeout, cwd=tmp, env=env)
+    except subprocess.TimeoutExpired:
+        duration_ms = int((time.time() - t0) * 1000)
+        return {"text": "", "session_id": sid, "exit": None,
+                "duration_ms": duration_ms, "cost_usd": None, "usage": None,
+                "stderr": f"model timed out after {timeout} seconds",
+                "dispatch_status": "timeout"}
+    except BaseException as exc:
+        duration_ms = int((time.time() - t0) * 1000)
+        return {"text": "", "session_id": sid, "exit": None,
+                "duration_ms": duration_ms, "cost_usd": None, "usage": None,
+                "stderr": str(exc), "error_type": type(exc).__name__,
+                "dispatch_status": "failed"}
     duration_ms = int((time.time() - t0) * 1000)
     text, cost, usage = "", None, None
     if r.stdout.strip():
@@ -130,7 +143,8 @@ def run_model(prompt: str, model: str, timeout: int = 600) -> dict:
             text = r.stdout
     return {"text": text, "session_id": sid, "exit": r.returncode,
             "duration_ms": duration_ms, "cost_usd": cost, "usage": usage,
-            "stderr": r.stderr[-2000:] if r.returncode else ""}
+            "stderr": r.stderr[-2000:] if r.returncode else "",
+            "dispatch_status": "succeeded" if r.returncode == 0 else "failed"}
 
 
 def extract_citations(text: str, supplied: list) -> dict:
@@ -219,12 +233,15 @@ def resolve_arms(conn, cfg, task, sets):
                        "granular": GRANULAR_DISTILL_PROMPT,
                        "fused_ids": FUSED_IDS_DISTILL_PROMPT}.get(style, DISTILL_PROMPT)
             bundle = render_bundle(sets[src]["items"])
-            check_budget(conn, cfg, upcoming=est_tokens(bundle))
-            log_egress(conn, cfg, bundle, {
+            disclosure = disclose(conn, cfg, dprompt.format(bundle=bundle), {
                 "type": "experiment", "arm": "_distill", "task_id": task["task_id"],
                 "items": [it["id"] for it in sets[src]["items"]],
                 "client": "exp-runner"})
-            r = run_model(dprompt.format(bundle=bundle), task["model"])
+            r = run_model(disclosure["content"], task["model"])
+            record_dispatch_outcome(
+                conn, disclosure["egress_id"], r["dispatch_status"],
+                exit=r["exit"], duration_ms=r["duration_ms"],
+            )
             if r["exit"] != 0 or not r["text"].strip():
                 sys.exit(f"distillation failed: exit {r['exit']} {r['stderr']}")
             arm = {**{k: v for k, v in arm.items() if k != "replace_from"},
@@ -285,26 +302,52 @@ def cmd_run(args):
     outdir = RESULTS / f"{task['task_id']}-exp{exp_id}"
     (outdir / "transcripts").mkdir(parents=True, exist_ok=True)
 
-    # disclose sequentially (each bundle is a gated egress event, logged
-    # before anything reaches a model), then fan the model calls out
+    # Receipt and submit each job before preparing the next one. If a later
+    # disclosure is refused, already-receipted jobs have genuinely reached the
+    # local dispatch boundary and their outcomes are drained below.
     jobs = []
-    for arm in arms:
-        items = arm_items(arm, sets)  # replace/no_context arms need no set
-        for i in range(n):
-            d = disclose_for_run(conn, cfg, exp_id, arm, i, items,
-                                 client="exp-runner")
-            prompt = (CONTEXT_WRAPPER.format(prompt=task["prompt"], bundle=d["bundle"])
-                      if d["bundle"] else task["prompt"])
-            jobs.append({"arm": arm["name"], "run": i, "egress_id": d["egress_id"],
-                         "bundle_sha": d["sha"], "items": d["items"],
-                         "context_est_tokens": d["est_tokens"], "prompt": prompt})
-    print(f"disclosed {sum(1 for j in jobs if j['egress_id'])} bundles "
-          f"through the gate; running {len(jobs)} model calls "
-          f"(jobs={args.jobs})...")
-
+    submission_error = None
     done = 0
     with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(run_model, j["prompt"], task["model"]): j for j in jobs}
+        futs = {}
+        for arm in arms:
+            items = arm_items(arm, sets)  # replace/no_context arms need no set
+            for i in range(n):
+                disclosure = None
+                try:
+                    disclosure = disclose_for_run(
+                        conn, cfg, exp_id, arm, i, items,
+                        client="exp-runner",
+                        payload_factory=lambda bundle: CONTEXT_WRAPPER.format(
+                            prompt=task["prompt"], bundle=bundle),
+                    )
+                    prompt = (disclosure.get("payload")
+                              if disclosure["bundle"] else task["prompt"])
+                    job = {
+                        "arm": arm["name"], "run": i,
+                        "egress_id": disclosure["egress_id"],
+                        "bundle_sha": disclosure["sha"],
+                        "items": disclosure["items"],
+                        "context_est_tokens": disclosure["est_tokens"],
+                        "prompt": prompt,
+                    }
+                    future = ex.submit(run_model, prompt, task["model"])
+                except BaseException as exc:
+                    if disclosure is not None and disclosure.get("egress_id") is not None:
+                        record_dispatch_outcome(
+                            conn, disclosure["egress_id"], "failed",
+                            error_type=type(exc).__name__,
+                        )
+                    submission_error = exc
+                    break
+                jobs.append(job)
+                futs[future] = job
+            if submission_error is not None:
+                break
+        print(f"disclosed {sum(1 for j in jobs if j['egress_id'])} bundles "
+              f"through the gate; submitted {len(jobs)} model calls "
+              f"(jobs={args.jobs})...")
+
         for fut in as_completed(futs):
             j = futs[fut]
             try:
@@ -312,7 +355,12 @@ def cmd_run(args):
             except Exception as e:
                 r = {"text": "", "session_id": "?", "exit": -1,
                      "duration_ms": 0, "cost_usd": None, "usage": None,
-                     "stderr": str(e)}
+                     "stderr": str(e), "dispatch_status": "failed"}
+            if j["egress_id"] is not None:
+                record_dispatch_outcome(
+                    conn, j["egress_id"], r["dispatch_status"],
+                    exit=r["exit"], duration_ms=r["duration_ms"],
+                )
             sc = score_output(task["rubric"], r["text"])
             cites = extract_citations(r["text"], j["items"])
             record_run(conn, exp_id, {
@@ -335,6 +383,9 @@ def cmd_run(args):
             flag = "" if r["exit"] == 0 else f"  EXIT {r['exit']}"
             print(f"  [{done}/{len(jobs)}] {j['arm']}#{j['run']} "
                   f"score {sc['score']:.2f}  {r['duration_ms']}ms{flag}", flush=True)
+
+    if submission_error is not None:
+        raise submission_error
 
     report = build_report(conn, exp_id)
     rep_id = record_report(conn, exp_id, report)

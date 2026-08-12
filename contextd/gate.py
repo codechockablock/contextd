@@ -5,7 +5,7 @@ import fnmatch
 import os
 import re
 
-from .db import append_event, now_iso
+from .db import append_event, append_event_checked, now_iso
 from .domains import blocked, load_skip_domains
 from .search import search
 
@@ -51,13 +51,18 @@ def verify_anchors(text: str, allowed_ids) -> dict:
     distilled bundles must refuse on any invalid anchor."""
     allowed = set(allowed_ids)
     uniq = sorted({int(m) for m in ANCHOR_RX.findall(text)})
-    return {"ids": uniq,
-            "valid": [i for i in uniq if i in allowed],
-            "invalid": [i for i in uniq if i not in allowed]}
+    return {
+        "ids": uniq,
+        "valid": [i for i in uniq if i in allowed],
+        "invalid": [i for i in uniq if i not in allowed],
+    }
 
 
 def spent_today(conn) -> int:
-    day = now_iso()[:10]
+    return spent_on_day(conn, now_iso()[:10])
+
+
+def spent_on_day(conn, day: str) -> int:
     row = conn.execute(
         "SELECT COALESCE(SUM(json_extract(meta, '$.est_tokens')), 0) AS v "
         "FROM events WHERE kind = 'egress' AND ts LIKE ?",
@@ -66,22 +71,75 @@ def spent_today(conn) -> int:
     return int(row["v"] or 0)
 
 
-def check_budget(conn, cfg, upcoming: int = 0):
-    spent, daily = spent_today(conn), cfg["gate"]["daily_token_budget"]
-    if spent + upcoming >= daily:
-        raise GateError(f"daily egress budget exhausted "
-                        f"({spent} spent + {upcoming} requested / {daily} est. tokens)")
+def check_budget(conn, cfg, upcoming: int = 0, day: str | None = None):
+    spent = spent_on_day(conn, day) if day else spent_today(conn)
+    daily = cfg["gate"]["daily_token_budget"]
+    if spent + upcoming > daily:
+        raise GateError(
+            f"daily egress budget exhausted "
+            f"({spent} spent + {upcoming} requested / {daily} est. tokens)"
+        )
+
+
+def disclose(conn, cfg, payload: str, intent: dict) -> dict:
+    """Atomically redact, meter, and receipt exact archive-derived bytes.
+
+    The returned ``content`` is the only payload a caller may dispatch. The
+    budget callback runs under the same write lock as the chained egress
+    insert, so concurrent callers cannot all pass against a stale spend total.
+    Refusal appends nothing and exposes only numeric accounting in its error.
+    """
+    content = redact(cfg, payload)
+    tokens = est_tokens(content)
+    meta = {**intent, "est_tokens": tokens}
+
+    def within_budget(locked_conn, event_ts):
+        check_budget(locked_conn, cfg, upcoming=tokens, day=event_ts[:10])
+
+    egress_id = append_event_checked(
+        conn,
+        "gate",
+        "egress",
+        content=content,
+        meta=meta,
+        check=within_budget,
+    )
+    return {"content": content, "egress_id": egress_id, "est_tokens": tokens}
 
 
 def log_egress(conn, cfg, content: str, meta: dict) -> int:
-    # the choke point: nothing is logged, and so nothing leaves, unredacted
-    content = redact(cfg, content)
-    meta = {"est_tokens": est_tokens(content), **meta}
-    return append_event(conn, "gate", "egress", content=content, meta=meta)
+    """Compatibility wrapper; new production code calls :func:`disclose`."""
+    return disclose(conn, cfg, content, meta)["egress_id"]
 
 
-def select_items(conn, cfg, query: str, budget: int, since: str = "",
-                 until: str = "", ranked_ids=None) -> list:
+DISPATCH_STATUSES = frozenset({"succeeded", "failed", "timeout"})
+
+
+def record_dispatch_outcome(conn, egress_id: int, status: str, **details) -> int:
+    """Append an immutable result linked to a pre-dispatch egress receipt."""
+    if status not in DISPATCH_STATUSES:
+        raise ValueError(f"invalid dispatch status: {status}")
+    if not conn.execute(
+        "SELECT 1 FROM events WHERE id = ? AND kind = 'egress'", (egress_id,)
+    ).fetchone():
+        raise ValueError(f"no egress event #{egress_id}")
+    return append_event(
+        conn,
+        "gate",
+        "egress_outcome",
+        meta={**details, "egress_id": egress_id, "status": status},
+    )
+
+
+def select_items(
+    conn,
+    cfg,
+    query: str,
+    budget: int,
+    since: str = "",
+    until: str = "",
+    ranked_ids=None,
+) -> list:
     """The one selection walk behind every recall: ranked search hits, filtered
     by never_leave, deduped by uri, redacted, greedily packed to budget. Each
     item is returned fully rendered so a caller (or an experiment) holds the
@@ -110,7 +168,8 @@ def select_items(conn, cfg, query: str, budget: int, since: str = "",
             text = text.replace(ev["uri"], "").strip()
         text = redact(cfg, text)
         header = redact(
-            cfg, f"--- [{ev['id']}] {ev['ts']} {ev['source']}/{ev['kind']} {ev['uri'] or ''} ---"
+            cfg,
+            f"--- [{ev['id']}] {ev['ts']} {ev['source']}/{ev['kind']} {ev['uri'] or ''} ---",
         )
         cost = est_tokens(header + text)
         truncated = False
@@ -121,27 +180,57 @@ def select_items(conn, cfg, query: str, budget: int, since: str = "",
             text = text[:room] + "\n[truncated]"
             cost = est_tokens(header + text)
             truncated = True
-        items.append({"id": ev["id"], "ts": ev["ts"], "source": ev["source"],
-                      "kind": ev["kind"], "uri": ev["uri"], "meta": ev["meta"],
-                      "header": header, "text": text, "est_tokens": cost})
+        items.append(
+            {
+                "id": ev["id"],
+                "ts": ev["ts"],
+                "source": ev["source"],
+                "kind": ev["kind"],
+                "uri": ev["uri"],
+                "meta": ev["meta"],
+                "header": header,
+                "text": text,
+                "est_tokens": cost,
+            }
+        )
         used += cost
         if truncated or used >= budget:
             break
     return items
 
 
-def assemble(conn, cfg, query: str, budget: int = 8000, purpose: str = "",
-             since: str = "", until: str = "", client: str = "cli") -> dict:
+def assemble(
+    conn,
+    cfg,
+    query: str,
+    budget: int = 8000,
+    purpose: str = "",
+    since: str = "",
+    until: str = "",
+    client: str = "cli",
+) -> dict:
     budget = min(budget, cfg["gate"]["max_recall_budget"])
-    check_budget(conn, cfg, upcoming=budget)
     items = select_items(conn, cfg, query, budget, since, until)
     ids = [it["id"] for it in items]
-    used = sum(it["est_tokens"] for it in items)
-    bundle = "\n\n".join(
-        it["header"] + "\n" + it["text"] for it in items) if items else "(no matching events)"
-    meta = {"type": "recall", "query": query, "purpose": purpose,
-            "budget": budget, "items": ids, "client": client}
+    bundle = (
+        "\n\n".join(it["header"] + "\n" + it["text"] for it in items)
+        if items
+        else "(no matching events)"
+    )
+    meta = {
+        "type": "recall",
+        "query": query,
+        "purpose": purpose,
+        "budget": budget,
+        "items": ids,
+        "client": client,
+    }
     if since or until:
         meta["window"] = [since, until]
-    egress_id = log_egress(conn, cfg, bundle, meta)
-    return {"bundle": bundle, "items": ids, "est_tokens": used, "egress_id": egress_id}
+    disclosure = disclose(conn, cfg, bundle, meta)
+    return {
+        "bundle": disclosure["content"],
+        "items": ids,
+        "est_tokens": disclosure["est_tokens"],
+        "egress_id": disclosure["egress_id"],
+    }

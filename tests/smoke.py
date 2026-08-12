@@ -347,20 +347,24 @@ last = json.loads(conn.execute(
 ).fetchone()["meta"])
 assert last == {"egress_id": r_eg["egress_id"], "verdict": "hit", "note": "smoke"}
 
-# 28. backup is a consistent WAL-safe snapshot, and --keep prunes old ones
+# 28. backup is a complete WAL-safe bundle, and retention prunes bundles only
 bdir = Path(os.environ["CONTEXTD_HOME"]) / "bk"
 cmd_backup(_ap.Namespace(dest=str(bdir), keep=0))
-bk = list(bdir.glob("contextd-*.db"))
+bk = list(bdir.glob("contextd-*.ctxbackup"))
 assert len(bk) == 1
-bconn = sqlite3.connect(bk[0])
+bconn = sqlite3.connect(bk[0] / "contextd.db")
 n_live = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 assert bconn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == n_live
 assert bconn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+bconn.close()
 (bdir / "contextd-20200101-000000.db").write_bytes(b"old")
 (bdir / "contextd-20200102-000000.db").write_bytes(b"old")
 cmd_backup(_ap.Namespace(dest=str(bdir), keep=2))
-left = sorted(p.name for p in bdir.glob("contextd-*.db"))
-assert len(left) == 2 and "contextd-20200101-000000.db" not in left, left
+cmd_backup(_ap.Namespace(dest=str(bdir), keep=2))
+left = sorted(p.name for p in bdir.glob("contextd-*.ctxbackup"))
+assert len(left) == 2, left
+assert (bdir / "contextd-20200101-000000.db").read_bytes() == b"old"
+assert (bdir / "contextd-20200102-000000.db").read_bytes() == b"old"
 
 # 29. experiments: freeze is exactly what recall would disclose
 from contextd.experiment import (apply_arm, attribute_facts, build_report,
@@ -591,7 +595,7 @@ assert any("41050" not in c and str(human_id) in c for c in rep2["origin_caveats
     rep2["origin_caveats"]
 irr_cmp = next(c for c in rep2["comparisons"] if c["arm"] == "irrelevant")
 assert irr_cmp["estimated_contribution"] == 1.0
-assert "smoke-ladder" in format_report(rep2) or True
+assert "smoke-ladder" in format_report(rep2), "task id missing from report"
 assert "ctx ~400tok" in format_report(rep2), "efficiency missing from format"
 assert verify_chain(conn)["ok"]
 
@@ -678,8 +682,8 @@ assert got == flipped, f"ranked_ids not respected: {got}"
 got = [it["id"] for it in select_items(conn, cfg, "ferret parser", 4000,
                                        ranked_ids=[flipped[0], 999999])]
 assert got == [flipped[0]], "id outside the match set was not ignored"
-assert all(it["id"] for it in select_items(conn, cfg, "wombat", 4000,
-                                           ranked_ids=[])) or True
+assert select_items(conn, cfg, "wombat", 4000, ranked_ids=[]) == [], \
+    "an empty external ranking must select nothing"
 assert "wombat" not in "".join(
     it["text"] for it in select_items(conn, cfg, "wombat", 4000)), \
     "never_leave must hold regardless of ranking"

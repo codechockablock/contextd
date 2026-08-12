@@ -35,7 +35,7 @@ import random
 from itertools import combinations
 
 from .db import append_event
-from .gate import check_budget, est_tokens, log_egress, select_items
+from .gate import disclose, est_tokens, select_items
 from .search import search
 
 PROVENANCE_CLASSES = ("human", "model", "activity", "other")
@@ -72,8 +72,8 @@ def epistemic_type(source, kind, meta: dict) -> str:
         return "human_assertion" if meta.get("actor") == "human" else "model_inference"
     if source == "claude_code" and kind == "message":
         return "human_assertion" if meta.get("role") == "user" else "model_inference"
-    if kind in ("epoch", "reconcile", "egress", "experiment", "exp_run",
-                "exp_report", "outcome"):
+    if kind in ("epoch", "reconcile", "egress", "egress_outcome",
+                "experiment", "exp_run", "exp_report", "outcome"):
         return "system"
     return "unknown"
 
@@ -151,7 +151,8 @@ def render_bundle(items: list) -> str:
 
 
 def disclose_for_run(conn, cfg, exp_id: int, arm: dict, run_idx: int,
-                     frozen_items: list, client: str = "experiment") -> dict:
+                     frozen_items: list, client: str = "experiment",
+                     payload_factory=None) -> dict:
     """Render an arm's bundle and log it through the real gate before anything
     reaches a model. Returns {bundle, egress_id, items, sha, est_tokens}; a
     no-context arm discloses nothing and logs nothing. Frozen shas are
@@ -164,13 +165,16 @@ def disclose_for_run(conn, cfg, exp_id: int, arm: dict, run_idx: int,
         if _sha(it["header"] + "\n" + it["text"]) != it["sha"]:
             raise ValueError(f"frozen item {it['id']} drifted since registration")
     bundle = render_bundle(kept)
-    check_budget(conn, cfg, upcoming=est_tokens(bundle))
-    egress_id = log_egress(conn, cfg, bundle, {
+    payload = payload_factory(bundle) if payload_factory is not None else bundle
+    disclosure = disclose(conn, cfg, payload, {
         "type": "experiment", "exp_id": exp_id, "arm": arm["name"],
         "run": run_idx, "items": [it["id"] for it in kept], "client": client})
-    return {"bundle": bundle, "egress_id": egress_id,
-            "items": [it["id"] for it in kept], "sha": _sha(bundle),
-            "est_tokens": est_tokens(bundle)}
+    return {"bundle": bundle, "payload": disclosure["content"],
+            "egress_id": disclosure["egress_id"],
+            "items": [it["id"] for it in kept],
+            "sha": _sha(bundle), "payload_sha": _sha(disclosure["content"]),
+            "est_tokens": est_tokens(bundle),
+            "dispatch_est_tokens": disclosure["est_tokens"]}
 
 
 # --- scoring: deterministic, preregistered, self-testing ---------------------
@@ -678,9 +682,9 @@ def format_report(report: dict) -> str:
     if report.get("compression_loss"):
         cl = report["compression_loss"]
         out.append("")
-        out.append(f"  distillation kept: "
+        out.append("  distillation kept: "
                    + (", ".join(e['fact'] for e in cl['kept_in_distillation']) or "nothing"))
-        out.append(f"  distillation lost: "
+        out.append("  distillation lost: "
                    + (", ".join(f"{e['fact']} [{e['loss_class']}]"
                                 for e in cl['lost_in_distillation']) or "nothing"))
     if report.get("origin_caveats"):

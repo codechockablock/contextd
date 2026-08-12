@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 
 from . import __version__, home, load_config
-from .db import append_event, connect, verify_chain
+from .backup import BackupError, create_backup, restore_backup
+from .db import ChainStateError, append_event, connect, verify_chain
 from .gate import GateError, assemble, spent_today
 from .ingest import ingest_note, run_all
 from .search import search, timeline
@@ -127,11 +128,19 @@ def cmd_timeline(args):
 
 
 def cmd_audit(args):
-    rows = timeline(connect(), kind="egress", limit=args.limit)
+    conn = connect()
+    rows = timeline(conn, kind="egress", limit=args.limit)
     for r in rows:
         meta = json.loads(r["meta"] or "{}")
+        outcome = conn.execute(
+            "SELECT meta FROM events WHERE kind='egress_outcome' "
+            "AND json_extract(meta,'$.egress_id')=? ORDER BY id DESC LIMIT 1",
+            (r["id"],),
+        ).fetchone()
+        dispatch = json.loads(outcome["meta"])["status"] if outcome else "attempted"
         print(f"[{r['id']}] {r['ts']} type={meta.get('type')} "
               f"client={meta.get('client', 'cli')} "
+              f"dispatch={dispatch} "
               f"query={meta.get('query')!r} purpose={meta.get('purpose')!r} "
               f"~{meta.get('est_tokens')} tokens, items={meta.get('items')}")
 
@@ -223,31 +232,42 @@ def cmd_exp(args):
 
 
 def cmd_backup(args):
-    conn = connect()
     dest_dir = Path(args.dest).expanduser() if args.dest else home() / "backups"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(dest_dir, 0o700)
-    stamp, i = time.strftime("%Y%m%d-%H%M%S"), 0
-    dest = dest_dir / f"contextd-{stamp}.db"
-    while dest.exists():
-        i += 1
-        dest = dest_dir / f"contextd-{stamp}-{i}.db"
-    conn.execute("VACUUM INTO ?", (str(dest),))  # WAL-safe consistent snapshot
-    os.chmod(dest, 0o600)
-    n = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    print(f"backed up {n} events -> {dest} ({dest.stat().st_size // 1024} KB)")
-    if args.keep:
-        old = sorted(dest_dir.glob("contextd-*.db"))[:-args.keep]
-        for f in old:
-            f.unlink()
-        if old:
-            print(f"pruned {len(old)} old backup(s), keeping newest {args.keep}")
-    if any((home() / "store").rglob("*")):
-        print("note: blob store not included — copy ~/.contextd/store separately")
+    try:
+        result = create_backup(
+            connect(), home(), dest_dir, keep=args.keep
+        )
+    except BackupError as exc:
+        sys.exit(f"backup refused: {exc}")
+    print(
+        f"backed up {result['events']} events and {result['blobs']} blobs -> "
+        f"{result['bundle']} (manifest {result['manifest_sha256'][:12]})"
+    )
+    if result["pruned"]:
+        print(
+            f"pruned {len(result['pruned'])} old bundle(s), "
+            f"keeping newest {args.keep}"
+        )
+
+
+def cmd_restore(args):
+    try:
+        result = restore_backup(
+            Path(args.bundle).expanduser(), Path(args.dest).expanduser()
+        )
+    except BackupError as exc:
+        sys.exit(f"restore refused: {exc}")
+    print(
+        f"restored {result['events']} events and {result['blobs']} blobs -> "
+        f"{result['destination']}"
+    )
 
 
 def cmd_verify(args):
-    r = verify_chain(connect())
+    try:
+        r = verify_chain(connect())
+    except ChainStateError as exc:
+        sys.exit(f"CHAIN BROKEN: {exc}")
     if r["ok"]:
         extra = (f", {r['ts_warnings']} timestamp inversions (concurrent writers)"
                  if r["ts_warnings"] else "")
@@ -259,7 +279,7 @@ def cmd_verify(args):
 
 def cmd_serve(args):
     from .mcp_server import main as serve_main
-    serve_main()
+    serve_main(allowed_tools=args.tools)
 
 
 def main():
@@ -298,18 +318,28 @@ def main():
     sp = sub.add_parser("exp", help="context ablation experiments: list | show | report")
     sp.add_argument("action", choices=["list", "show", "report"])
     sp.add_argument("exp_id", nargs="?", type=int)
-    sp = sub.add_parser("backup", help="WAL-safe snapshot via VACUUM INTO")
+    sp = sub.add_parser("backup", help="create a complete, manifest-hashed bundle")
     sp.add_argument("dest", nargs="?")
     sp.add_argument("--keep", type=int, default=0,
-                    help="after backing up, prune to the newest N snapshots")
+                    help="after backing up, prune to the newest N bundles")
+    sp = sub.add_parser("restore", help="verify and restore a backup into an empty home")
+    sp.add_argument("bundle", help="backup bundle directory")
+    sp.add_argument("dest", help="new or empty destination directory")
     sub.add_parser("verify", help="recompute the event hash chain; detect rewrites")
-    sub.add_parser("serve", help="run the MCP server (stdio)")
+    sp = sub.add_parser("serve", help="run the MCP server (stdio)")
+    sp.add_argument(
+        "--tools",
+        nargs="+",
+        choices=["recall", "search", "note", "timeline"],
+        help="server-enforced MCP tool allowlist (default: all tools)",
+    )
 
     args = p.parse_args()
     {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
      "search": cmd_search, "recall": cmd_recall, "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
-     "exp": cmd_exp, "backup": cmd_backup, "verify": cmd_verify,
+     "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
+     "verify": cmd_verify,
      "serve": cmd_serve}[args.cmd](args)
 
 

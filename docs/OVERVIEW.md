@@ -1,7 +1,8 @@
 # contextd — Executive Summary
 
 *A personal context daemon: an append-only life log, index, and disclosure gate,
-served to AI clients over MCP. One Python process, one SQLite file, no cloud.*
+served to AI clients over MCP. One local daemon, a SQLite ledger plus a small
+chain-tip witness, no cloud.*
 
 Written 2026-08-11, at the end of the build.
 
@@ -28,7 +29,7 @@ Four kernel jobs, each in its smallest honest form:
 |---|---|
 | **Log** | Append-only `events` table; immutability enforced by SQLite triggers, not discipline. `UPDATE`/`DELETE` abort at the database level. |
 | **Index** | FTS5 lexical search over event content. Embeddings are deferred until lexical search fails in a documented way. |
-| **Gate** | Every model-bound bundle passes `assemble()`: never-leave rules, secret redaction, a daily token budget — and the exact disclosed bundle is logged back into the archive as an `egress` event. |
+| **Gate** | Every archive-derived model payload passes one disclosure primitive: never-leave rules, redaction, exact-byte metering, and an atomic pre-dispatch `egress` receipt. |
 | **Scheduler** | The budget counter, derived entirely from egress events in the log itself. |
 
 Four ingesters feed it: watched text directories, deliberate notes, a read-only
@@ -112,12 +113,38 @@ first, and if it beats grep and memory ≥30% of the time, v0.1 is earned. That
 clock started 2026-08-11. Early signal is promising — a June-reading question
 won twice, the second time at a quarter the cost.
 
-Honestly open, in earned order: backup tooling (the archive has none, and its
-WAL holds events absent from the main file); recall-outcome traces (the 30%
-evaluation has no denominator without them); populating `watch_dirs` (the
-original file ingester has still never ingested a real file); and Safari Full
-Disk Access. Waiting for their failure: the evidence-vs-instruction bit,
-occurrence/observation schema split, supersession relations, and local vectors.
+## Reliability hardening — 2026-08-12
+
+The original summary above describes the first build. The following gaps are
+now closed in the current source and supersede the old “honestly open” list:
+
+- Daily egress accounting and the exact redacted receipt now commit in one
+  SQLite write transaction. Deterministic 32-client tests show concurrent reads
+  cannot exceed the cap.
+- Archive-bearing harness paths (synthesis, reconciliation, and experiment
+  arms) receipt their exact subprocess input before dispatch and append a
+  linked success/failure/timeout outcome. No-context experiment controls carry
+  no archive bytes. A call-site inventory makes new unreviewed model
+  subprocesses fail CI.
+- The event chain has a local external tip plus recovery journal. This detects
+  DB-tail deletion and resolves interrupted appends to zero or one event. It is
+  still an owner-controlled audit witness, not remote anchoring or tamper-proof
+  security.
+- `ctx serve --tools …` builds only the allowed MCP registry. OpenClaw's
+  read-only surface is server-enforced; `CONTEXTD_CLIENT` remains self-asserted
+  attribution, not authentication.
+- `ctx backup` creates a complete manifest-hashed bundle containing the
+  WAL-consistent database, config when present, witness/recovery state, and
+  referenced blobs;
+  `ctx restore` verifies hostile input in a staging directory before publishing
+  to an empty destination.
+- Recall outcomes, pytest/Ruff CI, and weekly whole-bundle backups now exist.
+
+Still operational rather than code-complete: populate `watch_dirs`, grant
+Safari Full Disk Access if desired, and continue the month-long recall outcome
+measurement. Still deliberately deferred until evidence earns them:
+embeddings, sync, encryption at rest, supersession relations, and hard OS
+isolation.
 
 ## One line
 

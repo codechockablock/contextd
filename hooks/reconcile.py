@@ -18,7 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from contextd import home, load_config  # noqa: E402
 from contextd.db import append_event, connect  # noqa: E402
+from contextd.gate import disclose, record_dispatch_outcome  # noqa: E402
 
 CLAUDE_BIN = os.environ.get("RECONCILE_CLAUDE_BIN", "claude")
 MODEL = os.environ.get("RECONCILE_MODEL", "haiku")
@@ -74,18 +76,47 @@ def reconcile(conn, epoch_id, meta) -> dict:
         return {"skipped": "self_documented", "messages": len(msgs)}
     dialogue = "\n\n".join(
         f"{m['role']}: {m['content']}" for m in msgs)[:MAX_DIALOGUE_CHARS]
+    payload = f"{PROMPT}\n\n{dialogue}"
+    disclosure = disclose(conn, load_config(), payload, {
+        "type": "reconcile_dialogue", "epoch_id": epoch_id,
+        "model": MODEL, "items": [m["id"] for m in msgs],
+        "client": "reconciler",
+    })
     before = conn.execute("SELECT COUNT(*) FROM events WHERE kind='note'").fetchone()[0]
-    r = subprocess.run(
-        [CLAUDE_BIN, "-p", "--model", MODEL,
-         "--allowedTools", "mcp__contextd__note"],
-        input=f"{PROMPT}\n\n{dialogue}",
-        capture_output=True, text=True, timeout=600)
+    try:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--model", MODEL,
+             "--allowedTools", "mcp__contextd__note"],
+            input=disclosure["content"],
+            capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        record_dispatch_outcome(
+            conn, disclosure["egress_id"], "timeout", timeout_seconds=600,
+        )
+        raise
+    except BaseException as exc:
+        record_dispatch_outcome(
+            conn, disclosure["egress_id"], "failed",
+            error_type=type(exc).__name__,
+        )
+        raise
+    if r.returncode != 0:
+        record_dispatch_outcome(
+            conn, disclosure["egress_id"], "failed", exit=r.returncode,
+        )
+        raise RuntimeError(f"reconciler model failed with exit {r.returncode}")
+    record_dispatch_outcome(
+        conn, disclosure["egress_id"], "succeeded", exit=r.returncode,
+    )
     after = conn.execute("SELECT COUNT(*) FROM events WHERE kind='note'").fetchone()[0]
-    return {"messages": len(msgs), "notes": after - before, "exit": r.returncode}
+    return {"messages": len(msgs), "notes": after - before, "exit": r.returncode,
+            "egress_id": disclosure["egress_id"]}
 
 
 def main():
-    lock = open(Path.home() / ".contextd" / "reconcile.lock", "w")
+    archive = home()
+    archive.mkdir(parents=True, exist_ok=True)
+    lock = open(archive / "reconcile.lock", "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:

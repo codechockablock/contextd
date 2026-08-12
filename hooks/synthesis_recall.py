@@ -34,8 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from contextd import load_config  # noqa: E402
 from contextd.db import connect  # noqa: E402
-from contextd.gate import (GateError, check_budget, est_tokens,  # noqa: E402
-                           log_egress, select_items, verify_anchors)
+from contextd.gate import (GateError, disclose, record_dispatch_outcome,  # noqa: E402
+                           select_items, verify_anchors)
 
 CLAUDE_BIN = os.environ.get("SYNTH_CLAUDE_BIN", "claude")
 
@@ -52,7 +52,13 @@ exactly as given (e.g. [37820]). Reply with only the summary.
 {bundle}"""
 
 
-def distill(bundle: str, model: str, timeout: int = 300):
+class DistillError(RuntimeError):
+    def __init__(self, message: str, exit_code: int | None = None):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def distill(payload: str, model: str, timeout: int = 300):
     env = os.environ.copy()
     env["MCP_CONNECTION_NONBLOCKING"] = "false"
     env["ENABLE_TOOL_SEARCH"] = "off"
@@ -61,15 +67,18 @@ def distill(bundle: str, model: str, timeout: int = 300):
          "--strict-mcp-config", "--no-session-persistence",
          "--setting-sources", "", "--output-format", "json",
          "--max-budget-usd", "0.50"],
-        input=DISTILL_PROMPT.format(bundle=bundle), capture_output=True,
+        input=payload, capture_output=True,
         text=True, timeout=timeout, cwd=tempfile.mkdtemp(prefix="ctx-synth-"),
         env=env)
     if r.returncode != 0:
-        sys.exit(f"distiller failed (exit {r.returncode}): {r.stderr[-500:]}")
+        raise DistillError(
+            f"distiller failed (exit {r.returncode}): {r.stderr[-500:]}",
+            exit_code=r.returncode,
+        )
     try:
         out = json.loads(r.stdout)
     except json.JSONDecodeError:
-        sys.exit("distiller returned unparseable output")
+        raise DistillError("distiller returned unparseable output", exit_code=0)
     return (out.get("result") or "").strip(), out.get("total_cost_usd")
 
 
@@ -96,20 +105,38 @@ def main():
     ids = [it["id"] for it in items]
     bundle = "\n\n".join(it["header"] + "\n" + it["text"] for it in items)
 
-    # disclosure 1: the raw bundle goes to the distiller model — gated, logged
-    try:
-        check_budget(conn, cfg, upcoming=est_tokens(bundle))
-    except GateError as e:
-        sys.exit(f"gate refused: {e}")
-    src_egress = log_egress(conn, cfg, bundle, {
-        "type": "recall", "mode": "synthesis_source", "query": query,
-        "purpose": args.purpose, "items": ids, "distiller": args.model,
-        "client": "synthesis-recall"})
-
     text = cost = None
     anchors = None
+    src_egress = None
     for attempt in range(args.retries + 1):
-        text, cost = distill(bundle, args.model)
+        try:
+            source = disclose(conn, cfg, DISTILL_PROMPT.format(bundle=bundle), {
+                "type": "recall", "mode": "synthesis_source", "query": query,
+                "purpose": args.purpose, "items": ids, "distiller": args.model,
+                "attempt": attempt, "client": "synthesis-recall",
+            })
+        except GateError as e:
+            sys.exit(f"gate refused: {e}")
+        src_egress = source["egress_id"]
+        try:
+            text, cost = distill(source["content"], args.model)
+        except subprocess.TimeoutExpired:
+            record_dispatch_outcome(
+                conn, src_egress, "timeout", timeout_seconds=300,
+            )
+            sys.exit("distiller timed out after 300 seconds")
+        except DistillError as e:
+            record_dispatch_outcome(
+                conn, src_egress, "failed", exit=e.exit_code,
+                error_type=type(e).__name__,
+            )
+            sys.exit(str(e))
+        except BaseException as e:
+            record_dispatch_outcome(
+                conn, src_egress, "failed", error_type=type(e).__name__,
+            )
+            raise
+        record_dispatch_outcome(conn, src_egress, "succeeded", exit=0)
         anchors = verify_anchors(text, ids)
         if not anchors["invalid"] and len(anchors["valid"]) >= 2:
             break
@@ -120,21 +147,19 @@ def main():
                  f"valid={anchors['valid']}); nothing served — "
                  f"use plain `ctx recall` for this query")
 
-    # disclosure 2: the verified distillate actually served
-    try:
-        check_budget(conn, cfg, upcoming=est_tokens(text))
-    except GateError as e:
-        sys.exit(f"gate refused: {e}")
     meta = {"type": "recall", "mode": "synthesis", "query": query,
             "purpose": args.purpose, "items": ids,
             "anchors": anchors["valid"], "distiller": args.model,
             "source_egress": src_egress, "client": "synthesis-recall"}
     if cost is not None:
         meta["distill_cost_usd"] = cost
-    egress = log_egress(conn, cfg, text, meta)
-    print(text)
-    print(f"\n[synthesis egress #{egress}: {len(ids)} events distilled to "
-          f"~{est_tokens(text)} tokens, anchors {anchors['valid']}; "
+    try:
+        served = disclose(conn, cfg, text, meta)
+    except GateError as e:
+        sys.exit(f"gate refused: {e}")
+    print(served["content"])
+    print(f"\n[synthesis egress #{served['egress_id']}: {len(ids)} events distilled to "
+          f"~{served['est_tokens']} tokens, anchors {anchors['valid']}; "
           f"raw-to-distiller egress #{src_egress} — both logged]",
           file=sys.stderr)
 
