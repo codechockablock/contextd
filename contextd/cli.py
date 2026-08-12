@@ -226,6 +226,10 @@ def cmd_exp(args):
             print(f"  preregistered expectation: {m['expectation']}")
         return
     if args.action == "report":
+        if get_experiment(conn, args.exp_id).get("family") == "provenance_trial":
+            sys.exit(f"experiment #{args.exp_id} is a provenance trial; "
+                     "rebuild its report with: experiments/provenance/"
+                     f"model_trials.py report {args.exp_id}")
         print(format_report(build_report(conn, args.exp_id)))
         return
     sys.exit(f"unknown action {args.action!r}")

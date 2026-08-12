@@ -107,6 +107,21 @@ Copy a spec in `tasks/`. The discipline that matters:
   changes: a task the model aces cold must come back "within noise", or the
   harness itself is manufacturing effects.
 
+## provenance/ — adversarial laundering suite and model trials
+
+`provenance/cases.py` + `provenance/adversarial.py`: nineteen deterministic
+laundering cases (ground truth by construction, each in its own throwaway
+synthetic archive) evaluated under three crossed verification layers; the
+catch matrix is pinned in `tests/test_adversarial_matrix.py`, and the
+`semantic` family passing every layer is the measured boundary, documented in
+[docs/PROVENANCE.md](../docs/PROVENANCE.md).
+
+`provenance/model_trials.py`: preregistered model trials — reconciler anchor
+compliance (p1), injection persistence under provenance-visible serving (p2),
+recursive compression closure (p3). Synthetic archives only; the live ledger
+receives content-NULL preregistrations, runs, and reports, reconstructable
+with `model_trials.py report <exp_id>`.
+
 ## What this is not
 
 Not causal inference over the world — causal attribution over *this frozen

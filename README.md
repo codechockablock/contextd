@@ -140,6 +140,18 @@ Models may write notes. Every note records its author in `meta.actor`
 distinguishes what you said from what a model said. No approval workflow
 until a real incident earns one.
 
+Model-derived events additionally carry **derivation lineage**. The
+reconciler binds its notes to the exact disclosed dialogue
+(`CONTEXTD_DERIVATION_SOURCE`); the `note` tool kernel-verifies proposed
+anchors against that disclosure and refuses citations of undisclosed events.
+`ctx why <event_id>` walks the full derivation closure — claim → source
+disclosure → cited events → recursively → leaf evidence — and reports what
+is mechanically verified (anchors, disclosure membership, quote spans, hash
+integrity, chain shape) as distinct from what remains a semantic judgment
+(whether a claim's wording is actually supported by its evidence — which the
+kernel never asserts). The exact boundary between the two is measured and
+pinned by an adversarial suite; see [docs/PROVENANCE.md](docs/PROVENANCE.md).
+
 ## Deliberately not in v0
 
 No sync, no multi-device, no encryption-at-rest, no plugin system, no UI, no

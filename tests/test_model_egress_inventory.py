@@ -20,11 +20,17 @@ EXPECTED_SUBPROCESS_CALLS = {
     ("experiments/runner.py", "cmd_run", "run"): "model CLI version only",
     ("hooks/reconcile.py", "reconcile", "run"): "model",
     ("hooks/synthesis_recall.py", "distill", "run"): "model",
+    ("experiments/provenance/model_trials.py", "dispatch_note_writer", "run"):
+        "model (note-writing trials; archive bytes pass the synthetic "
+        "archive's gate first)",
+    ("experiments/provenance/model_trials.py", "cmd_probe", "run"):
+        "model (read-only MCP wiring probe; search tool only)",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
     ("hooks/reconcile.py", "reconcile"),
     ("hooks/synthesis_recall.py", "distill"),
+    ("experiments/provenance/model_trials.py", "dispatch_note_writer"),
 }
 
 
