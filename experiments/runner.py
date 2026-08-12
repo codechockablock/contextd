@@ -79,6 +79,17 @@ entries at most 320 words. Reply with only the entries, one per line.
 
 {bundle}"""
 
+# fused narrative (no item boundaries) but with citable event ids inline —
+# decomposes whether granularity's unlock is plurality or citability
+FUSED_IDS_DISTILL_PROMPT = """Distill the following context items into ONE
+flowing summary of at most 150 words. Write continuous prose — no lists, no
+per-item entries, no headers. Prioritize causal rationale, rejected
+alternatives, negative results, and recurring principles. Immediately after
+each claim, attach the bracketed event id of the item that supports it,
+exactly as given (e.g. [37820]). Reply with only the summary.
+
+{bundle}"""
+
 # same word budget, opposite objective: keep the connective tissue that
 # default summarization treats as noise
 CONNECTIVE_DISTILL_PROMPT = """Distill the following context items into one
@@ -203,7 +214,8 @@ def resolve_arms(conn, cfg, task, sets):
                 src = next(iter(sets))
             style = rf.get("style", "naive") if isinstance(rf, dict) else "naive"
             dprompt = {"connective": CONNECTIVE_DISTILL_PROMPT,
-                       "granular": GRANULAR_DISTILL_PROMPT}.get(style, DISTILL_PROMPT)
+                       "granular": GRANULAR_DISTILL_PROMPT,
+                       "fused_ids": FUSED_IDS_DISTILL_PROMPT}.get(style, DISTILL_PROMPT)
             bundle = render_bundle(sets[src]["items"])
             check_budget(conn, cfg, upcoming=est_tokens(bundle))
             log_egress(conn, cfg, bundle, {
