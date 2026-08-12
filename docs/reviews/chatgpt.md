@@ -10,6 +10,7 @@ What do you think about this repo
 
 
 
+
 Worked for 1m 7s
 
 I like it. More specifically, I think there’s a real idea here, rather than “yet another personal-memory RAG repo.”
@@ -269,7 +270,6 @@ Business InsiderarXiv
 
 
 
-
 claude-joseph-conversation-2026-08-11.md
 
 I have concerns about Anthropics watermarking. 
@@ -404,7 +404,6 @@ AI-assisted authorship is becoming richer and more collaborative at exactly the 
 If contextd can preserve the richer history without sending that history to another custodian, that's where I think this repo suddenly becomes much more than the memory daemon you built last night.
 
 Anthropic
-
 
 
 
