@@ -277,6 +277,11 @@ def cmd_verify(args):
                  f"({r['checked']} events verified before it)")
 
 
+def cmd_why(args):
+    from .provenance import closure, format_closure
+    print(format_closure(closure(connect(), args.event_id)))
+
+
 def cmd_serve(args):
     from .mcp_server import main as serve_main
     serve_main(allowed_tools=args.tools)
@@ -326,6 +331,9 @@ def main():
     sp.add_argument("bundle", help="backup bundle directory")
     sp.add_argument("dest", help="new or empty destination directory")
     sub.add_parser("verify", help="recompute the event hash chain; detect rewrites")
+    sp = sub.add_parser("why", help="reconstruct a derived event's provenance "
+                                    "closure down to leaf evidence (local, unlogged)")
+    sp.add_argument("event_id", type=int)
     sp = sub.add_parser("serve", help="run the MCP server (stdio)")
     sp.add_argument(
         "--tools",
@@ -339,7 +347,7 @@ def main():
      "search": cmd_search, "recall": cmd_recall, "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
      "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
-     "verify": cmd_verify,
+     "verify": cmd_verify, "why": cmd_why,
      "serve": cmd_serve}[args.cmd](args)
 
 
