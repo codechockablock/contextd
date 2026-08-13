@@ -298,6 +298,11 @@ def cmd_status(args):
     for row in rows:
         if row["stale"]:
             print(f"WARNING: {stale_line(row)} — capture may be stalled")
+    from .lineage import alert_line, lineage_stats, status_line
+    lstats = lineage_stats(conn, cfg)
+    print(f"lineage: {status_line(lstats)}")
+    if lstats["alert_notes"]:
+        print(f"WARNING: {alert_line(lstats)}")
 
 
 def cmd_outcome(args):
@@ -465,6 +470,18 @@ def cmd_why(args):
     print(format_closure(closure(connect(), args.event_id)))
 
 
+def cmd_lineage(args):
+    from .lineage import audit_report, format_audit_report, format_stats, lineage_stats
+    conn = connect()
+    if getattr(args, "action", None) == "report":
+        print(format_audit_report(audit_report(conn)))
+        return
+    stats = lineage_stats(conn, load_config())
+    print(format_stats(stats, full=getattr(args, "full", False)))
+    if stats["alert_notes"]:
+        sys.exit(2)
+
+
 def cmd_serve(args):
     from .mcp_server import main as serve_main
     serve_main(allowed_tools=args.tools)
@@ -574,6 +591,16 @@ def main():
     sp = sub.add_parser("why", help="reconstruct a derived event's provenance "
                                     "closure down to leaf evidence (local, unlogged)")
     sp.add_argument("event_id", type=int)
+    sp = sub.add_parser("lineage",
+                        help="derivation-graph topology gauge: note chain "
+                             "depth, anchor health; 'report' shows the "
+                             "sampled fidelity-audit time series (local, "
+                             "unlogged; exits nonzero on a depth alert)")
+    sp.add_argument("action", nargs="?", choices=["report"],
+                    help="report: advisory audit verdicts from the ledger, "
+                         "shown against the judge's calibration matrix")
+    sp.add_argument("--full", action="store_true",
+                    help="per-event table for every derivation-bearing event")
     sp = sub.add_parser("serve", help="run the MCP server (stdio)")
     sp.add_argument(
         "--tools",
@@ -591,7 +618,7 @@ def main():
      "loop": cmd_loop, "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
      "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
-     "verify": cmd_verify, "why": cmd_why,
+     "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,
      "serve": cmd_serve}[args.cmd](args)
 
 
