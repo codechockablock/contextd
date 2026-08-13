@@ -61,6 +61,8 @@ EXPECTED_SUBPROCESS_CALLS = {
         "gate, updates bound via CONTEXTD_DERIVATION_SOURCE)",
     ("experiments/handoff/board.py", "run_case", "run"):
         "local git log only",
+    ("experiments/handoff/operator_note.py", "main", "run"):
+        "local git log only",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
