@@ -107,11 +107,12 @@ def derivation_of(kind: str, meta: dict) -> dict | None:
       - explicit: meta["derivation"] = {"source_egress": int,
         "anchors": [...], "support": [{"event": int, "quote": str,
         "relation": "supports"|"contradicts"}, ...]?}   (reconciler notes)
-      - synthesis egress: meta {mode: "synthesis", source_egress, anchors}
+      - distilled egress: meta {mode: "synthesis"|"checkpoint",
+        source_egress, anchors} (synthesis recall; distilled checkpoints)
     """
     if isinstance(meta.get("derivation"), dict):
         return meta["derivation"]
-    if kind == "egress" and meta.get("mode") == "synthesis" \
+    if kind == "egress" and meta.get("mode") in ("synthesis", "checkpoint") \
             and meta.get("source_egress") is not None:
         return {"source_egress": meta["source_egress"],
                 "anchors": meta.get("anchors", [])}

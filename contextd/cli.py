@@ -119,6 +119,42 @@ def cmd_recall(args):
           f"~{r['est_tokens']} tokens — logged]", file=sys.stderr)
 
 
+def cmd_checkpoint(args):
+    """Compile a resumption checkpoint from the archive (gated, logged).
+    Measured basis: handoff benchmark, ledger exps #41823/#41864/#41905 —
+    compiled checkpoints beat no-history resumption distinguishably at every
+    tested interruption point and were the most stable representation across
+    cutoffs. --mode distill delegates to hooks/ (kernel never calls models)."""
+    from .handoff import compile_checkpoint, repo_state
+    repo = None
+    if args.repo:
+        repo = repo_state(Path(args.repo).expanduser(),
+                          test_cmd=args.test_cmd.split() if args.test_cmd else None)
+    if args.mode == "distill":
+        hook = Path(__file__).resolve().parent.parent / "hooks" / "checkpoint_compile.py"
+        if not hook.exists():
+            sys.exit("distill mode needs hooks/checkpoint_compile.py (repo "
+                     "checkout with -e install); raw mode works without it")
+        cmd = [sys.executable, str(hook), "--mode", "distill",
+               "--budget", str(args.budget), "--task-hint", args.hint,
+               "--purpose", args.purpose]
+        if args.repo:
+            cmd += ["--repo", args.repo]
+        if args.test_cmd:
+            cmd += ["--test-cmd", args.test_cmd]
+        sys.exit(subprocess.call(cmd))
+    try:
+        out = compile_checkpoint(connect(), load_config(), budget=args.budget,
+                                 task_hint=args.hint, repo=repo,
+                                 purpose=args.purpose, client="cli")
+    except GateError as e:
+        sys.exit(f"gate refused: {e}")
+    print(out["package"])
+    print(f"\n[checkpoint egress #{out['egress_id']}: tip #{out['tip']}, "
+          f"{len(out['items'])} events, ~{out['est_tokens']} tokens — logged]",
+          file=sys.stderr)
+
+
 def cmd_timeline(args):
     rows = timeline(connect(), since=args.since, until=args.until,
                     source=args.source, limit=args.limit)
@@ -226,10 +262,15 @@ def cmd_exp(args):
             print(f"  preregistered expectation: {m['expectation']}")
         return
     if args.action == "report":
-        if get_experiment(conn, args.exp_id).get("family") == "provenance_trial":
+        family = get_experiment(conn, args.exp_id).get("family")
+        if family == "provenance_trial":
             sys.exit(f"experiment #{args.exp_id} is a provenance trial; "
                      "rebuild its report with: experiments/provenance/"
                      f"model_trials.py report {args.exp_id}")
+        if family == "handoff_bench":
+            sys.exit(f"experiment #{args.exp_id} is a handoff benchmark; "
+                     "rebuild its report with: experiments/handoff/"
+                     f"bench.py report {args.exp_id}")
         print(format_report(build_report(conn, args.exp_id)))
         return
     sys.exit(f"unknown action {args.action!r}")
@@ -312,6 +353,21 @@ def main():
     sp.add_argument("--mode", choices=["detail", "synthesis"], default="detail",
                     help="synthesis: anchor-verified distilled bundle via "
                          "hooks/synthesis_recall.py (model-assisted, ~150 words)")
+    sp = sub.add_parser("checkpoint",
+                        help="compile a resumption checkpoint: what a fresh "
+                             "model needs to continue this project (logged)")
+    sp.add_argument("--budget", type=int, default=4000,
+                    help="package budget in est. tokens (raw) or raw-selection "
+                         "budget fed to the distiller (distill)")
+    sp.add_argument("--hint", default="", help="optional task hint for the "
+                                               "recall stratum")
+    sp.add_argument("--repo", help="repository path for the live-state section")
+    sp.add_argument("--test-cmd", help="test command for the repo section, "
+                                       "e.g. 'pytest -q'")
+    sp.add_argument("--purpose", default="")
+    sp.add_argument("--mode", choices=["raw", "distill"], default="raw",
+                    help="distill: model-compressed structured checkpoint via "
+                         "hooks/checkpoint_compile.py, anchor-verified")
     sp = sub.add_parser("timeline", help="browse events by time")
     sp.add_argument("--since")
     sp.add_argument("--until")
@@ -348,7 +404,8 @@ def main():
 
     args = p.parse_args()
     {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
-     "search": cmd_search, "recall": cmd_recall, "timeline": cmd_timeline,
+     "search": cmd_search, "recall": cmd_recall, "checkpoint": cmd_checkpoint,
+     "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
      "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
      "verify": cmd_verify, "why": cmd_why,

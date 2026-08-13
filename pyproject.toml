@@ -26,10 +26,14 @@ packages = ["contextd"]
 # Local `python -m pytest` got that from the CWD; the bare `pytest` script in
 # CI does not, hence this explicit rootdir-relative entry.
 pythonpath = ["."]
+# runs/ holds benchmark receipts, including deliberately interrupted scratch
+# repos whose tests fail by design; they are artifacts, not this suite.
+testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+extend-exclude = ["runs"]
 
 [tool.ruff.lint]
 # Ruff's default correctness set, pinned so upgrades do not silently enable

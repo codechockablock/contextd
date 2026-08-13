@@ -25,11 +25,31 @@ EXPECTED_SUBPROCESS_CALLS = {
         "archive's gate first)",
     ("experiments/provenance/model_trials.py", "cmd_probe", "run"):
         "model (read-only MCP wiring probe; search tool only)",
+    ("contextd/handoff.py", "_git", "run"): "local git read, no archive bytes",
+    ("contextd/handoff.py", "repo_state", "run"):
+        "local test command in the caller's repo, no archive bytes",
+    ("hooks/checkpoint_compile.py", "distill", "run"):
+        "model (checkpoint distiller; payload passes the gate first)",
+    ("experiments/handoff/common.py", "run_claude", "run"):
+        "model (handoff bench resumption; every bundle passes the "
+        "archive-under-test's gate before prompt assembly)",
+    ("experiments/handoff/common.py", "run_codex", "run"):
+        "model (cross-vendor resumption, same gated bundles)",
+    ("experiments/handoff/staged.py", "run_pytest", "run"):
+        "local pytest in the staged scratch repo, no archive bytes",
+    ("experiments/handoff/bench.py", "history_arm_contexts", "run"):
+        "local git log + delegation to hooks/synthesis_recall.py "
+        "(which gates and models under its own inventory entry)",
+    ("experiments/handoff/bench.py", "cmd_ablate", "run"): "local git log only",
+    ("experiments/handoff/staged.py", "make_repo", "run"):
+        "local git init in the scratch repo, no archive bytes",
+    ("contextd/cli.py", "cmd_checkpoint", "call"): "local harness delegation",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
     ("hooks/reconcile.py", "reconcile"),
     ("hooks/synthesis_recall.py", "distill"),
+    ("hooks/checkpoint_compile.py", "distill"),
     ("experiments/provenance/model_trials.py", "dispatch_note_writer"),
 }
 
@@ -108,7 +128,9 @@ def test_all_non_test_subprocesses_are_inventory_classified():
     observed = set()
     for path in ROOT.rglob("*.py"):
         relative = path.relative_to(ROOT).as_posix()
-        if relative.startswith(("tests/", ".venv/")):
+        # runs/ holds benchmark artifacts (including model-written scratch
+        # repos), not shipped code; it is gitignored and not inventoried
+        if relative.startswith(("tests/", ".venv/", "runs/")):
             continue
         visitor = SubprocessInventory(relative)
         visitor.visit(ast.parse(path.read_text(), filename=str(path)))
