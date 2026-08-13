@@ -63,6 +63,11 @@ EXPECTED_SUBPROCESS_CALLS = {
         "local git log only",
     ("experiments/handoff/operator_note.py", "main", "run"):
         "local git log only",
+    ("hooks/loop_scan.py", "scan", "run"):
+        "model (open-loops candidate generation; dialogue + loop board pass "
+        "the archive-under-test's gate first, candidates bound via "
+        "CONTEXTD_DERIVATION_SOURCE, promotion mechanically absent from "
+        "the spawned server's registry)",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
@@ -73,6 +78,7 @@ MODEL_CALLERS = {
     ("experiments/handoff/livethreads.py", "run_pass"),
     ("experiments/handoff/board.py", "run_pass"),
     ("experiments/provenance/model_trials.py", "dispatch_note_writer"),
+    ("hooks/loop_scan.py", "scan"),
 }
 
 
