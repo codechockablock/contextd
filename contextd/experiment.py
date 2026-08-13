@@ -70,6 +70,12 @@ def epistemic_type(source, kind, meta: dict) -> str:
         return "observation"
     if kind == "note":
         return "human_assertion" if meta.get("actor") == "human" else "model_inference"
+    if kind == "loop":
+        # loop lifecycle events speak with their recorded authority
+        # (docs/OPEN_LOOPS.md): operator acts are assertions, proposals and
+        # model-relayed transitions are inference
+        return ("human_assertion" if meta.get("authority") == "operator"
+                else "model_inference")
     if source == "claude_code" and kind == "message":
         return "human_assertion" if meta.get("role") == "user" else "model_inference"
     if kind in ("epoch", "reconcile", "egress", "egress_outcome",

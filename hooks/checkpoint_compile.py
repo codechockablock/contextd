@@ -86,13 +86,19 @@ def compile_distilled(conn, cfg, raw_budget: int, task_hint: str = "",
                       retries: int = 1, client: str = "checkpoint-distill",
                       purpose: str = "") -> dict:
     """Select at raw_budget, distill, verify anchors, disclose. Returns the
-    served checkpoint dict or raises on refusal."""
-    selection = select_checkpoint_context(conn, cfg, raw_budget, task_hint)
+    served checkpoint dict or raises on refusal. The ACTIVE OPEN LOOPS
+    section is re-attached verbatim after the distillate: loop carriage is
+    deterministic by contract (docs/OPEN_LOOPS.md) and never depends on the
+    distiller model choosing to preserve it."""
+    selection = select_checkpoint_context(conn, cfg, raw_budget, task_hint,
+                                          repo_path=repo.get("path")
+                                          if repo else None)
     from contextd.db import _db_tip
     tip = _db_tip(conn)["id"]
     package = render_package(selection, repo=repo, tip=tip)
-    ids = sorted({it["id"] for k in ("tail", "episodes", "notes", "recall")
-                  for it in selection[k]})
+    ids = sorted({it["id"]
+                  for k in ("loops", "tail", "episodes", "notes", "recall")
+                  for it in selection[k] if it["id"] is not None})
     text = None
     anchors = src_egress = None
     for attempt in range(retries + 1):
@@ -119,6 +125,11 @@ def compile_distilled(conn, cfg, raw_budget: int, task_hint: str = "",
         raise RuntimeError(
             f"distilled checkpoint failed anchor verification after "
             f"{retries + 1} attempt(s) (invalid={anchors['invalid']})")
+    if selection.get("loops"):
+        start = package.index("== ACTIVE OPEN LOOPS")
+        end = package.find("\n== ", start + 1)
+        section = package[start:end if end != -1 else len(package)].rstrip()
+        text = f"{text}\n\n{section}"
     meta = {"type": "checkpoint", "mode": "checkpoint", "tip": tip,
             "task_hint": task_hint, "purpose": purpose, "items": ids,
             "anchors": anchors["valid"], "distiller": model,

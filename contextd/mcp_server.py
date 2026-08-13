@@ -157,11 +157,125 @@ def timeline(
     return receipt["content"]
 
 
+def _loop_scope(scope_repo: str) -> dict:
+    """CONTEXTD_LOOP_SCOPE (set by a harness) pins the scope server-side so
+    a spawned generator cannot scope-spray; otherwise the tool argument
+    picks a repo scope, empty meaning global. Attribution, not
+    authentication, like every env binding here."""
+    from .loops import make_scope
+    pinned = os.environ.get("CONTEXTD_LOOP_SCOPE", "").strip()
+    if pinned:
+        return make_scope(None if pinned == "global" else pinned)
+    return make_scope(scope_repo.strip() or None)
+
+
+def loop_candidate(text: str, scope_repo: str = "") -> str:
+    """Propose a candidate open loop (non-authoritative; an operator must
+    confirm it before it carries anywhere). Under a derivation binding the
+    bracketed anchors in the text are kernel-verified against the disclosed
+    dialogue and recorded as source events; invalid anchors refuse the
+    candidate so you can retry with ids that were actually supplied.
+    Candidates duplicating a live loop, or re-proposing a closed or
+    dismissed one, are suppressed and say so."""
+    from .loops import LoopError, add_candidate
+    conn = connect()
+    text = redact(load_config(), text)
+    derivation, err = _derivation_binding(conn, text)
+    if err:
+        return err
+    source_events = derivation["anchors"] if derivation else None
+    try:
+        r = add_candidate(conn, text, _loop_scope(scope_repo), client=CLIENT,
+                          source_events=source_events, derivation=derivation)
+    except LoopError as e:
+        return f"REFUSED: {e}"
+    lp = r["loop"]
+    if r["result"] == "created":
+        return (f"candidate loop#{lp['id']} recorded (state: candidate; an "
+                "operator confirm is required before it becomes active)")
+    if r["result"] == "suppressed_live":
+        return (f"already tracked as loop#{lp['id']} ({lp['state']}); "
+                "not re-proposing")
+    return (f"previously {lp['state']} as loop#{lp['id']}; suppressed — "
+            "dismissed or completed loops are not re-proposed. The operator "
+            "can re-add directly with 'ctx loop add' if this is a real "
+            "priority again.")
+
+
+def loop_list(scope_repo: str = "", include_candidates: bool = True) -> str:
+    """List active loops (and pending candidates) for a scope. The listing
+    is archive content leaving through MCP, so it is disclosed through the
+    gate and logged like any read."""
+    from .loops import loops_for_scope
+    conn = connect()
+    cfg = load_config()
+    scope = _loop_scope(scope_repo)
+    states = ("open", "candidate") if include_candidates else ("open",)
+    rows = loops_for_scope(conn, scope, states=states)
+    lines = []
+    for lp in rows:
+        tag = lp["state"] + (" reopened" if lp["reopen_count"] else "")
+        lines.append(f"[loop#{lp['id']}] {tag} since {lp['created_ts'][:10]}"
+                     f" :: {lp['text']}")
+    out = "\n".join(lines) or "(no loops for this scope)"
+    try:
+        receipt = disclose(conn, cfg, out, {
+            "type": "loop_list", "client": CLIENT,
+            "scope": "global" if scope.get("global") else scope["repo"]})
+    except GateError as e:
+        return f"GATE REFUSED: {e}"
+    return receipt["content"]
+
+
+def _bound_transition(op: str, candidate_id: int, operator_quote: str,
+                      reason: str = "") -> str:
+    from .loops import LoopError, transition, verify_operator_utterance
+    conn = connect()
+    ev = verify_operator_utterance(conn, candidate_id, operator_quote)
+    if not ev["ok"]:
+        prefix = "RETRY LATER" if ev.get("retryable") else "REFUSED"
+        return f"{prefix}: {ev['why']}"
+    try:
+        r = transition(conn, candidate_id, op,
+                       authority="operator_via_model", client=CLIENT,
+                       reason=reason,
+                       confirmation={"user_event": ev["user_event"],
+                                     "quote": operator_quote})
+    except LoopError as e:
+        return f"REFUSED: {e}"
+    lp = r["loop"]
+    if r["result"] == "noop":
+        return f"loop#{lp['id']} already {lp['state']}"
+    return (f"loop#{lp['id']} -> {lp['state']} (model-mediated operator "
+            f"{op}, bound to user message event #{ev['user_event']})")
+
+
+def loop_confirm(candidate_id: int, operator_quote: str) -> str:
+    """Promote a candidate to an active open loop, ONLY as a relay of the
+    operator's own words: operator_quote must be a verbatim span (>= 12
+    chars) of a user message the archive ingested AFTER the candidate was
+    created. The kernel verifies the quote itself; your claim that the user
+    agreed is not evidence. If ingestion has not caught up yet, this refuses
+    retryably — the operator can always run 'ctx loop confirm' directly."""
+    return _bound_transition("confirm", candidate_id, operator_quote)
+
+
+def loop_dismiss(candidate_id: int, operator_quote: str,
+                 reason: str = "") -> str:
+    """Dismiss a candidate (it will not be re-proposed), under the same
+    post-candidate operator-utterance binding as loop_confirm."""
+    return _bound_transition("dismiss", candidate_id, operator_quote, reason)
+
+
 TOOLS = {
     "recall": recall,
     "search": search,
     "note": note,
     "timeline": timeline,
+    "loop_candidate": loop_candidate,
+    "loop_list": loop_list,
+    "loop_confirm": loop_confirm,
+    "loop_dismiss": loop_dismiss,
 }
 
 

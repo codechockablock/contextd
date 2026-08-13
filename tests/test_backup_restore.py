@@ -490,3 +490,38 @@ def test_backup_refuses_database_and_state_from_different_archives(tmp_path):
         create_backup(conn, archive / "different", tmp_path / "backups")
 
     assert not (tmp_path / "backups").exists()
+
+
+def test_loop_state_survives_backup_and_restore(tmp_path, monkeypatch):
+    """Open-loops carriage across archive death: the reduced lifecycle in a
+    restored archive is byte-identical to the source, and the restored
+    archive keeps enforcing the same transition rules."""
+    from contextd.loops import (LoopError, add_candidate, add_loop,
+                                make_scope, reduce_loops, transition)
+
+    archive = Path(os.environ["CONTEXTD_HOME"])
+    conn = connect()
+    scope = make_scope("/synthetic/amberlight")
+    kept = add_loop(conn, "re-run the drift correction", scope)["loop"]
+    gone = add_loop(conn, "regenerate the fixture site", scope)["loop"]
+    transition(conn, gone["id"], "close", "operator", reason="done")
+    transition(conn, gone["id"], "reopen", "operator", reason="regressed")
+    cand = add_candidate(conn, "learn per-feed cadence", scope)["loop"]
+    transition(conn, cand["id"], "dismiss", "operator", reason="noise")
+    before = json.dumps(reduce_loops(conn), sort_keys=True)
+
+    result = create_backup(conn, archive, tmp_path / "backups")
+    conn.close()
+    destination = tmp_path / "restored"
+    restore_backup(result["bundle"], destination)
+    monkeypatch.setenv("CONTEXTD_HOME", str(destination))
+
+    rconn = connect()
+    assert json.dumps(reduce_loops(rconn), sort_keys=True) == before
+    assert verify_chain(rconn)["ok"]
+    with pytest.raises(LoopError):
+        transition(rconn, cand["id"], "reopen", "operator")
+    assert transition(rconn, kept["id"], "close", "operator",
+                      reason="verified post-restore")["loop"]["state"] == \
+        "closed"
+    rconn.close()

@@ -183,7 +183,8 @@ def _pack(items_iter, budget: int, taken: set) -> list:
 
 
 def select_checkpoint_context(conn, cfg, budget: int = 4000,
-                              task_hint: str = "") -> dict:
+                              task_hint: str = "",
+                              repo_path: str | None = None) -> dict:
     """Allocate the budget across the archive's evidence strata.
 
     Fractions are a policy under test, not a truth: tail 45%, reconciled
@@ -191,12 +192,23 @@ def select_checkpoint_context(conn, cfg, budget: int = 4000,
     to the tail when no hint is given). Selection always runs against
     whatever archive the connection holds — compile from a frozen view and
     the future is unreachable by construction, no filtering required.
+
+    Active open loops (docs/OPEN_LOOPS.md) are selected FIRST, by lifecycle
+    state and scope only — never by recency or lexical match — into a
+    reserved slice; an under-filled slice overflows back to the tail. If the
+    slice cannot carry every active loop, the section names the omitted ids
+    and count: silent loss is forbidden by contract.
     """
+    from .loops import select_loop_section
+    loop_sec = select_loop_section(conn, budget, repo_path)
+    remaining = budget - loop_sec["slice"]
     shares = {"tail": 0.45, "episodes": 0.20, "notes": 0.15, "recall": 0.20}
     if not task_hint:
         shares["tail"] += shares.pop("recall")
-    budgets = {k: int(budget * v) for k, v in shares.items()}
-    taken: set = set()
+    budgets = {k: int(remaining * v) for k, v in shares.items()}
+    # loop under-fill overflows to the freshest stratum, per contract
+    budgets["tail"] += max(loop_sec["slice"] - loop_sec["used"], 0)
+    taken: set = set(loop_sec["ids"])
 
     # task recall first: these items earn their place by matching the task,
     # and the tail would otherwise swallow recent duplicates of them
@@ -238,7 +250,8 @@ def select_checkpoint_context(conn, cfg, budget: int = 4000,
     # freshest evidence and the package places it last on purpose
     for section in (notes, episodes, tail):
         section.reverse()
-    return {"tail": tail, "episodes": episodes, "notes": notes,
+    return {"loops": loop_sec["items"], "loops_omitted": loop_sec["omitted"],
+            "tail": tail, "episodes": episodes, "notes": notes,
             "recall": recall_items, "budget": budget, "task_hint": task_hint}
 
 
@@ -286,6 +299,7 @@ The sections run oldest-context-first; the raw dialogue tail at the end is
 the freshest record of what was actually happening at the interruption."""
 
 SECTION_TITLES = (
+    ("loops", "ACTIVE OPEN LOOPS (operator-confirmed, lifecycle-selected)"),
     ("notes", "OPERATOR NOTES (deliberate, human-written)"),
     ("episodes", "RECONCILED EPISODE NOTES (model-written, anchor-verified)"),
     ("recall", "TASK-RELEVANT RECALL"),
@@ -315,7 +329,9 @@ def render_package(selection: dict, repo: dict | None = None,
     for key, title in SECTION_TITLES:
         items = selection.get(key) or []
         if items:
-            body = "\n\n".join(it["header"] + "\n" + it["text"] for it in items)
+            body = "\n\n".join(
+                (it["header"] + "\n" + it["text"]) if it.get("header")
+                else it["text"] for it in items)
             parts.append(f"== {title} ==\n{body}")
     return "\n\n".join(parts)
 
@@ -324,15 +340,21 @@ def compile_checkpoint(conn, cfg, budget: int = 4000, task_hint: str = "",
                        repo: dict | None = None, client: str = "checkpoint",
                        purpose: str = "") -> dict:
     """Compile, then disclose through the real gate. Returns the exact
-    redacted package a resumed model may receive, with its egress receipt."""
-    selection = select_checkpoint_context(conn, cfg, budget, task_hint)
+    redacted package a resumed model may receive, with its egress receipt.
+    Loop scope follows the repo argument: a repo checkpoint carries that
+    repository's active loops, a repo-less checkpoint carries global ones."""
+    repo_path = repo.get("path") if repo else None
+    selection = select_checkpoint_context(conn, cfg, budget, task_hint,
+                                          repo_path=repo_path)
     tip = _db_tip(conn)["id"]
     package = render_package(selection, repo=repo, tip=tip)
-    ids = sorted({it["id"] for k in ("tail", "episodes", "notes", "recall")
-                  for it in selection[k]})
+    ids = sorted({it["id"]
+                  for k in ("loops", "tail", "episodes", "notes", "recall")
+                  for it in selection[k] if it["id"] is not None})
     disclosure = disclose(conn, cfg, package, {
         "type": "checkpoint", "tip": tip, "task_hint": task_hint,
-        "purpose": purpose, "items": ids, "client": client})
+        "purpose": purpose, "items": ids, "client": client,
+        "loops_omitted": selection.get("loops_omitted") or []})
     return {"package": disclosure["content"], "items": ids, "tip": tip,
             "egress_id": disclosure["egress_id"],
             "est_tokens": disclosure["est_tokens"], "selection": selection}

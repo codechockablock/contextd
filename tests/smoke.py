@@ -688,4 +688,49 @@ assert "wombat" not in "".join(
     it["text"] for it in select_items(conn, cfg, "wombat", 4000)), \
     "never_leave must hold regardless of ranking"
 
+
+# 42. the ctx loop CLI layer: parse-level add/list/close/reopen round trip,
+# idempotent retry, and nonzero refusals (kernel logic is pytest-covered;
+# this exercises the argparse surface a refactor could silently break)
+import contextlib
+import io
+from contextd.cli import cmd_loop
+
+
+def _loop_cli(**kw):
+    defaults = {"repo": None, "global_scope": False, "source_event": [],
+                "all": False, "reason": ""}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_loop(_ap.Namespace(**{**defaults, **kw}))
+    return buf.getvalue()
+
+
+out = _loop_cli(action="add", text=["smoke:", "verify", "the", "loop", "cli"],
+                repo="/synthetic/smoke")
+assert "opened loop#" in out, out
+loop_id = out.split("loop#")[1].split(" ")[0]
+assert "already open" in _loop_cli(
+    action="add", text=["smoke: verify the loop cli"], repo="/synthetic/smoke")
+assert "smoke: verify the loop cli" in _loop_cli(
+    action="list", repo="/synthetic/smoke")
+assert "-> closed" in _loop_cli(action="close", loop_id=loop_id)
+assert "already closed" in _loop_cli(action="close", loop_id=loop_id)
+assert "-> open" in _loop_cli(action="reopen", loop_id=loop_id,
+                              reason="smoke reopen")
+assert "reopened" in _loop_cli(action="show", loop_id=f"loop#{loop_id}")
+try:
+    _loop_cli(action="dismiss", loop_id=loop_id)
+    raise AssertionError("dismissing an open loop must refuse nonzero")
+except SystemExit as e:
+    assert e.code not in (0, None)
+try:
+    _loop_cli(action="confirm", loop_id="424242")
+    raise AssertionError("confirming a missing loop must refuse nonzero")
+except SystemExit as e:
+    assert e.code not in (0, None)
+assert "no candidates" in _loop_cli(action="candidates",
+                                    repo="/synthetic/smoke")
+assert verify_chain(conn)["ok"]
+
 print("ALL SMOKE TESTS PASSED")

@@ -155,6 +155,100 @@ def cmd_checkpoint(args):
           file=sys.stderr)
 
 
+def _loop_scope(args):
+    """Explicit --repo / --global win; the default is the cwd's git
+    toplevel when inside a repository, else global (docs/OPEN_LOOPS.md)."""
+    from .handoff import _git
+    from .loops import make_scope
+    if getattr(args, "global_scope", False):
+        return make_scope(None)
+    if getattr(args, "repo", None):
+        return make_scope(args.repo)
+    top = _git(Path.cwd(), "rev-parse", "--show-toplevel")
+    return make_scope(top or None)
+
+
+def _loop_id(raw: str) -> int:
+    digits = raw.strip().lstrip("loop").lstrip("#")
+    if not digits.isdigit():
+        sys.exit(f"not a loop id: {raw!r} (use N or loop#N)")
+    return int(digits)
+
+
+def _scope_label(scope: dict) -> str:
+    return "global" if scope.get("global") else scope["repo"]
+
+
+def _print_loop_row(lp):
+    state = lp["state"] + (f" (reopened x{lp['reopen_count']})"
+                           if lp["reopen_count"] else "")
+    print(f"[loop#{lp['id']}] {state:<10} {lp['created_ts'][:10]} "
+          f"{_scope_label(lp['scope'])}\n    {lp['text']}")
+
+
+def cmd_loop(args):
+    from .loops import (LoopError, add_loop, loops_for_scope, reduce_loops,
+                        transition)
+    conn = connect()
+    try:
+        if args.action == "add":
+            r = add_loop(conn, " ".join(args.text), _loop_scope(args),
+                         client="cli", source_events=args.source_event)
+            lp = r["loop"]
+            msg = {"created": "opened",
+                   "existing": "already open as",
+                   "confirmed_candidate": "confirmed pending candidate as"}
+            print(f"{msg[r['result']]} loop#{lp['id']} "
+                  f"[{_scope_label(lp['scope'])}]\n    {lp['text']}")
+            return
+        if args.action in ("list", "candidates"):
+            scope = _loop_scope(args)
+            states = (("candidate",) if args.action == "candidates" else
+                      ("open", "candidate", "closed", "dismissed")
+                      if args.all else ("open",))
+            rows = loops_for_scope(conn, scope, states=states)
+            for lp in rows:
+                _print_loop_row(lp)
+            if not rows:
+                kind = ("candidates" if args.action == "candidates"
+                        else "loops" if args.all else "active loops")
+                print(f"no {kind} for {_scope_label(scope)}")
+            return
+        if args.action == "show":
+            lp = reduce_loops(conn)["loops"].get(_loop_id(args.loop_id))
+            if lp is None:
+                sys.exit(f"no loop {args.loop_id}")
+            _print_loop_row(lp)
+            print(f"    authority: {lp['created_authority']} "
+                  f"(client {lp['created_client'] or '?'})"
+                  + (f"; promoted by {lp['promoted_authority']}"
+                     if lp["promoted_authority"] else ""))
+            if lp["source_events"]:
+                print(f"    source events: "
+                      f"{', '.join(str(i) for i in lp['source_events'])}")
+            if lp["confirmation"]:
+                print(f"    confirmation bound to user event "
+                      f"#{lp['confirmation']['user_event']}")
+            for h in lp["history"]:
+                reason = f" — {h['reason']}" if h.get("reason") else ""
+                print(f"    {h['ts']} {h['op']} ({h['authority']}){reason}")
+            for a in lp["anomalies"]:
+                print(f"    ANOMALY at event #{a['event']}: {a['why']}")
+            return
+        op = {"close": "close", "reopen": "reopen",
+              "confirm": "confirm", "dismiss": "dismiss"}[args.action]
+        r = transition(conn, _loop_id(args.loop_id), op,
+                       authority="operator", client="cli",
+                       reason=getattr(args, "reason", "") or "")
+        lp = r["loop"]
+        if r["result"] == "noop":
+            print(f"loop#{lp['id']} already {lp['state']}")
+        else:
+            print(f"loop#{lp['id']} -> {lp['state']}")
+    except LoopError as e:
+        sys.exit(f"refused: {e}")
+
+
 def cmd_timeline(args):
     rows = timeline(connect(), since=args.since, until=args.until,
                     source=args.source, limit=args.limit)
@@ -368,6 +462,38 @@ def main():
     sp.add_argument("--mode", choices=["raw", "distill"], default="raw",
                     help="distill: model-compressed structured checkpoint via "
                          "hooks/checkpoint_compile.py, anchor-verified")
+    sp = sub.add_parser("loop", help="operator-confirmed open loops: "
+                                     "prospective state that survives "
+                                     "session death (docs/OPEN_LOOPS.md)")
+    lsub = sp.add_subparsers(dest="action", required=True)
+    la = lsub.add_parser("add", help="declare an open loop (operator act)")
+    la.add_argument("text", nargs="+")
+    la.add_argument("--repo", help="scope to a repository (default: cwd's "
+                                   "git toplevel, else global)")
+    la.add_argument("--global", dest="global_scope", action="store_true",
+                    help="global scope")
+    la.add_argument("--source-event", type=int, action="append", default=[],
+                    help="archive event id(s) this loop arose from")
+    for name, hlp in (("list", "active loops for a scope"),
+                      ("candidates", "pending model-proposed candidates")):
+        lp_ = lsub.add_parser(name, help=hlp)
+        lp_.add_argument("--repo")
+        lp_.add_argument("--global", dest="global_scope", action="store_true")
+        if name == "list":
+            lp_.add_argument("--all", action="store_true",
+                             help="include candidates, closed, dismissed")
+    ls = lsub.add_parser("show", help="one loop: state, history, provenance")
+    ls.add_argument("loop_id")
+    for name, hlp in (
+            ("close", "mark an open loop completed/retired"),
+            ("reopen", "reactivate a closed loop"),
+            ("confirm", "promote a candidate to open (operator act)"),
+            ("dismiss", "reject a candidate; suppresses re-proposal")):
+        lt = lsub.add_parser(name, help=hlp)
+        lt.add_argument("loop_id")
+        if name in ("close", "reopen", "dismiss"):
+            lt.add_argument("--reason", default="")
+
     sp = sub.add_parser("timeline", help="browse events by time")
     sp.add_argument("--since")
     sp.add_argument("--until")
@@ -398,14 +524,16 @@ def main():
     sp.add_argument(
         "--tools",
         nargs="+",
-        choices=["recall", "search", "note", "timeline"],
-        help="server-enforced MCP tool allowlist (default: all tools)",
+        choices=["recall", "search", "note", "timeline", "loop_candidate",
+                 "loop_list", "loop_confirm", "loop_dismiss"],
+        help="server-enforced MCP tool allowlist (default: all tools); "
+             "omitted tools are absent from the registry itself",
     )
 
     args = p.parse_args()
     {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
      "search": cmd_search, "recall": cmd_recall, "checkpoint": cmd_checkpoint,
-     "timeline": cmd_timeline,
+     "loop": cmd_loop, "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
      "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
      "verify": cmd_verify, "why": cmd_why,
