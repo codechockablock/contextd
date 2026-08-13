@@ -473,6 +473,30 @@ def test_same_second_retention_keeps_newest_sequence_numbers(tmp_path):
     assert created[1].exists() and created[2].exists()
 
 
+def test_same_second_sequence_never_reuses_a_pruned_name(tmp_path):
+    """Regression (found by the restore drill's smoke alarm): pruning freed
+    the bare-stamp name, a later same-second backup took it again, and
+    (stamp, sequence) ordering — which retention and the drill's
+    newest-bundle pick both rely on — stopped matching creation order.
+    Retention could then delete the newest bundle and keep stale ones."""
+    archive, conn, _, _ = _seed_archive()
+    backups = tmp_path / "backups"
+    when = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    create_backup(conn, archive, backups, keep=0, created_at=when)  # plain
+    create_backup(conn, archive, backups, keep=2, created_at=when)  # -1
+    create_backup(conn, archive, backups, keep=2, created_at=when)  # -2 (prunes plain)
+    assert not (backups / "contextd-20260812-000000.ctxbackup").exists()
+
+    append_event(conn, "note", "note", content="newest durable state")
+    newest = create_backup(conn, archive, backups, keep=0, created_at=when)["bundle"]
+    assert newest.name == "contextd-20260812-000000-3.ctxbackup", \
+        "a freed bundle name must never be reallocated"
+
+    latest = create_backup(conn, archive, backups, keep=2, created_at=when)
+    assert newest.exists() and latest["bundle"].exists(), \
+        "retention pruned a newer bundle in favor of a stale one"
+
+
 def test_negative_retention_is_refused_before_bundle_publish(tmp_path):
     archive, conn, _, _ = _seed_archive()
     backups = tmp_path / "backups"

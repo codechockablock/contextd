@@ -27,6 +27,16 @@ DEFAULTS = {
         "stale_after_hours": {"chrome": 48, "safari": 48,
                               "claude_code": 48, "fs": 72},
     },
+    "backup": {
+        # where `ctx backup` bundles live for the restore drill ("" means
+        # ~/.contextd/backups). The drill is the monitor's monitor: `ctx
+        # status` warns when the last drill FAILED, or when a drill has run
+        # before but none within this many hours (weekly cadence + one grace
+        # day). An archive that has never drilled shows "never run" without
+        # warning — staleness flags a drill that died, not one never installed.
+        "dir": "",
+        "drill_stale_after_hours": 192,
+    },
     "gate": {
         "daily_token_budget": 200_000,
         "max_recall_budget": 32_000,

@@ -10,11 +10,12 @@ import time
 from pathlib import Path
 
 from . import __version__, home, load_config
+from . import liveness as liveness_module
 from .backup import BackupError, create_backup, restore_backup
 from .db import ChainStateError, append_event, connect, verify_chain
 from .gate import GateError, assemble, spent_today
 from .ingest import ingest_note, run_all
-from .liveness import capture_liveness, describe, stale_line
+from .liveness import capture_liveness, describe, format_age, stale_line
 from .search import search, timeline
 
 CONFIG_TEMPLATE = '''# contextd config — merged over built-in defaults (see contextd/__init__.py)
@@ -298,6 +299,30 @@ def cmd_status(args):
     for row in rows:
         if row["stale"]:
             print(f"WARNING: {stale_line(row)} — capture may be stalled")
+    drill = conn.execute(
+        "SELECT ts, meta FROM events WHERE kind='restore_drill' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    if drill is None:
+        # never-run stays quiet: the drill is installed per machine, and a
+        # warning here would fire on every archive that never opted in
+        print("restore drill: never run")
+    else:
+        dmeta = json.loads(drill["meta"] or "{}")
+        from datetime import datetime
+        age = (datetime.fromisoformat(liveness_module.now_iso())
+               - datetime.fromisoformat(drill["ts"])).total_seconds() / 3600
+        verdict = dmeta.get("verdict", "?")
+        print(f"restore drill: {verdict} {format_age(max(age, 0.0))} ago")
+        threshold = cfg["backup"]["drill_stale_after_hours"]
+        if verdict != "PASS":
+            print(f"WARNING: restore drill FAILED {format_age(max(age, 0.0))} "
+                  f"ago at stage {dmeta.get('failed_stage', '?')} "
+                  f"({dmeta.get('reason', 'no reason recorded')}) "
+                  "— backups may not restore")
+        elif age > threshold:
+            print(f"WARNING: restore drill last ran {format_age(age)} ago "
+                  f"(threshold {threshold:g}h) — the drill itself may be "
+                  "stalled")
 
 
 def cmd_outcome(args):

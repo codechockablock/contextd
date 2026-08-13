@@ -1,0 +1,225 @@
+{
+  "cells": {
+    "1g:blob_heavy": {
+      "archive_bytes": 1012396171,
+      "backup": {
+        "dest_peak_bytes": 1012400459,
+        "peak_rss": 35373056,
+        "seconds": 1.7
+      },
+      "blobs": 15,
+      "bundle_bytes": 1012400459,
+      "cell": "1g:blob_heavy",
+      "drill": {
+        "exit": 0,
+        "peak_rss": 36339712,
+        "peak_temp_bytes": 1012396171,
+        "seconds": 1.7,
+        "stages": {
+          "behavioral": 0.006,
+          "blobs": 0.35,
+          "chain_witness": 0.025,
+          "fts_probe": 0.004,
+          "locate": 0.001,
+          "preflight": 0.0,
+          "restore": 1.283,
+          "snapshot_state": 0.0
+        },
+        "verdict": "PASS"
+      },
+      "events": 2015,
+      "inflate_seconds": 0.6,
+      "target_bytes": 1073741824,
+      "temp_ratio": 1.0
+    },
+    "1g:event_heavy": {
+      "archive_bytes": 1118511245,
+      "backup": {
+        "dest_peak_bytes": 1118512852,
+        "peak_rss": 35143680,
+        "seconds": 14.2
+      },
+      "blobs": 4,
+      "bundle_bytes": 1118512852,
+      "cell": "1g:event_heavy",
+      "drill": {
+        "exit": 0,
+        "peak_rss": 40501248,
+        "peak_temp_bytes": 1118511245,
+        "seconds": 17.4,
+        "stages": {
+          "behavioral": 0.454,
+          "blobs": 0.006,
+          "chain_witness": 4.884,
+          "fts_probe": 0.218,
+          "locate": 0.001,
+          "preflight": 0.0,
+          "restore": 11.18,
+          "snapshot_state": 0.0
+        },
+        "verdict": "PASS"
+      },
+      "events": 400004,
+      "inflate_seconds": 40.8,
+      "target_bytes": 1073741824,
+      "temp_ratio": 1.0
+    },
+    "4g:blob_heavy": {
+      "archive_bytes": 4233621643,
+      "backup": {
+        "dest_peak_bytes": 4233637643,
+        "peak_rss": 37191680,
+        "seconds": 8.1
+      },
+      "blobs": 63,
+      "bundle_bytes": 4233637643,
+      "cell": "4g:blob_heavy",
+      "drill": {
+        "exit": 0,
+        "peak_rss": 35880960,
+        "peak_temp_bytes": 4233621643,
+        "seconds": 8.6,
+        "stages": {
+          "behavioral": 0.005,
+          "blobs": 1.676,
+          "chain_witness": 0.026,
+          "fts_probe": 0.02,
+          "locate": 0.003,
+          "preflight": 0.0,
+          "restore": 6.693,
+          "snapshot_state": 0.0
+        },
+        "verdict": "PASS"
+      },
+      "events": 2063,
+      "inflate_seconds": 2.3,
+      "target_bytes": 4294967296,
+      "temp_ratio": 1.0
+    },
+    "4g:event_heavy": {
+      "archive_bytes": 4311879822,
+      "backup": {
+        "dest_peak_bytes": 4311881431,
+        "peak_rss": 31834112,
+        "seconds": 81.6
+      },
+      "blobs": 4,
+      "bundle_bytes": 4311881431,
+      "cell": "4g:event_heavy",
+      "drill": {
+        "exit": 0,
+        "peak_rss": 36569088,
+        "peak_temp_bytes": 4311879822,
+        "seconds": 112.0,
+        "stages": {
+          "behavioral": 20.4,
+          "blobs": 0.006,
+          "chain_witness": 19.196,
+          "fts_probe": 13.876,
+          "locate": 0.001,
+          "preflight": 0.0,
+          "restore": 44.789,
+          "snapshot_state": 0.0
+        },
+        "verdict": "PASS"
+      },
+      "events": 1560004,
+      "inflate_seconds": 182.7,
+      "target_bytes": 4294967296,
+      "temp_ratio": 1.0
+    },
+    "8g:blob_heavy": {
+      "archive_bytes": 8528609419,
+      "backup": {
+        "dest_peak_bytes": 8528641035,
+        "peak_rss": 37126144,
+        "seconds": 17.0
+      },
+      "blobs": 127,
+      "bundle_bytes": 8528641035,
+      "cell": "8g:blob_heavy",
+      "drill": {
+        "exit": 0,
+        "peak_rss": 36028416,
+        "peak_temp_bytes": 8528609419,
+        "seconds": 18.6,
+        "stages": {
+          "behavioral": 0.019,
+          "blobs": 3.494,
+          "chain_witness": 0.028,
+          "fts_probe": 0.037,
+          "locate": 0.005,
+          "preflight": 0.0,
+          "restore": 14.676,
+          "snapshot_state": 0.0
+        },
+        "verdict": "PASS"
+      },
+      "events": 2127,
+      "inflate_seconds": 6.0,
+      "target_bytes": 8589934592,
+      "temp_ratio": 1.0
+    },
+    "8g:event_heavy": {
+      "archive_bytes": 8609525902,
+      "backup": {
+        "dest_peak_bytes": 8609527511,
+        "peak_rss": 30130176,
+        "seconds": 574.6
+      },
+      "blobs": 4,
+      "bundle_bytes": 8609527511,
+      "cell": "8g:event_heavy",
+      "drill": {
+        "exit": 0,
+        "peak_rss": 30867456,
+        "peak_temp_bytes": 8609525902,
+        "seconds": 675.3,
+        "stages": {
+          "behavioral": 78.354,
+          "blobs": 0.01,
+          "chain_witness": 146.825,
+          "fts_probe": 56.09,
+          "locate": 0.001,
+          "preflight": 0.0,
+          "restore": 368.297,
+          "snapshot_state": 0.0
+        },
+        "verdict": "PASS"
+      },
+      "events": 3120004,
+      "inflate_seconds": 359.9,
+      "target_bytes": 8589934592,
+      "temp_ratio": 1.0
+    }
+  },
+  "rehearsal": {
+    "archive_bytes": 1012396171,
+    "blobs": 15,
+    "drill": {
+      "failed_stage": null,
+      "reason": null,
+      "seconds": 1.8,
+      "stages": {
+        "behavioral": 0.006,
+        "blobs": 0.365,
+        "chain_witness": 0.025,
+        "fts_probe": 0.004,
+        "locate": 0.001,
+        "preflight": 0.0,
+        "restore": 1.365,
+        "snapshot_state": 0.0
+      },
+      "verdict": "PASS"
+    },
+    "events": 2015,
+    "inflate_seconds": 0.7,
+    "paths": {
+      "backups": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/bundle shelf with spaces",
+      "home": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/other machine home",
+      "live": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/live archive with spaces",
+      "temp": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/re store temp"
+    },
+    "target_bytes": 1073741824
+  }
+}
