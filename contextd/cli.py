@@ -226,9 +226,6 @@ def cmd_loop(args):
             if lp["source_events"]:
                 print(f"    source events: "
                       f"{', '.join(str(i) for i in lp['source_events'])}")
-            if lp["confirmation"]:
-                print(f"    confirmation bound to user event "
-                      f"#{lp['confirmation']['user_event']}")
             for h in lp["history"]:
                 reason = f" — {h['reason']}" if h.get("reason") else ""
                 print(f"    {h['ts']} {h['op']} ({h['authority']}){reason}")
@@ -525,9 +522,10 @@ def main():
         "--tools",
         nargs="+",
         choices=["recall", "search", "note", "timeline", "loop_candidate",
-                 "loop_list", "loop_confirm", "loop_dismiss"],
+                 "loop_list"],
         help="server-enforced MCP tool allowlist (default: all tools); "
-             "omitted tools are absent from the registry itself",
+             "omitted tools are absent from the registry itself. Loop "
+             "confirm/dismiss are deliberately CLI-only (docs/OPEN_LOOPS.md)",
     )
 
     args = p.parse_args()

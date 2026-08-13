@@ -112,10 +112,11 @@ def test_loop_scan_grant_can_propose_but_never_promote(tmp_path, monkeypatch):
     conn.close()
 
 
-def test_default_registry_includes_loop_tools_and_openclaw_stays_restricted():
+def test_default_registry_shape_and_openclaw_stays_restricted():
     from contextd.mcp_server import TOOLS
-    assert {"loop_candidate", "loop_list", "loop_confirm",
-            "loop_dismiss"} <= set(TOOLS)
+    assert {"loop_candidate", "loop_list"} <= set(TOOLS)
+    assert not {"loop_confirm", "loop_dismiss"} & set(TOOLS), \
+        "promotion is a human CLI act; the relay was retired as unsound"
     repo = Path(__file__).resolve().parent.parent
     config = (repo / "clients" / "openclaw.json").read_text()
     assert "loop_" not in config, \

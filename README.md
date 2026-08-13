@@ -290,13 +290,14 @@ verbatim so carriage never depends on a model's choices.
 
 Models may *propose* (`loop_candidate` over MCP, or the gated
 `hooks/loop_scan.py` scanner): proposals are labeled, deduplicated,
-suppressed against dismissed/closed loops, and inert until an operator
-confirms — by CLI, or through a model-relayed confirmation that the kernel
-verifies against an actually-ingested post-candidate operator message
-(attribution, not authentication; the semantic link stays a labeled model
-judgment). There is no model-facing add, close, or reopen. No calendars, no
-recurrence, no notifications — this is durable operator state, not a
-planner. Contract, threat model, and measured limits:
+suppressed against dismissed/closed loops, and inert until the operator
+confirms **by CLI** — there is no model-facing add, close, reopen, confirm,
+or dismiss. (A model-relayed confirmation bound to ingested operator
+utterances was built and retired before field use: verifying that words
+were uttered cannot distinguish assent from rejection, so it could launder
+rejecting words into authority — the negative result is recorded in the
+contract.) No calendars, no recurrence, no notifications — this is durable
+operator state, not a planner. Contract, threat model, and measured limits:
 [docs/OPEN_LOOPS.md](docs/OPEN_LOOPS.md).
 
 ## Measuring whether context matters

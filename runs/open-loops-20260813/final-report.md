@@ -36,11 +36,14 @@ plus the prior explicit-channel license (exp #42203).
   loss structurally forbidden); closed/dismissed/candidates/wrong-project
   excluded; reopened return; distilled checkpoints re-attach the section
   verbatim.
-- **MCP surface** (server-enforced allowlist): `loop_candidate`,
-  `loop_list` (gated read), and `loop_confirm`/`loop_dismiss` only under a
-  kernel-verified post-candidate operator-utterance binding — attribution,
-  not authentication; no model-facing add/close/reopen. Restricted configs
-  (openclaw) gain nothing implicitly (pinned by test).
+- **MCP surface** (server-enforced allowlist): `loop_candidate` and
+  `loop_list` (gated read) only. A `loop_confirm`/`loop_dismiss` relay
+  bound to post-candidate operator utterances was built and retired before
+  field use — operator review showed the binding proves
+  utterance-occurrence, not assent (rejecting words satisfy it), a
+  mechanical defect, so model-mediated confirmation is absent rather than
+  behaviorally promised. No model-facing add/close/reopen/confirm/dismiss.
+  Restricted configs (openclaw) gain nothing implicitly (pinned by test).
 - **Candidate scanner** (`hooks/loop_scan.py`): harness-side, gated,
   receipted, derivation-bound, dispatch-outcome-recorded, mechanically
   incapable of promotion (its grant contains one tool), silent-by-design
@@ -82,14 +85,28 @@ runs. All 52 dispatches succeeded; no exclusions.
 - The autonomous-capture numbers, though above bar, are a property of one
   generator prompt on designer-written fixtures; ecological validity is
   exactly what the operator trial exists to test.
-- The utterance binding is not authentication and never claims the semantic
-  link between utterance and candidate.
+- Nothing about model-mediated confirmation: that surface was retired as
+  mechanically unsound (utterance-occurrence is not assent) before any
+  field use, and its absence is pinned by test.
+
+## The precise ledger (post operator review, 2026-08-13)
+
+- Synthetic scanner capture (held-out fixtures): **EARNED**, machine-side.
+- Proposal-only authority boundary: **EARNED** (mechanically absent
+  promotion; pinned by test).
+- Explicit CLI lifecycle and carriage: **working** (deterministic gates).
+- Free-form utterance confirmation: **mechanically unsound — retired**
+  (utterance-occurrence is not assent; recorded as a negative result).
+- Real-world assisted capture: **NOT EARNED** pending field evidence.
 
 ## The ask (the only remaining gate)
 
-Run the fixed operator-trial protocol in docs/OPEN_LOOPS.md — ~5 normal
-working sessions, externalize real loops in your own words as they arise,
-resume normally, close/dismiss as reality dictates, then list what you
-recognized but never externalized. The session that scores it applies the
-same preregistered bars. Until then the verdict stays `NOT EARNED`, and the
-assisted workflow it gates is already shipped and usable.
+Run the operator-trial protocol v2 in docs/OPEN_LOOPS.md — ~5 normal
+working sessions, externalize real loops in your own words as they arise
+(direct `ctx loop add`, or candidate + your CLI confirm), resume normally,
+close/dismiss as reality dictates, then list every priority you recognized
+but never externalized. v2 scores assisted capture over that full honest
+denominator (bar >= 0.8, n >= 5) and stratifies results by capture path so
+neither path hides the other. Until it runs the verdict stays `NOT
+EARNED`, and the assisted workflow it gates is already shipped and
+usable.

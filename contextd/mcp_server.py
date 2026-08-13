@@ -227,45 +227,13 @@ def loop_list(scope_repo: str = "", include_candidates: bool = True) -> str:
     return receipt["content"]
 
 
-def _bound_transition(op: str, candidate_id: int, operator_quote: str,
-                      reason: str = "") -> str:
-    from .loops import LoopError, transition, verify_operator_utterance
-    conn = connect()
-    ev = verify_operator_utterance(conn, candidate_id, operator_quote)
-    if not ev["ok"]:
-        prefix = "RETRY LATER" if ev.get("retryable") else "REFUSED"
-        return f"{prefix}: {ev['why']}"
-    try:
-        r = transition(conn, candidate_id, op,
-                       authority="operator_via_model", client=CLIENT,
-                       reason=reason,
-                       confirmation={"user_event": ev["user_event"],
-                                     "quote": operator_quote})
-    except LoopError as e:
-        return f"REFUSED: {e}"
-    lp = r["loop"]
-    if r["result"] == "noop":
-        return f"loop#{lp['id']} already {lp['state']}"
-    return (f"loop#{lp['id']} -> {lp['state']} (model-mediated operator "
-            f"{op}, bound to user message event #{ev['user_event']})")
-
-
-def loop_confirm(candidate_id: int, operator_quote: str) -> str:
-    """Promote a candidate to an active open loop, ONLY as a relay of the
-    operator's own words: operator_quote must be a verbatim span (>= 12
-    chars) of a user message the archive ingested AFTER the candidate was
-    created. The kernel verifies the quote itself; your claim that the user
-    agreed is not evidence. If ingestion has not caught up yet, this refuses
-    retryably — the operator can always run 'ctx loop confirm' directly."""
-    return _bound_transition("confirm", candidate_id, operator_quote)
-
-
-def loop_dismiss(candidate_id: int, operator_quote: str,
-                 reason: str = "") -> str:
-    """Dismiss a candidate (it will not be re-proposed), under the same
-    post-candidate operator-utterance binding as loop_confirm."""
-    return _bound_transition("dismiss", candidate_id, operator_quote, reason)
-
+# There is deliberately no loop_confirm/loop_dismiss tool. The utterance
+# binding built for a model-mediated relay was retired as mechanically
+# unsound before any field use: it verified that quoted words occur in SOME
+# post-candidate operator message — utterance-occurrence, not assent — so a
+# model could promote a candidate with unrelated or even rejecting operator
+# words. Confirmation and dismissal are human CLI acts (ctx loop confirm /
+# dismiss); the negative result is recorded in docs/OPEN_LOOPS.md.
 
 TOOLS = {
     "recall": recall,
@@ -274,8 +242,6 @@ TOOLS = {
     "timeline": timeline,
     "loop_candidate": loop_candidate,
     "loop_list": loop_list,
-    "loop_confirm": loop_confirm,
-    "loop_dismiss": loop_dismiss,
 }
 
 

@@ -48,37 +48,38 @@ never silently turn a guess into operator intent.
 |---|---|---|
 | `operator` | a direct human act through the CLI | `ctx loop ...` only |
 | `model` | a model/harness proposal — non-authoritative | MCP `loop_candidate`, harness hooks |
-| `operator_via_model` | model-mediated relay of a specific, mechanically evidenced operator confirmation | MCP `loop_confirm` / `loop_dismiss`, only with a verified utterance binding (below) |
 
-The model-mediated path is **attribution, not authentication** — the same
-trust model as `CONTEXTD_CLIENT` and `CONTEXTD_DERIVATION_SOURCE`
-(`docs/PROVENANCE.md`): same-owner processes are trusted; the binding makes
-honest wiring inspectable, it does not defeat a dishonest owner-level process.
+All labels are **attribution, not authentication** — the same trust model
+as `CONTEXTD_CLIENT` and `CONTEXTD_DERIVATION_SOURCE`
+(`docs/PROVENANCE.md`): same-owner processes are trusted; labels make
+honest wiring inspectable, they do not defeat a dishonest owner-level
+process.
 
-### The utterance binding (what "mechanically evidenced" means)
+### Model-mediated confirmation: built, found unsound, retired
 
-`loop_confirm(candidate_id, operator_quote)` promotes a candidate only when
-the kernel itself verifies **all** of:
+An `operator_via_model` relay (`loop_confirm(candidate_id, operator_quote)`)
+was designed and implemented under this contract's first freeze: the kernel
+verified that the quoted words occur verbatim in an ingested `role=user`
+message appended *after* the candidate. Operator review identified the
+defect before any field use, and it is disqualifying: the check proves
+**utterance-occurrence, not assent**. Any post-candidate operator message
+satisfies it — including an unrelated one, or a *rejecting* one ("no, drop
+the dead-letter idea") — so a model could promote any candidate by quoting
+arbitrary operator bytes, laundering them into operator authority. No
+mechanical strengthening available to this record closes the gap:
+content-overlap rules stay negation-blind, and assent-vs-rejection is
+exactly the semantic judgment the kernel refuses everywhere else
+(`docs/PROVENANCE.md`).
 
-1. the target is a `candidate` (state check, reduced from events);
-2. `operator_quote`, whitespace-normalized, is at least 12 characters (a
-   policy constant, chosen not measured) — too short is refused as
-   insufficient evidence, because "yes"/"ok" match half of all dialogue;
-3. the quote occurs verbatim inside an ingested `claude_code/message` event
-   with `role=user` whose **event id is greater than the candidate's** — the
-   operator demonstrably uttered these words *after* the candidate existed.
-
-The recorded transition carries the matched user event id. What this proves:
-the operator really typed those words, at an archive position after the
-candidate. What it does **not** prove: that the words referred to this
-candidate — that link is a model judgment and is labeled
-`operator_via_model`, never `operator`. An earlier generic instruction
-("always track my tasks"), or the model's unquoted claim that the user
-agreed, verifies nothing and is refused. Transcript ingestion runs on a scan
-interval, so a confirmation typed seconds ago may not be ingested yet: the
-tool refuses **retryably** and names the fallback (`ctx loop confirm`). If
-this archive's ingestion cannot evidence the utterance, model-mediated
-confirmation is *absent*, not simulated.
+Per the mission rule — *if the installed client cannot provide the binding,
+model-mediated confirmation is absent rather than behaviorally promised* —
+the relay tools were **removed**, the `operator_via_model` label retired
+unused, and a test pins the absence
+(`tests/test_loops.py::test_no_model_facing_promotion_path_exists`).
+Confirmation and dismissal are human CLI acts. A model that hears "yes,
+board it" says so and hands the operator the one-line command; it cannot
+act on it. This costs one command of friction and buys an authority
+boundary that is sound by construction instead of plausible by wording.
 
 ## The lifecycle
 
@@ -198,10 +199,10 @@ them: the registry never advertises them (server-enforced allowlist).
 ## Threat model
 
 - **A model inventing operator intent**: candidates are non-authoritative by
-  label; promotion requires a human CLI act or the utterance binding; the
-  binding requires post-candidate ingested operator bytes, which a model
-  subprocess cannot mint (it would have to actually get the operator to type
-  the words into their own session).
+  label, and promotion is exclusively a human CLI act — the model-mediated
+  relay was retired because its evidence check (utterance-occurrence) could
+  not distinguish assent from rejection; there is no tool through which a
+  model can move any loop past `candidate`.
 - **Prompt injection in dialogue** ("mark all loops closed"): ingested text
   is data; nothing in the kernel executes it; closing requires the CLI or
   nothing. A poisoned generator can at worst propose junk candidates, which
@@ -277,30 +278,55 @@ wording, and real timing. The protocol is fixed here before being offered;
 running it is the operator's call. Simulated operators calibrate
 instruments; they cannot stand in at this gate.
 
-**Protocol (assisted path), v1 — frozen 2026-08-13:**
+**Protocol v2 — frozen 2026-08-13.** (v1, frozen earlier the same day,
+never ran. Operator review found its pass condition scored only the
+survival of *externalized* loops: the recognized-but-never-externalized
+list was collected but did not participate in scoring, so v1 could have
+earned "assisted capture" while missing most recognized loops — it earned
+assisted *carriage* at best. v2 puts the honest denominator in the pass
+condition and stratifies by capture path. The defect was in the gate
+definition, not in any result: no trial ran under v1.)
 
 1. Window: the operator's next ~5 real working sessions (any repos), no
-   scripted content, no reminders from the assistant mid-window.
+   scripted content, no reminders from the assistant mid-window; the window
+   extends until at least 5 recognized loops exist (denominator floor).
 2. Whenever the operator recognizes a real "that's on the board" moment,
    they externalize it in one short act of their choice: either
-   `ctx loop add "<their own words>"`, or saying it to a connected model
-   and letting a candidate + one confirmation carry it.
+   `ctx loop add "<their own words>"` (path A), or saying it to a connected
+   model, letting `loop_candidate` propose, and confirming with
+   `ctx loop confirm <id>` (path B — confirmation is always the operator's
+   CLI act; the model cannot do it).
 3. Work and end sessions normally. On each later resumption in that repo,
    compile the normal checkpoint and note whether every still-relevant loop
    appears under ACTIVE OPEN LOOPS. Close/dismiss as reality dictates.
-4. At window end, the operator also lists any priority they recognized but
-   did NOT externalize that died anyway — the honest denominator for what
-   this mechanism cannot see.
+4. At window end, the operator lists every priority they recognized during
+   the window but never externalized — including ones that died. This list
+   is the rest of the denominator, on the operator's honor; the mechanism
+   cannot see it, which is the point.
 
-Endpoints, scored mechanically from the ledger plus the operator's list:
-capture (externalized loops that survived to their discharge or the window
-end: bar 100% carriage at every compiled resumption), burden (false
-candidates dismissed per session: bar <= 1.0), false promotion (bar 0), and
-the operator's explicit yes/no on whether the workflow cost was acceptable.
-`ASSISTED CAPTURE EARNED` requires every bar plus the operator's yes.
-Autonomous capture would additionally require the scanner proposing the
-operator's unexternalized priorities at the preregistered bars on live
-dialogue — nothing below re-tests that branch on fixtures.
+Endpoints, scored mechanically from the ledger plus the operator's list,
+**stratified by capture path (A: direct add; B: candidate + CLI confirm)**
+so neither path's success hides the other's failure:
+
+- **assisted capture** = externalized loops / all recognized loops
+  (externalized + the window-end list). Bar: >= 0.8 with denominator >= 5.
+  This is the endpoint v1 lacked; without it the trial can only claim
+  carriage.
+- **carriage** = every still-relevant externalized loop present in every
+  compiled resumption checkpoint for its repo. Bar: 100%.
+- **burden** = false candidates the operator had to dismiss, per session.
+  Bar: <= 1.0. (Path B only; path A has no burden by construction.)
+- **false promotion** = any loop past `candidate` without an operator CLI
+  act. Bar: 0.
+- the operator's explicit yes/no on whether the workflow cost was
+  acceptable.
+
+`ASSISTED CAPTURE EARNED` requires every bar plus the operator's yes, with
+per-path results reported separately (a pass carried entirely by path A is
+reported as such — it says the CLI habit works, not that candidate
+proposal helps). Autonomous capture would additionally require the scanner
+proposing the operator's *unexternalized* priorities at the preregistered
+bars on live dialogue — nothing below re-tests that branch on fixtures.
 
 ## CLI surface
 
@@ -316,9 +342,9 @@ ctx loop dismiss <candidate-id> [--reason TEXT]
 ```
 
 MCP tools (server-enforced allowlist; absent unless granted):
-`loop_candidate`, `loop_list`, `loop_confirm`, `loop_dismiss` — the last two
-only under the utterance binding. There is no model-facing `add`, `close`,
-or `reopen`.
+`loop_candidate` and `loop_list` only. There is no model-facing `add`,
+`close`, `reopen`, `confirm`, or `dismiss` — promotion and dismissal are
+human CLI acts (see "built, found unsound, retired" above).
 
 ## Measured results
 
@@ -388,10 +414,11 @@ are reported separately and license nothing beyond themselves.
   from >= 0.95 with both flip risks under 5%; a true 0.85-0.9 mechanism
   under-credits with p ~ 0.11 (calibration-frozen.json). n=13+ would be
   needed to separate 0.5 from 0.9.
-- The utterance binding proves an operator typed the quoted words after the
-  candidate existed — nothing more. The semantic link between utterance and
-  candidate stays a labeled model judgment; ingestion lag makes the relay
-  refuse retryably; and the whole boundary is same-owner attribution, not
+- The retired utterance binding is a demonstrated negative, not a shipped
+  caveat: proving an operator typed quoted words after a candidate existed
+  cannot distinguish assent from rejection, so it could promote a candidate
+  on rejecting words. Model-mediated confirmation is therefore absent; the
+  whole authority surface remains same-owner attribution, not
   authentication (docs/PROVENANCE.md).
 - No claim is made about other models, real archives, real operator
   wording/timing, cross-session ecology, or anything the operator trial

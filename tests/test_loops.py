@@ -14,7 +14,7 @@ from contextd.gate import verify_anchors
 from contextd.handoff import compile_checkpoint, select_checkpoint_context
 from contextd.loops import (LoopError, add_candidate, add_loop, dedupe_key,
                             loops_for_scope, make_scope, reduce_loops,
-                            transition, verify_operator_utterance)
+                            transition)
 from experiments.open_loops.scoring import check_carriage
 
 REPO_A = make_scope("/synthetic/amberlight")
@@ -251,38 +251,28 @@ def test_locked_dedupe_stops_a_racing_duplicate(isolated_contextd_home):
         "SELECT COUNT(*) FROM events WHERE kind='loop'").fetchone()[0] == 1
 
 
-# --- the utterance binding ---------------------------------------------------
+# --- model-mediated promotion is absent, not gated ---------------------------
 
-def test_utterance_binding_requires_post_candidate_user_bytes(
-        isolated_contextd_home):
+def test_no_model_facing_promotion_path_exists(isolated_contextd_home):
+    """The retired utterance binding verified utterance-occurrence, not
+    assent (a rejecting operator message satisfied it), so the relay was
+    removed rather than shipped. This pins the absence: the MCP registry
+    exposes no confirm/dismiss/add/close/reopen, and a candidate stays a
+    candidate until a human CLI act — however much post-candidate operator
+    dialogue exists."""
+    from contextd.mcp_server import TOOLS
+    assert not {"loop_confirm", "loop_dismiss", "loop_add", "loop_close",
+                "loop_reopen"} & set(TOOLS)
+
     conn = connect()
-    _msg(conn, "user", "yes, the dead-letter shelf is on the board")  # BEFORE
     cand = add_candidate(conn, "add a dead-letter shelf", REPO_B)["loop"]
+    _msg(conn, "user", "yes — the dead-letter shelf is on the board")
+    _msg(conn, "user", "actually no, drop the dead-letter idea entirely")
+    assert reduce_loops(conn)["loops"][cand["id"]]["state"] == "candidate"
 
-    early = verify_operator_utterance(
-        conn, cand["id"], "the dead-letter shelf is on the board")
-    assert not early["ok"] and early["retryable"]
-
-    short = verify_operator_utterance(conn, cand["id"], "yes do it")
-    assert not short["ok"] and not short["retryable"]
-
-    _msg(conn, "assistant", "confirming: the dead-letter shelf is on the "
-                            "board")  # wrong role
-    wrong_role = verify_operator_utterance(
-        conn, cand["id"], "the dead-letter shelf is on the board")
-    assert not wrong_role["ok"]
-
-    uid = _msg(conn, "user", "yes — the dead-letter shelf is on the board")
-    ok = verify_operator_utterance(
-        conn, cand["id"], "the dead-letter shelf is on the board")
-    assert ok["ok"] and ok["user_event"] == uid
-
-    r = transition(conn, cand["id"], "confirm", "operator_via_model",
-                   client="mcp", confirmation={"user_event": uid,
-                                               "quote": "…"})
+    r = transition(conn, cand["id"], "confirm", "operator", client="cli")
     assert r["loop"]["state"] == "open"
-    assert r["loop"]["promoted_authority"] == "operator_via_model"
-    assert r["loop"]["confirmation"]["user_event"] == uid
+    assert r["loop"]["promoted_authority"] == "operator"
 
 
 def test_identical_dialogues_reduce_identically(isolated_contextd_home,

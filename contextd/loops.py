@@ -21,7 +21,6 @@ from pathlib import Path
 
 from .db import append_event, append_event_checked
 
-MIN_QUOTE_CHARS = 12    # policy constant (contract: chosen, not measured)
 LOOP_SHARE = 0.15       # checkpoint slice; policy constant under test
 LOOP_SLICE_MIN = 200    # est. tokens; policy constant under test
 OMISSION_RESERVE = 48   # est. tokens held back so omission is always loud
@@ -97,7 +96,6 @@ def reduce_loops(conn) -> dict:
                 "promoted_authority": None,
                 "last_reason": "",
                 "source_events": meta.get("source_events") or [],
-                "confirmation": None,
                 "dedupe": meta.get("dedupe") or dedupe_key(
                     meta.get("scope") or {"global": True}, r["content"] or ""),
                 "history": [{"event": r["id"], "op": op, "ts": r["ts"],
@@ -129,8 +127,6 @@ def reduce_loops(conn) -> dict:
         if op == "confirm":
             loop["state"] = "open"
             loop["promoted_authority"] = meta.get("authority")
-            if meta.get("confirmation"):
-                loop["confirmation"] = meta["confirmation"]
         elif op == "close":
             loop["state"] = "closed"
         elif op == "reopen":
@@ -268,10 +264,17 @@ _TABLE = {
 
 
 def transition(conn, loop_id: int, op: str, authority: str,
-               client: str = "cli", reason: str = "",
-               confirmation: dict | None = None) -> dict:
+               client: str = "cli", reason: str = "") -> dict:
     """One lifecycle transition per the frozen table. No-ops append nothing;
-    refusals raise LoopError with the exact rule violated."""
+    refusals raise LoopError with the exact rule violated.
+
+    There is deliberately NO model-mediated promotion path. A candidate
+    utterance-binding was built and retired before any field use: verifying
+    that quoted words occur in a post-candidate operator message proves
+    utterance-occurrence, not assent — a rejecting message satisfies it —
+    so it laundered arbitrary operator bytes into operator authority. The
+    negative result is recorded in docs/OPEN_LOOPS.md; confirmation is a
+    human CLI act."""
     if op not in _TABLE:
         raise LoopError(f"unknown transition {op!r}")
     loop = reduce_loops(conn)["loops"].get(loop_id)
@@ -283,41 +286,11 @@ def transition(conn, loop_id: int, op: str, authority: str,
     if loop["state"] not in rules["from"]:
         raise LoopError(
             f"loop#{loop_id} is {loop['state']}: {rules['refuse'][loop['state']]}")
-    meta = {"op": op, "loop": loop_id, "authority": authority,
-            "client": client}
-    if confirmation:
-        meta["confirmation"] = confirmation
     eid = append_event(conn, "loop", "loop", content=reason.strip() or None,
-                       meta=meta)
+                       meta={"op": op, "loop": loop_id,
+                             "authority": authority, "client": client})
     return {"result": op, "loop": reduce_loops(conn)["loops"][loop_id],
             "event": eid}
-
-
-def verify_operator_utterance(conn, candidate_id: int, quote: str) -> dict:
-    """Mechanical evidence for model-mediated confirmation: the quote must
-    occur verbatim (whitespace-normalized) inside an ingested role=user
-    dialogue event appended AFTER the candidate. Returns the newest matching
-    event id, or a structured refusal — never a guess. Proves the operator
-    typed these words after the candidate existed; does NOT prove the words
-    referred to this candidate (contract: the semantic gap stays open)."""
-    norm = normalize_text(quote)
-    if len(norm) < MIN_QUOTE_CHARS:
-        return {"ok": False, "retryable": False,
-                "why": f"quote under {MIN_QUOTE_CHARS} chars is insufficient "
-                       "evidence; supply a longer verbatim span"}
-    rows = conn.execute(
-        "SELECT id, content FROM events WHERE source='claude_code' "
-        "AND kind='message' AND id > ? "
-        "AND json_extract(meta,'$.role')='user' ORDER BY id DESC LIMIT 500",
-        (candidate_id,)).fetchall()
-    for r in rows:
-        if norm in normalize_text(r["content"] or ""):
-            return {"ok": True, "user_event": r["id"]}
-    return {"ok": False, "retryable": True,
-            "why": "no ingested post-candidate operator message contains "
-                   "that quote; ingestion lags by up to one scan interval — "
-                   "retry shortly, or the operator can run "
-                   "'ctx loop confirm' directly"}
 
 
 # --- checkpoint carriage -----------------------------------------------------

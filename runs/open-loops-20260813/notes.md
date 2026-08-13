@@ -247,3 +247,28 @@ skip-without-disclosure on empty dialogue.
 - docs/OPEN_LOOPS.md measured results + limitations filled; README
   corrected (overstatement fixed, loops section added); final-report.md
   written; operator protocol frozen in the contract doc and presented.
+
+## Post-mission operator review (2026-08-13): two objections, both accepted
+
+1. The utterance-bound loop_confirm/loop_dismiss relay was mechanically
+   unsound: it verified utterance-occurrence, not assent — any
+   post-candidate operator message (unrelated or rejecting) satisfied it,
+   making it a promotion channel that launders arbitrary operator bytes
+   into authority. No negation-aware mechanical strengthening exists within
+   the kernel's honesty boundary. REMOVED (tools, verifier, label) per the
+   mission's own absence rule; retirement documented in docs/OPEN_LOOPS.md;
+   absence pinned by test_no_model_facing_promotion_path_exists. The
+   binding never fired in the preregistered eval (scanner grant was
+   candidate-only), so no recorded result changes.
+2. Operator-trial protocol v1 scored only externalized-loop survival — the
+   recognized-but-never-externalized list did not participate, so v1 could
+   earn "assisted capture" while measuring assisted carriage. Protocol v2
+   puts the full recognized denominator in the pass condition (capture >=
+   0.8, n >= 5) and stratifies every endpoint by capture path (direct add
+   vs candidate+CLI-confirm). v1 never ran; the defect was in the gate
+   definition, not any result.
+
+Precise ledger after review: synthetic scanner capture EARNED
+(machine-side); proposal-only authority EARNED; CLI lifecycle+carriage
+working; free-form utterance confirmation mechanically unsound (retired);
+real-world assisted capture NOT EARNED pending field evidence.
