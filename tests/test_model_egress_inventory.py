@@ -46,12 +46,18 @@ EXPECTED_SUBPROCESS_CALLS = {
     ("contextd/cli.py", "cmd_checkpoint", "call"): "local harness delegation",
     ("experiments/handoff/openloops.py", "build_contexts", "run"):
         "local git log only",
+    ("experiments/handoff/openthreads.py", "run_pass", "run"):
+        "model (open-threads extraction; episode dialogue passes the frozen "
+        "view's gate first, notes bound via CONTEXTD_DERIVATION_SOURCE)",
+    ("experiments/handoff/openthreads.py", "run_case", "run"):
+        "local git log only",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
     ("hooks/reconcile.py", "reconcile"),
     ("hooks/synthesis_recall.py", "distill"),
     ("hooks/checkpoint_compile.py", "distill"),
+    ("experiments/handoff/openthreads.py", "run_pass"),
     ("experiments/provenance/model_trials.py", "dispatch_note_writer"),
 }
 
