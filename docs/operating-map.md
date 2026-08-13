@@ -23,17 +23,6 @@ handoff, done), not as a journal.
 
 ## Lanes
 
-### selection-stress
-- **Objective:** Measure the loss surface of checkpoint compilation — planted
-  load-bearing items across archive size × age × lexical distance ×
-  distractors; deterministic carriage grid + preregistered behavioral subset.
-- **Owning session:** Claude Code, branch `selection-stress`
-  (goal prompt: mission-a-selection-stress.md)
-- **State:** handoff — prompt ready, not yet launched
-- **Blockers:** `instruments-liveness-tally` merged to master (lane verifies
-  154-test baseline at start)
-- **Last update:** 2026-08-13 — chartered
-
 ### lineage-drift-audit
 - **Objective:** Deterministic derivation-depth gauge (`ctx lineage`, depth>1
   alert) + judge-calibrated sampled fidelity audit of model-written notes,
@@ -67,4 +56,14 @@ handoff, done), not as a journal.
 
 ## Done
 
-(empty — finished lanes move here with a one-line outcome)
+- 2026-08-13 — **selection-stress** (Claude Code / Fable 5, branch
+  `selection-stress` @ c6ff6e7): loss surface measured. Validity gate 1.0
+  all pairs; 7,830-row grid; silent absence >20% already at t5k/recent/mid
+  (0.556); stale resurrection 0.269; latency 21/63/248ms by tier;
+  behavioral prereg #36 (249/300 dispatches — prereg #2 voided honestly at
+  32 for a rubric token collision): restoring absent items moves honor
+  rate by 0.833 (p=5e-5), stale carriage becomes stale behavior
+  (0.625–0.875 v1-as-current). Positive control missed its bar (0.5 vs
+  0.9) — instrument finding (placement salience). Report:
+  runs/selection-stress-2026-08-13/ (rebuilds byte-identically via
+  `bench.py report 36`). Gates: ruff clean, 164 pytest, selftest green.
