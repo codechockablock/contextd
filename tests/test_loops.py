@@ -344,6 +344,8 @@ def test_carriage_survives_crowd_out_and_excludes_by_state_and_scope(
         "SELECT meta FROM events WHERE id=?",
         (out["egress_id"],)).fetchone()["meta"])
     assert meta["loops_omitted"] == []
+    assert meta["loop_scope"] == "/synthetic/amberlight", \
+        "carriage must be scorable from the ledger alone (trial.py)"
 
     # reopened loops return; re-closed ones leave again
     transition(conn, closed["id"], "reopen", "operator")

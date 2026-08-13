@@ -222,3 +222,48 @@ def test_every_must_capture_dialogue_has_matchable_plant():
 def test_projects_and_digest_are_frozen():
     assert set(PROJECTS) == {"amberlight", "gaugepost", "quartzfeed"}
     assert len(fixture_digest()) == 64
+
+
+def test_trial_scorer_math_on_a_synthetic_window(isolated_contextd_home):
+    """The v2 trial scorer, pinned before the window: path stratification,
+    the honest denominator, carriage from ledger meta alone, burden per
+    session-day, and the named-omission loud failure."""
+    from contextd import load_config
+    from contextd.db import append_event, connect
+    from contextd.handoff import compile_checkpoint
+    from contextd.loops import add_candidate, add_loop, make_scope, transition
+    from experiments.open_loops.trial import score_window
+
+    conn = connect()
+    start = append_event(conn, "note", "note", content="window start",
+                         meta={"actor": "human"})
+    scope = make_scope("/synthetic/amberlight")
+    a = add_loop(conn, "re-run the drift correction", scope)["loop"]
+    cand = add_candidate(conn, "audit the sitemap generator", scope)["loop"]
+    transition(conn, cand["id"], "confirm", "operator")
+    junk = add_candidate(conn, "polish every docstring", scope)["loop"]
+    transition(conn, junk["id"], "dismiss", "operator", reason="noise")
+    append_event(conn, "claude_code", "message", uri="claude://t1",
+                 content="working", meta={"role": "user", "session_id": "s1"})
+    ck = compile_checkpoint(conn, load_config(), budget=4000,
+                            repo={"path": "/synthetic/amberlight"})
+    end = append_event(conn, "note", "note", content="window end",
+                       meta={"actor": "human"})
+
+    r = score_window(conn, start, end, missed=1)
+    assert r["paths"]["A_direct_add"] == [a["id"]]
+    assert r["paths"]["B_candidate_confirmed"] == [cand["id"]]
+    assert r["capture"]["denominator"] == 3
+    assert r["capture"]["rate"] == round(2 / 3, 4)
+    assert not r["capture"]["pass"], "denominator floor of 5 must gate"
+    assert r["carriage"]["pass"] is True
+    assert r["carriage"]["checks"][0]["egress"] == ck["egress_id"]
+    assert sorted(r["carriage"]["checks"][0]["expected"]) == \
+        sorted([a["id"], cand["id"]])
+    assert r["burden"]["dismissals"] == 1 and r["burden"]["session_days"] == 1
+    assert r["burden"]["pass"]
+    assert r["false_promotion"]["pass"]
+
+    # a checkpoint that omits an active loop must fail carriage loudly
+    r2 = score_window(conn, start, end, missed=0)
+    assert r2["capture"]["rate"] == 1.0

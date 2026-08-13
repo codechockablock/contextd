@@ -354,6 +354,7 @@ def compile_checkpoint(conn, cfg, budget: int = 4000, task_hint: str = "",
     disclosure = disclose(conn, cfg, package, {
         "type": "checkpoint", "tip": tip, "task_hint": task_hint,
         "purpose": purpose, "items": ids, "client": client,
+        "loop_scope": repo_path or "global",
         "loops_omitted": selection.get("loops_omitted") or []})
     return {"package": disclosure["content"], "items": ids, "tip": tip,
             "egress_id": disclosure["egress_id"],
