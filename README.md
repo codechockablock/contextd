@@ -172,6 +172,13 @@ If it beats grep and your own memory ≥30% of the time, v0.1 is earned — and
 the misses tell you *what* to build (vocabulary mismatch → embeddings earn
 their place; time confusion → better windows; and so on).
 
+Resumptions are judged the same way: every `ctx checkpoint` egress takes the
+same verdict, plus `--failure-class` on a miss or partial — `not-in-archive`
+(never captured), `not-selected` (in the archive, absent from the package),
+`drowned` (in the package, buried), `superseded` (selected, but a later
+decision made it stale). The scoreboard stratifies by egress type; the class
+distribution of real misses is what licenses the next selection work.
+
 Back up the archive as a complete versioned bundle:
 
 ```bash
@@ -187,6 +194,9 @@ unexpected, missing, traversing, symlinked, or hash-mismatched payloads are
 refused; it stages and verifies SQLite, FTS, event chain, witness, and blobs
 before one final publish rename. It never merges into a non-empty destination.
 Retention removes complete `.ctxbackup` directories only, never legacy files.
+The live database is versioned too: init (or the first write-capable connect)
+stamps `PRAGMA user_version = 1` (`SCHEMA_VERSION`), complementing the
+`BUNDLE_VERSION` the bundle manifests already carry.
 
 ## Synthesis-mode recall
 

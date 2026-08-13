@@ -733,4 +733,77 @@ assert "no candidates" in _loop_cli(action="candidates",
                                     repo="/synthetic/smoke")
 assert verify_chain(conn)["ok"]
 
+# 43. capture liveness: status always shows per-source ages; a thresholded
+# source past its threshold warns and stamps the compiled checkpoint package
+# AND its egress meta; fresh or unthresholded stamps nothing
+from datetime import datetime, timedelta
+
+import contextd.liveness as liveness
+from contextd.cli import cmd_status
+from contextd.handoff import compile_checkpoint
+
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_status(_ap.Namespace())
+status_out = buf.getvalue()
+print("\n".join(ln for ln in status_out.splitlines()
+                if "last event" in ln or "events ever" in ln
+                or ln == "capture liveness:"))
+assert "capture liveness:" in status_out
+assert "chrome: last event" in status_out and "note: last event" in status_out
+# smoke never ingests safari, so the only warning is the never-events one
+warns = [ln for ln in status_out.splitlines() if ln.startswith("WARNING")]
+assert warns == ["WARNING: safari no events ever (threshold 48h) "
+                 "— capture may be stalled"], warns
+
+_real_now = liveness.now_iso
+last_chrome = conn.execute(
+    "SELECT MAX(ts) AS t FROM events WHERE source='chrome'").fetchone()["t"]
+fake_now = (datetime.fromisoformat(last_chrome)
+            + timedelta(hours=96)).isoformat(timespec="seconds")
+liveness.now_iso = lambda: fake_now  # injected clock: no wall-clock dependence
+cfg_live = load_config()
+cfg_live["liveness"]["stale_after_hours"] = {"chrome": 48}
+stale = [r for r in liveness.capture_liveness(conn, cfg_live) if r["stale"]]
+assert [r["source"] for r in stale] == ["chrome"], stale
+ck = compile_checkpoint(conn, cfg_live, budget=2000)
+assert ck["package"].startswith(
+    "CAPTURE STALENESS: chrome last event 4.0d ago (threshold 48h)"), \
+    ck["package"][:120]
+ckmeta = json.loads(conn.execute(
+    "SELECT meta FROM events WHERE id = ?",
+    (ck["egress_id"],)).fetchone()["meta"])
+assert ckmeta["staleness"] == [{"source": "chrome", "age_hours": 96.0}], ckmeta
+liveness.now_iso = _real_now
+ck2 = compile_checkpoint(conn, cfg_live, budget=2000)
+assert "CAPTURE STALENESS" not in ck2["package"], "fresh source stamped stale"
+assert "staleness" not in json.loads(conn.execute(
+    "SELECT meta FROM events WHERE id = ?",
+    (ck2["egress_id"],)).fetchone()["meta"])
+
+# 44. resumption tally: a checkpoint egress judged with a failure class lands
+# in the stratified scoreboard; hit + class refuses nonzero and appends nothing
+cmd_outcome(_ap.Namespace(egress_id=ck["egress_id"], verdict="miss",
+                          failure_class="not-selected", note="smoke"))
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_outcome(_ap.Namespace(egress_id=None, verdict=None, note="",
+                              failure_class=None))
+board = buf.getvalue()
+print(board.rstrip())
+assert "recalls:" in board and "(v0.1 bar: 30%)" in board
+assert "checkpoints: 2  judged: 1  unjudged: 1" in board, board
+assert "failure classes: not-selected 1" in board, board
+n_outcomes = conn.execute(
+    "SELECT COUNT(*) FROM events WHERE kind='outcome'").fetchone()[0]
+try:
+    cmd_outcome(_ap.Namespace(egress_id=ck2["egress_id"], verdict="hit",
+                              failure_class="drowned", note=""))
+    raise AssertionError("hit + --failure-class must refuse nonzero")
+except SystemExit as e:
+    assert e.code not in (0, None)
+assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='outcome'"
+                    ).fetchone()[0] == n_outcomes, "refusal appended an event"
+assert verify_chain(conn)["ok"]
+
 print("ALL SMOKE TESTS PASSED")
