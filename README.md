@@ -211,6 +211,51 @@ any distillate whose anchors don't all resolve to supplied events — an
 anchor pointing nowhere launders authority the archive never granted.
 Judge it like any recall: `ctx outcome <egress-id> hit|partial|miss`.
 
+## Checkpoint/restore: the work survives the model
+
+`ctx checkpoint` compiles the **active state** of a project — not a summary
+of its past — so a fresh model with zero session continuity can continue the
+actual work:
+
+```bash
+ctx checkpoint --repo ~/myproject --test-cmd 'pytest -q' --hint "what I was doing"
+ctx checkpoint --mode distill ...   # model-compressed, anchor-verified (hooks/)
+```
+
+The compiler is stratified, not a search box: the raw dialogue tail of the
+interrupted session (freshest working state, verbatim), reconciled episode
+notes (the archive's own anchored compression of earlier episodes), operator
+notes, an optional task-hint recall, and a live repository section (branch,
+status, diff, failing tests) — every item keeps its `[event-id]`, so each
+line stays inspectable with `ctx why`. Compilation is a gated, logged egress
+like any other disclosure; `--mode distill` adds a structured
+OBJECTIVE/STATE/DECISIONS/REJECTED/OPEN/NEXT compression whose anchors the
+kernel verifies before serving (same rule as synthesis recall: the kernel
+never calls models, and a checkpoint is a **view for resumption**, never
+re-ingested as truth — the archive stays canonical).
+
+Measured basis (handoff benchmark, ledger exps #41823/#41853/#41864/#41899/#41905;
+rebuild with `experiments/handoff/bench.py report <id>`): on a staged
+interrupted implementation, a fresh model resuming from a ~520-token
+distilled checkpoint matched the full-transcript ceiling (1.00), preserved
+dialogue-only constraints, finished the code, and passed held-out tests —
+while a same-size naive summary lost the rejected-alternative and constraint
+knowledge; sonnet and codex (cross-vendor, real runs) resumed from the same
+haiku-written checkpoint at 1.00. At two frozen real-history interruption
+points (`contextd/handoff.py` frozen views make post-cutoff events
+mechanically invisible), every contextd arm beat no-history distinguishably
+(p at the design floor), zero runs out of 96 resurrected the
+recorded-rejected alternative, and compiled checkpoints were the most
+*stable* representation across cutoffs — a naive recency summary swung
+0.92 → 0.33 between cutoffs while checkpoints held. Component ablations
+(exps #41939, #41949) found the DECISIONS/REJECTED content load-bearing
+(removing it: Δ −0.35, the only near-threshold effect); anchor-stripping
+showed no stable rubric effect, as preregistered — anchors buy
+inspectability, not lexical score. Known measured gap: no
+representation reliably carried an open thread that was neither recent nor
+lexically near the task hint (`next_check` ≈ 0 across arms) — cross-episode
+open loops are what still dies with the session.
+
 ## Measuring whether context matters
 
 The outcome tally judges recalls by hand. The experiment layer asks the harder
