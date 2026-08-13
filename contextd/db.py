@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS chain_state (
 """
 
 WITNESS_VERSION = 1
+SCHEMA_VERSION = 1
 _PROCESS_CHAIN_LOCK = threading.RLock()
 
 
@@ -77,6 +78,10 @@ def connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    # stamp legacy (user_version 0) archives; a pragma write touches no event
+    # bytes, so the chain and witness never see it. Never downgrades.
+    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     _migrate_chain(conn)
     _bootstrap_witness(conn)
     recover_chain_state(conn)

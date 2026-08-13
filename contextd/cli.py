@@ -14,6 +14,7 @@ from .backup import BackupError, create_backup, restore_backup
 from .db import ChainStateError, append_event, connect, verify_chain
 from .gate import GateError, assemble, spent_today
 from .ingest import ingest_note, run_all
+from .liveness import capture_liveness, describe, stale_line
 from .search import search, timeline
 
 CONFIG_TEMPLATE = '''# contextd config — merged over built-in defaults (see contextd/__init__.py)
@@ -32,6 +33,12 @@ safari = true
 # claude code transcripts, filtered to dialogue and redacted before storage
 enabled = true
 # quiet_seconds = 1200         # silence that closes a work episode (epoch)
+
+[liveness]
+# per-source staleness thresholds in hours; a source past its threshold warns
+# in `ctx status` and stamps compiled checkpoints. Overriding replaces the
+# defaults (chrome/safari/claude_code 48, fs 72; note has none on purpose).
+# stale_after_hours = { chrome = 48, safari = 48, claude_code = 48, fs = 72 }
 
 [gate]
 daily_token_budget = 200000
@@ -283,27 +290,65 @@ def cmd_status(args):
     size = (home() / "contextd.db").stat().st_size // 1024
     print(f"  total: {total} events, {size} KB")
     print(f"  egress today: ~{spent_today(conn)}/{cfg['gate']['daily_token_budget']} est. tokens")
+    rows = capture_liveness(conn, cfg)
+    if rows:
+        print("capture liveness:")
+    for row in rows:
+        print(f"  {row['source']}: {describe(row)}")
+    for row in rows:
+        if row["stale"]:
+            print(f"WARNING: {stale_line(row)} — capture may be stalled")
 
 
 def cmd_outcome(args):
     conn = connect()
+    failure_class = getattr(args, "failure_class", None)
+    if failure_class and args.verdict not in ("miss", "partial"):
+        sys.exit("refused: --failure-class applies only to miss or partial verdicts")
     if not args.egress_id:
-        recalls = {r["id"] for r in conn.execute(
-            "SELECT id FROM events WHERE kind='egress' "
-            "AND json_extract(meta,'$.type')='recall'")}
-        verdicts = {}
+        # scoreboard, stratified by the judged egress's meta type
+        types = {r["id"]: r["t"] for r in conn.execute(
+            "SELECT id, json_extract(meta,'$.type') AS t "
+            "FROM events WHERE kind='egress'")}
+        verdicts, classes = {}, {}
         for r in conn.execute("SELECT meta FROM events WHERE kind='outcome' ORDER BY id"):
             m = json.loads(r["meta"])
             verdicts[m["egress_id"]] = m["verdict"]  # append-only: last verdict wins
-        counts = {"hit": 0, "partial": 0, "miss": 0}
-        for eid, v in verdicts.items():
-            if eid in recalls:
-                counts[v] += 1
-        judged = sum(counts.values())
+            classes[m["egress_id"]] = m.get("failure_class")
+
+        def tally(egress_type):
+            ids = {i for i, t in types.items() if t == egress_type}
+            counts = {"hit": 0, "partial": 0, "miss": 0}
+            for eid, v in verdicts.items():
+                if eid in ids:
+                    counts[v] += 1
+            return ids, counts, sum(counts.values())
+
+        recalls, counts, judged = tally("recall")
         print(f"recalls: {len(recalls)}  judged: {judged}  unjudged: {len(recalls) - judged}")
         if judged:
             print(f"  hit {counts['hit']}  partial {counts['partial']}  miss {counts['miss']}"
                   f"  — hit rate {counts['hit'] / judged:.0%} (v0.1 bar: 30%)")
+        cps, ccounts, cjudged = tally("checkpoint")
+        print(f"checkpoints: {len(cps)}  judged: {cjudged}  "
+              f"unjudged: {len(cps) - cjudged}")
+        if cjudged:
+            print(f"  hit {ccounts['hit']}  partial {ccounts['partial']}  "
+                  f"miss {ccounts['miss']}")
+            by_class = {}
+            for eid, v in verdicts.items():
+                if eid in cps and v in ("miss", "partial") and classes.get(eid):
+                    by_class[classes[eid]] = by_class.get(classes[eid], 0) + 1
+            if by_class:
+                print("  failure classes: " + "  ".join(
+                    f"{c} {n}" for c, n in sorted(by_class.items())))
+        for t in sorted({t for t in types.values()
+                         if t not in ("recall", "checkpoint")}, key=str):
+            ids, tcounts, tjudged = tally(t)
+            if tjudged:
+                print(f"{t or '(untyped)'}: {len(ids)}  judged: {tjudged}  "
+                      f"hit {tcounts['hit']}  partial {tcounts['partial']}  "
+                      f"miss {tcounts['miss']}")
         return
     if not args.verdict:
         sys.exit("verdict required: hit | partial | miss")
@@ -311,6 +356,8 @@ def cmd_outcome(args):
                         (args.egress_id,)).fetchone():
         sys.exit(f"no egress event #{args.egress_id}")
     meta = {"egress_id": args.egress_id, "verdict": args.verdict}
+    if failure_class:
+        meta["failure_class"] = failure_class
     if args.note:
         meta["note"] = args.note
     eid = append_event(conn, "eval", "outcome", meta=meta)
@@ -499,10 +546,20 @@ def main():
     sp = sub.add_parser("audit", help="list egress events: what left, when, for what")
     sp.add_argument("--limit", type=int, default=20)
     sub.add_parser("status", help="event counts, db size, today's egress spend")
-    sp = sub.add_parser("outcome", help="judge a recall for the evaluation tally; no args = scoreboard")
+    sp = sub.add_parser("outcome", help="judge a recall or checkpoint egress for "
+                                        "the evaluation tally; no args = scoreboard")
     sp.add_argument("egress_id", nargs="?", type=int)
     sp.add_argument("verdict", nargs="?", choices=["hit", "partial", "miss"])
     sp.add_argument("--note", default="")
+    sp.add_argument("--failure-class", dest="failure_class",
+                    choices=["not-in-archive", "not-selected", "drowned",
+                             "superseded"],
+                    help="why a miss/partial failed: not-in-archive = the "
+                         "needed fact was never captured; not-selected = in "
+                         "the archive but absent from the package; drowned = "
+                         "in the package but buried/ignored; superseded = "
+                         "selected but stale — a later decision/state change "
+                         "made it wrong")
     sp = sub.add_parser("exp", help="context ablation experiments: list | show | report")
     sp.add_argument("action", choices=["list", "show", "report"])
     sp.add_argument("exp_id", nargs="?", type=int)

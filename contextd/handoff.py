@@ -50,6 +50,7 @@ from pathlib import Path
 
 from .db import SCHEMA, _atomic_json, _db_tip, chain_state_paths, now_iso
 from .gate import disclose, est_tokens, redact, select_items
+from .liveness import capture_liveness, stale_line
 
 VIEW_MARKER = "# frozen contextd view — a truncated working copy for resumption/evaluation."
 
@@ -348,14 +349,25 @@ def compile_checkpoint(conn, cfg, budget: int = 4000, task_hint: str = "",
                                           repo_path=repo_path)
     tip = _db_tip(conn)["id"]
     package = render_package(selection, repo=repo, tip=tip)
+    # stale capture follows the loops-omission contract: named in-package
+    # (first, so the resuming model sees it before any section) AND in the
+    # egress meta; a fresh archive gets neither the line nor the key
+    stale = [r for r in capture_liveness(conn, cfg) if r["stale"]]
+    if stale:
+        package = ("CAPTURE STALENESS: "
+                   + "; ".join(stale_line(r) for r in stale)
+                   + "\n\n" + package)
     ids = sorted({it["id"]
                   for k in ("loops", "tail", "episodes", "notes", "recall")
                   for it in selection[k] if it["id"] is not None})
-    disclosure = disclose(conn, cfg, package, {
-        "type": "checkpoint", "tip": tip, "task_hint": task_hint,
-        "purpose": purpose, "items": ids, "client": client,
-        "loop_scope": repo_path or "global",
-        "loops_omitted": selection.get("loops_omitted") or []})
+    meta = {"type": "checkpoint", "tip": tip, "task_hint": task_hint,
+            "purpose": purpose, "items": ids, "client": client,
+            "loop_scope": repo_path or "global",
+            "loops_omitted": selection.get("loops_omitted") or []}
+    if stale:
+        meta["staleness"] = [{"source": r["source"],
+                              "age_hours": r["age_hours"]} for r in stale]
+    disclosure = disclose(conn, cfg, package, meta)
     return {"package": disclosure["content"], "items": ids, "tip": tip,
             "egress_id": disclosure["egress_id"],
             "est_tokens": disclosure["est_tokens"], "selection": selection}
