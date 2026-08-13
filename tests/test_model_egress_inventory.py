@@ -68,6 +68,13 @@ EXPECTED_SUBPROCESS_CALLS = {
         "the archive-under-test's gate first, candidates bound via "
         "CONTEXTD_DERIVATION_SOURCE, promotion mechanically absent from "
         "the spawned server's registry)",
+    ("experiments/lineage_calibration/calibrate.py", "dispatch", "run"):
+        "model (lineage judge: calibration corpus items and, via "
+        "hooks/lineage_audit.py which imports this dispatcher, sampled "
+        "(note, leaf-evidence) bundles — every payload passes the owning "
+        "archive's gate in run_items/audit_note before dispatch, with a "
+        "linked egress_outcome; the judge gets no tools and its verdict "
+        "lands content-NULL)",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
@@ -79,6 +86,8 @@ MODEL_CALLERS = {
     ("experiments/handoff/board.py", "run_pass"),
     ("experiments/provenance/model_trials.py", "dispatch_note_writer"),
     ("hooks/loop_scan.py", "scan"),
+    ("experiments/lineage_calibration/calibrate.py", "run_items"),
+    ("hooks/lineage_audit.py", "audit_note"),
 }
 
 
