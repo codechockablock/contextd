@@ -51,6 +51,11 @@ EXPECTED_SUBPROCESS_CALLS = {
         "view's gate first, notes bound via CONTEXTD_DERIVATION_SOURCE)",
     ("experiments/handoff/openthreads.py", "run_case", "run"):
         "local git log only",
+    ("experiments/handoff/livethreads.py", "run_pass", "run"):
+        "model (live open/discharge tracking; open-set + dialogue pass the "
+        "frozen view's gate, notes bound via CONTEXTD_DERIVATION_SOURCE)",
+    ("experiments/handoff/livethreads.py", "run_case", "run"):
+        "local git log only",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
@@ -58,6 +63,7 @@ MODEL_CALLERS = {
     ("hooks/synthesis_recall.py", "distill"),
     ("hooks/checkpoint_compile.py", "distill"),
     ("experiments/handoff/openthreads.py", "run_pass"),
+    ("experiments/handoff/livethreads.py", "run_pass"),
     ("experiments/provenance/model_trials.py", "dispatch_note_writer"),
 }
 
