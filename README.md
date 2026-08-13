@@ -251,10 +251,53 @@ recorded-rejected alternative, and compiled checkpoints were the most
 (exps #41939, #41949) found the DECISIONS/REJECTED content load-bearing
 (removing it: Δ −0.35, the only near-threshold effect); anchor-stripping
 showed no stable rubric effect, as preregistered — anchors buy
-inspectability, not lexical score. Known measured gap: no
-representation reliably carried an open thread that was neither recent nor
-lexically near the task hint (`next_check` ≈ 0 across arms) — cross-episode
-open loops are what still dies with the session.
+inspectability, not lexical score. Known measured gap, stated precisely: no
+representation *reliably* carried an open thread that was neither recent nor
+lexically near the task hint — `next_check` was recovered at 0.25 by the
+raw-tail and recall arms and 0.0 by the other six (exp #41905 raw report;
+an earlier run-log summary saying "0.00 across all 8 arms" overstated this).
+Cross-episode open loops are what still died with the session; the open-loops
+mechanism below is the earned answer, built on the measured fix (exp #42203:
+one explicit operator note moved the lost target from 0/5 to 5/5).
+
+## Open loops: acknowledged work that must survive the session
+
+Four preregistered attempts to *infer* open commitments from dialogue failed
+(lexical markers, retro extraction, live tracking, a model-maintained board —
+exps #42011/#42067/#42123/#42127..#42240): the missing datum was always the
+operator's own prioritization, which is not reliably present in the
+observable record. So contextd does not mind-read. It gives the operator a
+one-line externalization act and makes that act indestructible:
+
+```bash
+ctx loop add "re-run the drift correction on the July batch"   # scoped to cwd's repo
+ctx loop list            # active loops for this repo
+ctx loop close 42317 --reason "ran clean"
+ctx loop reopen 42317 --reason "regressed"
+ctx loop candidates      # model-proposed, awaiting your confirm/dismiss
+ctx loop confirm 42410   # operator act; candidates never activate themselves
+```
+
+Loops are event-sourced (state is a pure reduction of append-only `loop`
+events; invalid transitions refuse; retries are no-ops), scoped to a
+repository or global, and carried into every `ctx checkpoint` for their repo
+in a dedicated `ACTIVE OPEN LOOPS` section selected by lifecycle state — not
+recency, not lexical luck, never competing with newer notes. If the budget
+cannot hold every active loop, the omitted ids are named in the package;
+silent loss is structurally forbidden. Closed and dismissed loops leave the
+checkpoint; reopened ones return; distilled checkpoints re-attach the section
+verbatim so carriage never depends on a model's choices.
+
+Models may *propose* (`loop_candidate` over MCP, or the gated
+`hooks/loop_scan.py` scanner): proposals are labeled, deduplicated,
+suppressed against dismissed/closed loops, and inert until an operator
+confirms — by CLI, or through a model-relayed confirmation that the kernel
+verifies against an actually-ingested post-candidate operator message
+(attribution, not authentication; the semantic link stays a labeled model
+judgment). There is no model-facing add, close, or reopen. No calendars, no
+recurrence, no notifications — this is durable operator state, not a
+planner. Contract, threat model, and measured limits:
+[docs/OPEN_LOOPS.md](docs/OPEN_LOOPS.md).
 
 ## Measuring whether context matters
 
