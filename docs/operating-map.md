@@ -38,11 +38,19 @@ handoff, done), not as a journal.
 - **Objective:** Deterministic derivation-depth gauge (`ctx lineage`, depth>1
   alert) + judge-calibrated sampled fidelity audit of model-written notes,
   advisory-only, `AUDIT NOT EARNED` shipped honestly if calibration bars miss.
-- **Owning session:** Claude Code, branch `lineage-drift-audit`
-  (goal prompt: mission-b-lineage-drift.md)
-- **State:** handoff — prompt ready, not yet launched
-- **Blockers:** same instruments-merge precondition
-- **Last update:** 2026-08-13 — chartered
+- **Owning session:** Claude Code (Fable 5), worktree `/Users/joseph/ctx-b`,
+  branch `lineage-drift-audit` (goal prompt: mission-b-lineage-drift.md)
+- **State:** done — ready for review/merge. Gauge + calibrated audit shipped;
+  calibration verdict **AUDIT EARNED** (prereg #76, held-out 150/150 bars
+  passed, quantitative-shift ceiling 1.00); live baseline measured (29 notes,
+  all depth 1, 38/38 anchors); first live audit ran (7 advisory verdicts);
+  183/250 dispatches used. Report: runs/lineage-audit-2026-08-13/.
+  Note: mission's `actor='mcp'` filter didn't match the live archive
+  (notes carry client names); audit uses the provenance_class boundary —
+  surfaced in the final report, not silently adapted.
+- **Blockers:** —
+- **Last update:** 2026-08-13 — mission complete, gates green (185 pytest,
+  smoke, ruff, network grep 3)
 
 ### restore-firedrill
 - **Objective:** Weekly restore drill with behavioral-equivalence battery and
