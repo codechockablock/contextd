@@ -44,6 +44,8 @@ EXPECTED_SUBPROCESS_CALLS = {
     ("experiments/handoff/staged.py", "make_repo", "run"):
         "local git init in the scratch repo, no archive bytes",
     ("contextd/cli.py", "cmd_checkpoint", "call"): "local harness delegation",
+    ("experiments/handoff/openloops.py", "build_contexts", "run"):
+        "local git log only",
 }
 MODEL_CALLERS = {
     ("experiments/runner.py", "run_model"),
