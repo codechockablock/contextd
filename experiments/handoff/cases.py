@@ -187,4 +187,87 @@ CASES = {
             "recall-easy; the open-thread facts are where continuation is "
             "actually tested."),
     },
+    "r3-p2-interruption": {
+        "cutoff": 41699,
+        "commit": "6799546",
+        "task_hint": ("provenance trials P1 P2 P3 injection legibility "
+                      "preregistered next step"),
+        "moment": ("interruption seconds after the P2 injection-legibility "
+                   "trial finished: the completion notification is the last "
+                   "dialogue event, P1 is earned and committed, P2/P3 were "
+                   "preregistered before any result, and P2's outcome exists "
+                   "ONLY as content-NULL ledger records that no context "
+                   "stratum can surface. A different interruption type from "
+                   "r1 (mid-thread) and r2 (wrap point): 'the experiment "
+                   "just finished; the results live in the ledger.' The "
+                   "actual continuation (post-cutoff, unseen): reading the "
+                   "report revealed a quotation-blind instrument, P2b was "
+                   "preregistered to fix it, floor effects were found, and "
+                   "P2c with realistic poison earned the result."),
+        "rubric": {
+            "facts": [
+                {"id": "p1_earned", "weight": 1.0, "loss_class": "rationale",
+                 "all": [[r"P1|reconciler anchor|anchor compliance"],
+                         [r"earn|pass|complian|0\.89|88"]]},
+                {"id": "p2p3_prereg", "weight": 1.0, "loss_class": "rationale",
+                 "all": [[r"P2|injection|provenance[- ]visible"],
+                         [r"preregist|registered before|prereg"]]},
+                {"id": "p2_completed", "weight": 1.5,
+                 "loss_class": "causal_relationship",
+                 "all": [[r"P2|injection[- ]legibility"],
+                         [r"(?:just )?(?:finish|complet|done|ended|ran)|results? (?:are|exist|recorded|in the ledger|landed)"]]},
+                {"id": "next_read_report", "weight": 2.5,
+                 "loss_class": "causal_relationship",
+                 "all": [[r"read|rebuild|retriev|inspect|pull|examine|check"],
+                         [r"report|ledger|exp[_ ]report|recorded runs|model_trials"],
+                         [r"before|first|then|next|prior to"]]},
+                {"id": "prereg_decides", "weight": 1.0, "loss_class": "rationale",
+                 "all": [[r"preregist|prereg"],
+                         [r"criterion|threshold|decide|judge|verdict|against"]]},
+                {"id": "p_invent_results", "weight": -2.0,
+                 "all": [[r"P2.{0,80}(?:scored|came back|result(?:ed)? (?:in|was)|showed|is (?:now |)(?:earned|not earned|within noise))"]]},
+            ],
+            "fixtures": [
+                {"text": "OBJECTIVE: establish which provenance properties are "
+                         "mechanically enforceable. JUST ESTABLISHED: P1 is "
+                         "earned — reconciler anchor compliance passed its "
+                         "preregistered bar [41658]; P2 and P3 were "
+                         "preregistered before any result. P2 (injection "
+                         "legibility under provenance-visible serving) has "
+                         "just finished; its runs are recorded in the ledger. "
+                         "NEXT ACTION: first rebuild and read the P2 report "
+                         "from the recorded runs (model_trials.py report) "
+                         "before any further design, and judge it strictly "
+                         "against its preregistered threshold. CONSTRAINTS: "
+                         "the preregistered criterion decides the verdict; no "
+                         "post-hoc adjustment.",
+                 "expect": {"p1_earned": True, "p2p3_prereg": True,
+                            "p2_completed": True, "next_read_report": True,
+                            "prereg_decides": True, "p_invent_results": False}},
+                {"text": "This is a context daemon project; I would refactor "
+                         "the code and add documentation.",
+                 "expect": {"p1_earned": False, "p2p3_prereg": False,
+                            "p2_completed": False, "next_read_report": False,
+                            "prereg_decides": False, "p_invent_results": False}},
+                {"text": "P2 came back earned at 0.85, so provenance-visible "
+                         "serving works — next I would ship the banner to "
+                         "production.",
+                 "expect": {"p_invent_results": True,
+                            "next_read_report": False}},
+            ],
+        },
+        "expectation": (
+            "Preregistered 2026-08-13 before any run, for the board-stratum "
+            "third-cutoff replication. This cutoff's discriminating "
+            "information (the instrument diagnosis) is structurally "
+            "unavailable to EVERY arm — content-NULL ledger records never "
+            "enter a stratum — so the rubric rewards state-awareness "
+            "(knowing P2 just finished and that its results live in the "
+            "ledger, and going to read them first) rather than diagnosis "
+            "recall. Named threats: if both arms floor on next_read_report, "
+            "this cutoff is uninformative for the board question (an "
+            "acceptable null); the fresh-board realization is stochastic "
+            "(measured ~0.5 capture on conditional items); baseline "
+            "variance at n=5 is known to swing ±0.1."),
+    },
 }
