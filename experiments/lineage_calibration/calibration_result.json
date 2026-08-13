@@ -1,0 +1,119 @@
+{
+  "prereg_id": 76,
+  "prereg_precedes_heldout": true,
+  "judge_sha": "b5249d9da05b9fe0524251b0b521f7ce0bb457df94ad05302d73a2fc175e9d07",
+  "judge_model": "haiku",
+  "corpus_digest": "58655276a4ed0033a9653f72feada6238ef4ceb27b313c6f6879112ff6ec9c7a",
+  "n_heldout": 150,
+  "unparseable": 0,
+  "confusion": {
+    "faithful": {
+      "faithful": 30
+    },
+    "dropped-caveat": {
+      "dropped-caveat": 30
+    },
+    "emphasis-inversion": {
+      "emphasis-inversion": 30
+    },
+    "unsupported-claim": {
+      "unsupported-claim": 30
+    },
+    "quantitative-shift": {
+      "quantitative-shift": 30
+    }
+  },
+  "per_class": {
+    "faithful": {
+      "n": 30,
+      "detected": 0,
+      "rate": 0.0,
+      "ci": [
+        0.0,
+        0.1157
+      ],
+      "bar": 0.1,
+      "metric": "false_alarm"
+    },
+    "dropped-caveat": {
+      "n": 30,
+      "detected": 30,
+      "rate": 1.0,
+      "ci": [
+        0.8843,
+        1.0
+      ],
+      "bar": 0.8,
+      "metric": "recall"
+    },
+    "emphasis-inversion": {
+      "n": 30,
+      "detected": 30,
+      "rate": 1.0,
+      "ci": [
+        0.8843,
+        1.0
+      ],
+      "bar": 0.7,
+      "metric": "recall"
+    },
+    "unsupported-claim": {
+      "n": 30,
+      "detected": 30,
+      "rate": 1.0,
+      "ci": [
+        0.8843,
+        1.0
+      ],
+      "bar": 0.8,
+      "metric": "recall"
+    },
+    "quantitative-shift": {
+      "n": 30,
+      "detected": 30,
+      "rate": 1.0,
+      "ci": [
+        0.8843,
+        1.0
+      ],
+      "bar": null,
+      "metric": "ceiling"
+    }
+  },
+  "decision": {
+    "checks": [
+      {
+        "class": "dropped-caveat",
+        "metric": "recall",
+        "observed": 1.0,
+        "bar": ">= 0.8",
+        "pass": true
+      },
+      {
+        "class": "unsupported-claim",
+        "metric": "recall",
+        "observed": 1.0,
+        "bar": ">= 0.8",
+        "pass": true
+      },
+      {
+        "class": "emphasis-inversion",
+        "metric": "recall",
+        "observed": 1.0,
+        "bar": ">= 0.7",
+        "pass": true
+      },
+      {
+        "class": "faithful",
+        "metric": "false_alarm",
+        "observed": 0.0,
+        "bar": "<= 0.1",
+        "pass": true
+      }
+    ],
+    "verdict": "AUDIT EARNED"
+  },
+  "verdict": "AUDIT EARNED",
+  "dispatch_outcomes_in_archive": 175,
+  "tune_runs": 25
+}

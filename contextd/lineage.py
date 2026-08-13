@@ -262,13 +262,20 @@ def format_stats(stats: dict, full: bool = False) -> str:
 
 
 def eligible_notes(conn) -> list[dict]:
-    """Model-written, derivation-bearing notes — the audit's population."""
+    """Model-written, derivation-bearing notes — the audit's population.
+
+    'Model-written' follows the transport boundary experiment.provenance_class
+    documents: a note is human iff meta.actor == 'human'; any other actor is
+    the self-reported CONTEXTD_CLIENT of a model-side writer ('mcp',
+    'claude-code', 'reconciler', ...). The live archive's reconciler notes
+    carry their client name, not the literal 'mcp'."""
     out = []
     for r in conn.execute(
             "SELECT id, ts, meta FROM events WHERE kind = 'note' "
             "AND meta IS NOT NULL ORDER BY id"):
         meta = json.loads(r["meta"])
-        if meta.get("actor") == "mcp" and isinstance(meta.get("derivation"), dict):
+        if meta.get("actor", "human") != "human" \
+                and isinstance(meta.get("derivation"), dict):
             out.append({"id": r["id"], "ts": r["ts"],
                         "derivation": meta["derivation"]})
     return out
