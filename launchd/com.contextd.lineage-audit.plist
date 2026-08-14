@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Ships DISABLED by default: do not `launchctl load` this until the
+         calibration verdict in experiments/lineage_calibration/
+         calibration_result.json says AUDIT EARNED (the hook refuses to run
+         otherwise, but the schedule itself is also opt-in — see README). -->
+    <key>Label</key>
+    <string>com.contextd.lineage-audit</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joseph/contextd/.venv/bin/python</string>
+        <string>/Users/joseph/contextd/hooks/lineage_audit.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>PATH</key>
+        <string>/Users/joseph/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/joseph/.contextd/lineage-audit.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/joseph/.contextd/lineage-audit.log</string>
+</dict>
+</plist>

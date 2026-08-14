@@ -337,6 +337,45 @@ answer "this context barely matters," which keeps the positive answers honest.
 See [experiments/README.md](experiments/README.md) for the method and its
 stated limits.
 
+## Lineage: measuring note drift instead of worrying about it
+
+Model-written notes are paraphrases, and paraphrases drift. Two standing
+instruments turn that worry into numbers:
+
+**The topology gauge** (kernel, model-free). `ctx lineage` walks every
+derivation-bearing event and reports chain depth (leaf dialogue = 0, a note
+citing only leaves = 1), anchor-resolution health, notes-per-epoch, and the
+age of cited evidence; `--full` prints the per-note table. Today the
+reconciler cites raw dialogue only — the gauge *measures* that instead of
+assuming it, and the day any note exceeds `lineage.max_note_depth`
+(default 1: a note citing notes, where compounding-summary drift becomes
+structurally possible) `ctx lineage` exits nonzero with a `DEPTH ALERT` and
+`ctx status` warns.
+
+**The sampled fidelity audit** (harness-side, calibrated, advisory-only).
+`hooks/lineage_audit.py` samples model-written notes stratified by age,
+walks each to its leaf evidence, disclosures the bundle through the real
+gate, and asks a judge model whether the note is faithful. The judge earned
+that job first: it was validated against a seeded corpus of deliberately
+corrupted notes with known ground truth
+([experiments/lineage_calibration/](experiments/lineage_calibration/)),
+with preregistered per-class sensitivity/specificity bars — an uncalibrated
+judge is vibes. Verdicts land as content-NULL `lineage_audit` events: they
+never enter FTS, never feed a recall, never quarantine or re-rank a note,
+and `ctx lineage report` always prints them next to the judge's measured
+confusion matrix. The semantic-entailment boundary does not move: this
+instrument samples and *estimates* fidelity; it never certifies it.
+
+The weekly schedule (`launchd/com.contextd.lineage-audit.plist`) ships
+**disabled by default** — load it only after the calibration verdict in
+`experiments/lineage_calibration/calibration_result.json` reads
+`AUDIT EARNED` (the hook refuses to run otherwise, and it stays mandatorily
+disabled if calibration was NOT EARNED):
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.contextd.lineage-audit.plist
+```
+
 ## Tests
 
 ```bash

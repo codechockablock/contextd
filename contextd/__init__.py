@@ -27,6 +27,17 @@ DEFAULTS = {
         "stale_after_hours": {"chrome": 48, "safari": 48,
                               "claude_code": 48, "fs": 72},
     },
+    "lineage": {
+        # chain depth of a model-written note: leaf dialogue = 0, a note
+        # citing only leaves = 1, a note citing a depth-1 note = 2. Any note
+        # past max_note_depth makes `ctx lineage` exit nonzero (DEPTH ALERT)
+        # and `ctx status` warn — depth > 1 is where compounding-summary
+        # drift becomes structurally possible. audit_sample_per_run sizes
+        # hooks/lineage_audit.py's stratified sample. Overriding [lineage]
+        # in config.toml replaces this whole table (same rule as [liveness]).
+        "max_note_depth": 1,
+        "audit_sample_per_run": 8,
+    },
     "gate": {
         "daily_token_budget": 200_000,
         "max_recall_budget": 32_000,

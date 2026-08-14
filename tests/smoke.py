@@ -806,4 +806,91 @@ assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='outcome'"
                     ).fetchone()[0] == n_outcomes, "refusal appended an event"
 assert verify_chain(conn)["ok"]
 
+# 45. lineage gauge: depth-1 archive is quiet; a note citing a note trips
+# the DEPTH ALERT, exits nonzero, and warns in ctx status
+from contextd.cli import cmd_lineage
+from contextd.gate import disclose as _disclose
+from contextd.lineage import lineage_stats
+
+lin_ids = [append_event(conn, "claude_code", "message",
+                        content=f"lineage smoke dialogue {i}",
+                        meta={"role": "user", "session_id": "lin"})
+           for i in range(2)]
+lin_eg = _disclose(conn, cfg, "\n".join(f"[{i}] line" for i in lin_ids),
+                   {"type": "reconcile_dialogue", "items": lin_ids})["egress_id"]
+lin_note = append_event(conn, "note", "note",
+                        content=f"lineage smoke note [{lin_ids[0]}][{lin_ids[1]}]",
+                        meta={"actor": "mcp", "derivation": {
+                            "source_egress": lin_eg, "anchors": lin_ids}})
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_lineage(_ap.Namespace(action=None, full=False))
+assert "DEPTH ALERT" not in buf.getvalue(), buf.getvalue()
+assert "depth 1" in buf.getvalue()
+
+lin_eg2 = _disclose(conn, cfg, f"[{lin_note}] the note",
+                    {"type": "reconcile_dialogue",
+                     "items": [lin_note]})["egress_id"]
+lin_note2 = append_event(conn, "note", "note",
+                         content=f"summary of a summary [{lin_note}]",
+                         meta={"actor": "mcp", "derivation": {
+                             "source_egress": lin_eg2, "anchors": [lin_note]}})
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf):
+        cmd_lineage(_ap.Namespace(action=None, full=True))
+    raise AssertionError("depth-2 archive must exit nonzero")
+except SystemExit as e:
+    assert e.code == 2, e.code
+assert "DEPTH ALERT" in buf.getvalue(), buf.getvalue()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_status(_ap.Namespace())
+assert "lineage: max note depth 2 (limit 1)" in buf.getvalue()
+assert any(ln.startswith("WARNING") and "a note is citing notes" in ln
+           for ln in buf.getvalue().splitlines()), buf.getvalue()
+assert lineage_stats(conn, cfg)["max_note_depth_observed"] == 2
+
+# 46. lineage audit hook (stubbed dispatcher) + ctx lineage report:
+# verdicts land content-NULL, invisible to search/recall, and the report
+# shows them next to the judge's calibration matrix
+import lineage_audit as laud
+
+lin_cal = {
+    "verdict": "AUDIT EARNED",
+    "judge_sha": laud.judge_sha(laud.PROMPT_VERSION),
+    "judge_model": "haiku", "corpus_digest": "d" * 64, "prereg_id": 0,
+    "n_heldout": 150,
+    "per_class": {"faithful": {"n": 30, "detected": 1, "rate": 0.033,
+                               "ci": [0.001, 0.17], "bar": 0.1,
+                               "metric": "false_alarm"}},
+}
+
+
+def _stub_judge(payload):
+    return {"status": "succeeded", "exit": 0, "duration_ms": 1,
+            "text": json.dumps({"verdict": "dropped-caveat",
+                                "spans": ["lineage smoke dialogue 0"]})}
+
+
+lin_results = laud.run_audit(conn, cfg, lin_cal, dispatcher=_stub_judge, n=2)
+assert all("audit_event" in r for r in lin_results), lin_results
+for r in lin_results:
+    row = conn.execute("SELECT content FROM events WHERE id = ?",
+                       (r["audit_event"],)).fetchone()
+    assert row["content"] is None, "audit verdict stored content, not NULL"
+assert all(h["kind"] != "lineage_audit"
+           for h in search(conn, "dropped caveat", limit=50))
+r_aud = assemble(conn, cfg, "lineage smoke note", budget=4000)
+assert "dropped-caveat" not in r_aud["bundle"], "verdict leaked into recall"
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_lineage(_ap.Namespace(action="report", full=False))
+rep_out = buf.getvalue()
+print(rep_out.splitlines()[0])
+assert "dropped-caveat: 2" in rep_out, rep_out
+assert "calibration (AUDIT EARNED" in rep_out, rep_out
+assert "advisory" in rep_out
+assert verify_chain(conn)["ok"]
+
 print("ALL SMOKE TESTS PASSED")
