@@ -63,6 +63,9 @@ EXPECTED_SUBPROCESS_CALLS = {
         "local git log only",
     ("experiments/handoff/operator_note.py", "main", "run"):
         "local git log only",
+    ("experiments/restore_scale/trial.py", "_measured", "Popen"):
+        "local backup/restore-drill child on a synthetic archive, measured "
+        "with os.wait4; no model, no sockets, no real-archive bytes",
     ("hooks/loop_scan.py", "scan", "run"):
         "model (open-loops candidate generation; dialogue + loop board pass "
         "the archive-under-test's gate first, candidates bound via "

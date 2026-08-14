@@ -45,12 +45,18 @@ handoff, done), not as a journal.
 - **Objective:** Weekly restore drill with behavioral-equivalence battery and
   a tested alarm path, multi-GB scale trial with cliff-hunting, expanded
   adversarial bundle corpus.
-- **Owning session:** Claude Code, branch `restore-firedrill`
-  (goal prompt: mission-c-restore-firedrill.md)
-- **State:** handoff — prompt ready, not yet launched
-- **Blockers:** same instruments-merge precondition; 8 GB tier needs local
-  disk headroom (environment-limited fallback is in the prompt)
-- **Last update:** 2026-08-13 — chartered
+- **Owning session:** Claude Code (Fable 5), worktree `/Users/joseph/ctx-c`,
+  branch `restore-firedrill` (goal prompt: mission-c-restore-firedrill.md)
+- **State:** done — branch ready for review/merge. Drill + tested alarm +
+  status line shipped; 6/6 scale cells PASS at full size (8 GiB included)
+  with temp ratio exactly 1.0 (preflight pinned 1.5×); cross-machine
+  rehearsal PASS; 9-case adversarial corpus, distinct refusals; 3 defects
+  fixed with regression tests (incl. a kernel retention/ordering bug found
+  by the new smoke alarm), 2 design questions stopped-and-reported. Gates:
+  ruff clean, 178 pytest, smoke ALL PASSED, network grep 3. Report:
+  runs/restore-firedrill-20260813/final-report.md
+- **Blockers:** — (launchd plist install is an operator act, post-merge)
+- **Last update:** 2026-08-13 — mission complete on branch
 
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —

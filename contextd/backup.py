@@ -249,12 +249,21 @@ def _validate_tip(value: Any, label: str) -> None:
 
 
 def _new_bundle_path(destination: Path, stamp: str) -> Path:
-    candidate = destination / f"contextd-{stamp}{BUNDLE_SUFFIX}"
-    index = 0
-    while candidate.exists():
-        index += 1
-        candidate = destination / f"contextd-{stamp}-{index}{BUNDLE_SUFFIX}"
-    return candidate
+    # Never reuse a freed name. Retention and the restore drill both order
+    # bundles by (stamp, sequence); if pruning frees the bare-stamp name and
+    # a same-second backup takes it again, that ordering disagrees with
+    # creation order — retention would prune the newest bundle and the drill
+    # would restore a stale one. The sequence within a stamp only rises.
+    taken = [
+        int(match["sequence"] or 0)
+        for path in destination.iterdir()
+        if (match := _BUNDLE_NAME_RE.fullmatch(path.name))
+        and match["stamp"] == stamp
+    ]
+    index = max(taken) + 1 if taken else 0
+    if index == 0:
+        return destination / f"contextd-{stamp}{BUNDLE_SUFFIX}"
+    return destination / f"contextd-{stamp}-{index}{BUNDLE_SUFFIX}"
 
 
 def _is_bundle(path: Path) -> bool:
@@ -433,7 +442,14 @@ def _manifest(bundle: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         or type(manifest.get("version")) is not int
         or manifest["version"] != BUNDLE_VERSION
     ):
-        raise BackupError("unsupported backup bundle format or version")
+        # Name the exact skew: a bundle from a future contextd must be
+        # refused as "too new", never half-attempted with today's reader.
+        raise BackupError(
+            "unsupported backup bundle format or version: "
+            f"format={manifest.get('format')!r} "
+            f"version={manifest.get('version')!r} "
+            f"(this contextd reads {BUNDLE_FORMAT} v{BUNDLE_VERSION})"
+        )
     if not isinstance(manifest.get("files"), list):
         raise BackupError("manifest files must be a list")
     entries: dict[str, dict[str, Any]] = {}

@@ -891,6 +891,66 @@ print(rep_out.splitlines()[0])
 assert "dropped-caveat: 2" in rep_out, rep_out
 assert "calibration (AUDIT EARNED" in rep_out, rep_out
 assert "advisory" in rep_out
+
+# 47. restore fire-drill: the newest bundle restores and answers identically;
+# a corrupted bundle fires the alarm in ctx status; a clean backup + drill
+# clears it; drill receipts never enter FTS. The alarm is tested, not assumed.
+import restore_drill as fire_drill
+
+from contextd.db import store_blob
+
+drill_digest = store_blob(b"smoke drill blob\x00\xff" * 32)
+append_event(conn, "fs", "file_write", uri="/archive/drill.bin",
+             content_hash=drill_digest, meta={"blob": drill_digest})
+cmd_backup(_ap.Namespace(dest=str(bdir), keep=0))
+drill_tmp = Path(tempfile.mkdtemp(prefix="contextd-drill-smoke-"))
+
+meta = fire_drill.run_drill(backup_dir=bdir, temp_dir=drill_tmp)
+assert meta["verdict"] == "PASS", meta
+assert set(meta["stages"]) == set(fire_drill.STAGES), meta["stages"]
+assert list(drill_tmp.iterdir()) == [], "drill temp destination leaked"
+row = conn.execute("SELECT content, meta FROM events WHERE "
+                   "kind='restore_drill' ORDER BY id DESC LIMIT 1").fetchone()
+assert row["content"] is None, "drill receipt must be content-NULL"
+assert json.loads(row["meta"])["verdict"] == "PASS"
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_status(_ap.Namespace())
+out = buf.getvalue()
+assert "restore drill: PASS" in out, out
+assert "WARNING: restore drill" not in out
+
+# force the alarm: one flipped blob byte in the newest bundle
+newest = fire_drill.newest_bundle(bdir)
+blob_path = next((newest / "store").rglob("*/*"))
+raw = bytearray(blob_path.read_bytes())
+raw[0] ^= 1
+blob_path.write_bytes(bytes(raw))
+meta = fire_drill.run_drill(backup_dir=bdir, temp_dir=drill_tmp)
+assert meta["verdict"] == "FAIL" and meta["failed_stage"] == "restore", meta
+assert "store/" in meta["reason"], meta["reason"]
+assert list(drill_tmp.iterdir()) == [], "failed drill leaked temp state"
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_status(_ap.Namespace())
+out = buf.getvalue()
+assert "WARNING: restore drill FAILED" in out, out
+assert "at stage restore" in out
+
+# recovery: a clean backup and a PASS drill clear the warning
+cmd_backup(_ap.Namespace(dest=str(bdir), keep=0))
+meta = fire_drill.run_drill(backup_dir=bdir, temp_dir=drill_tmp)
+assert meta["verdict"] == "PASS", meta
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cmd_status(_ap.Namespace())
+out = buf.getvalue()
+assert "restore drill: PASS" in out
+assert "WARNING: restore drill" not in out, out
+assert conn.execute(
+    "SELECT COUNT(*) FROM events_fts_docsize WHERE id IN "
+    "(SELECT id FROM events WHERE kind='restore_drill')").fetchone()[0] == 0, \
+    "drill receipts leaked into the FTS index"
 assert verify_chain(conn)["ok"]
 
 print("ALL SMOKE TESTS PASSED")

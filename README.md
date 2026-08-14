@@ -198,6 +198,23 @@ The live database is versioned too: init (or the first write-capable connect)
 stamps `PRAGMA user_version = 1` (`SCHEMA_VERSION`), complementing the
 `BUNDLE_VERSION` the bundle manifests already carry.
 
+A backup that has never been restored is a hope, not a backup. The weekly
+restore fire-drill (`hooks/restore_drill.py --once`, scheduled by
+`launchd/com.contextd.restore-drill.plist`) restores the newest bundle into a
+throwaway temp destination — after a free-space preflight pinned to the
+measured peak temp usage — and runs a verification battery on the restored
+copy: chain + witness, event count and tip against the manifest snapshot,
+every blob re-hashed, and FTS + behavioral equivalence (a fixed probe set of
+search / timeline / loop-reduction / liveness / audit reads answered
+byte-identically by the bundle's snapshot and the restored copy). The
+verdict lands in the live ledger as a content-NULL `restore_drill` event
+(never searchable, never recallable), `ctx status` prints the last verdict
+and its age, and warns when the last drill FAILED or none has run within
+`[backup].drill_stale_after_hours` (default 192) — the alarm path itself is
+exercised by test and smoke. Scale behavior (1–8 GiB, event-heavy and
+blob-heavy) is measured, not assumed: `experiments/restore_scale/trial.py`
+holds the inflator, the measurements, and the cross-machine rehearsal.
+
 ## Synthesis-mode recall
 
 Plain recall serves raw items. Synthesis mode serves a ~150-word distillate

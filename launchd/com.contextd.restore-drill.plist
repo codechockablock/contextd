@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contextd.restore-drill</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joseph/contextd/.venv/bin/python</string>
+        <string>/Users/joseph/contextd/hooks/restore_drill.py</string>
+        <string>--once</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/joseph/.contextd/restore-drill.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/joseph/.contextd/restore-drill.log</string>
+</dict>
+</plist>
