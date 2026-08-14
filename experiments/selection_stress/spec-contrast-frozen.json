@@ -1,0 +1,72 @@
+{
+ "arms": {
+  "baseline": "r2 worlds as stored (results/worlds), rescored under the new kernel as a regression check against the stored r2 rows",
+  "lifecycle": "digest-verified copies + one operator edge per planted supersession pair via record_supersession (client sim-operator)"
+ },
+ "bars": {
+  "behavior_p_max": 0.05,
+  "behavior_resurrects_max": 0.3,
+  "behavior_v2_honors_min": 0.5,
+  "nonreg_cell_max": 0.2,
+  "nonreg_pooled_max": 0.02,
+  "silent_resurrection": 0,
+  "surface_movement_max": 0.05,
+  "unmarked_superseded_served": 0
+ },
+ "baseline_grid_digests": {
+  "t20k-s101": "ce966cc466a45d019d0bef5c2fa8bff7eebfd0c8d6fe0ee213f914f359130e1d",
+  "t20k-s102": "57eec519937566a642872f40efd9c59fc3b1afa6cb9ee88e4554447870a070ab",
+  "t20k-s103": "1eeaa3d3e228cf835a78fe92856e3372be04276509b74ac5e17557f21f651f75",
+  "t20k-s104": "115deaa85ddb309a74ff27ee6ebcbb2446c3ea6377ee02e014e52286a0fcdf48",
+  "t20k-s105": "2f8fc2baf73e4d24ad54674bd47768e9ab2e5a10dc3d95455800634f474bb89e",
+  "t5k-s101": "b19814d4ebff1c4a4560de8bc7d140fa69d5a7aba54294390a9095234766ff8a",
+  "t5k-s102": "88fb08b47d9d80fa532cfd549f5276861b1bc5798ff05ef11e12bc6f2f9ef817",
+  "t5k-s103": "b8e5e38152180d6ceed0043e1dd42ee87124b4f2162eb99deac8666cd91a0aa1",
+  "t5k-s104": "69f1b3805129218c3066738df82c19416e829f05d2a9aa89853acdc42a1f8098",
+  "t5k-s105": "c8b9ff10ca58319ce3227f8c66a7707f0f7983f56351ec23f954291d6af89246",
+  "t80k-s101": "9753e627aa976cdeb6f01b8c20cff1bdd1a8d7f185089eb513547eab7667593f",
+  "t80k-s102": "d685d3da4ec1898f616fe6245c68f72cb408c25cb30730e99ad7bb7e36996f77",
+  "t80k-s103": "ca5336355a16ed2134bf5033b066718a34060a90392d0f3aadfe388fa7f1e09d",
+  "t80k-s104": "0980ce7575e88c2580705a8578813b2ddf2f18054668a217d5159b683fd80743",
+  "t80k-s105": "0ae21ad505ee83709ad6d7584cc0bc6e72205d341829fe5806831e36fd4e6d5c"
+ },
+ "baseline_spec_sha": "0679674bdb31886674625d225035237975a7a5a89b96ca27237fa9cb466c222b",
+ "behavioral": {
+  "baseline_arm": "prereg #36 as-compiled supersession runs, reused by ledger reference (identical archives, model, rubric, protocol)",
+  "cells": [
+   {
+    "cell_index": 9,
+    "tier": "t5k",
+    "topic": 56
+   },
+   {
+    "cell_index": 10,
+    "tier": "t20k",
+    "topic": 65
+   },
+   {
+    "cell_index": 11,
+    "tier": "t80k",
+    "topic": 65
+   }
+  ],
+  "model": "haiku",
+  "n_per_cell": 8,
+  "planned_dispatches": 24
+ },
+ "benchmark": "decisions-lifecycle-contrast-v1",
+ "contract_sha": "cfbc676af854afcee8921d1664fbfdb897c7402b848f18a5d3e61ff1b1f06fb0",
+ "frozen": "2026-08-14",
+ "harness": {
+  "behavior_sha": "329876139ea63c14a739aa0700f1f2b546fa12a2da34514c542534f0509c9c1c",
+  "contrast_sha": "f40ef558471d3bdb87094372ef9f2933f77c3bd3a1dae19751e546c28ea6e63a"
+ },
+ "kernel": {
+  "decisions_sha": "e05100fc3158b98620de4b78a569bf8e22aaecb3f1bd5c889166ce61a0261e43",
+  "handoff_sha": "a718782cc0b3371f1282ad9e562e9f82b58d0248e9d6ec6a69977346d32cbaf5"
+ },
+ "stats": {
+  "bootstrap": "seed-cluster, as r2",
+  "perm": "exact per cell (8v8), stratified-mc pooled"
+ }
+}
