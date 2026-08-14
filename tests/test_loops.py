@@ -251,28 +251,41 @@ def test_locked_dedupe_stops_a_racing_duplicate(isolated_contextd_home):
         "SELECT COUNT(*) FROM events WHERE kind='loop'").fetchone()[0] == 1
 
 
-# --- model-mediated promotion is absent, not gated ---------------------------
+# --- model-mediated promotion is grant-gated, never inferred -----------------
 
-def test_no_model_facing_promotion_path_exists(isolated_contextd_home):
+def test_no_ungated_promotion_path_exists(isolated_contextd_home):
     """The retired utterance binding verified utterance-occurrence, not
     assent (a rejecting operator message satisfied it), so the relay was
-    removed rather than shipped. This pins the absence: the MCP registry
-    exposes no confirm/dismiss/add/close/reopen, and a candidate stays a
-    candidate until a human CLI act — however much post-candidate operator
-    dialogue exists."""
-    from contextd.mcp_server import TOOLS
-    assert not {"loop_confirm", "loop_dismiss", "loop_add", "loop_close",
-                "loop_reopen"} & set(TOOLS)
+    removed rather than shipped — that negative result stands. What exists
+    since docs/GRANTS.md is a different mechanism with no inference in it:
+    loop_confirm/loop_dismiss refuse without an explicit operator-recorded
+    grant, and a candidate stays a candidate under ANY amount of
+    post-candidate operator dialogue. add/close/reopen remain absent from
+    the registry entirely. Granted promotion is permanently
+    distinguishable: authority model-granted, never operator."""
+    from contextd.grants import add_grant
+    from contextd.mcp_server import TOOLS, loop_confirm
+    assert not {"loop_add", "loop_close", "loop_reopen"} & set(TOOLS)
+    assert {"loop_confirm", "loop_dismiss"} <= set(TOOLS)
 
     conn = connect()
     cand = add_candidate(conn, "add a dead-letter shelf", REPO_B)["loop"]
     _msg(conn, "user", "yes — the dead-letter shelf is on the board")
     _msg(conn, "user", "actually no, drop the dead-letter idea entirely")
+    # dialogue is never assent: without a grant the model path refuses
+    assert loop_confirm(cand["id"]).startswith("REFUSED")
     assert reduce_loops(conn)["loops"][cand["id"]]["state"] == "candidate"
 
     r = transition(conn, cand["id"], "confirm", "operator", client="cli")
     assert r["loop"]["state"] == "open"
     assert r["loop"]["promoted_authority"] == "operator"
+
+    # under a grant, promotion works and is distinguishable from operator
+    cand2 = add_candidate(conn, "shelve the retry respins", REPO_B)["loop"]
+    add_grant(conn, "loop.confirm", REPO_B)
+    assert "model-granted" in loop_confirm(cand2["id"])
+    assert reduce_loops(conn)["loops"][cand2["id"]][
+        "promoted_authority"] == "model-granted"
 
 
 def test_identical_dialogues_reduce_identically(isolated_contextd_home,

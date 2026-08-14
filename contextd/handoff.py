@@ -200,9 +200,58 @@ def select_checkpoint_context(conn, cfg, budget: int = 4000,
     slice cannot carry every active loop, the section names the omitted ids
     and count: silent loss is forbidden by contract.
     """
+    from .decisions import reduce_supersessions
     from .loops import select_loop_section
     loop_sec = select_loop_section(conn, budget, repo_path)
-    remaining = budget - loop_sec["slice"]
+    # supersession handling is two-pass (docs/DECISIONS.md r2): selection
+    # runs reserve-free first; only when a carried chain's current version
+    # is owed does it re-run with the reserve, so compiles that owe nothing
+    # pay nothing. _select_strata is the shared single pass.
+    sup = reduce_supersessions(conn)
+    picked = _select_strata(conn, cfg, budget, task_hint, loop_sec, 0)
+    sup_items: list = []
+    sup_omitted: list = []
+    reserve_engaged = False
+    if sup["edges"]:
+        if _owed_work(sup, picked):
+            from .decisions import (SUPERSEDE_RESERVE_MIN,
+                                    SUPERSEDE_RESERVE_SHARE)
+            reserve = max(int(budget * SUPERSEDE_RESERVE_SHARE),
+                          SUPERSEDE_RESERVE_MIN)
+            picked = _select_strata(conn, cfg, budget, task_hint, loop_sec,
+                                    reserve)
+            reserve_engaged = True
+        else:
+            reserve = 0
+        sup_items, sup_omitted = _apply_supersessions(
+            conn, cfg, sup, reserve, picked["taken"], picked["sections"])
+    return {"loops": loop_sec["items"], "loops_omitted": loop_sec["omitted"],
+            "tail": picked["tail"], "episodes": picked["episodes"],
+            "notes": picked["notes"], "recall": picked["recall"],
+            "supersessions": sup_items, "supersessions_omitted": sup_omitted,
+            "supersession_reserve_engaged": reserve_engaged,
+            "budget": budget, "task_hint": task_hint}
+
+
+def _owed_work(sup: dict, selected: dict) -> bool:
+    """True iff a carried item's chain has a current version that is not
+    itself carried (the condition that engages the reserve pass)."""
+    from .decisions import current_version
+    carried = set()
+    for items in selected["sections"].values():
+        carried.update(it["id"] for it in items if it["id"] is not None)
+    for cid in carried:
+        if cid in sup["edges"]:
+            walk = current_version(sup["edges"], cid)
+            if (not walk["cyclic"] and walk["current"] is not None
+                    and walk["current"] not in carried):
+                return True
+    return False
+
+
+def _select_strata(conn, cfg, budget: int, task_hint: str, loop_sec: dict,
+                   sup_reserve: int) -> dict:
+    remaining = budget - loop_sec["slice"] - sup_reserve
     shares = {"tail": 0.45, "episodes": 0.20, "notes": 0.15, "recall": 0.20}
     if not task_hint:
         shares["tail"] += shares.pop("recall")
@@ -251,9 +300,66 @@ def select_checkpoint_context(conn, cfg, budget: int = 4000,
     # freshest evidence and the package places it last on purpose
     for section in (notes, episodes, tail):
         section.reverse()
-    return {"loops": loop_sec["items"], "loops_omitted": loop_sec["omitted"],
-            "tail": tail, "episodes": episodes, "notes": notes,
-            "recall": recall_items, "budget": budget, "task_hint": task_hint}
+    sections = {"tail": tail, "episodes": episodes, "notes": notes,
+                "recall": recall_items}
+    return {"tail": tail, "episodes": episodes, "notes": notes,
+            "recall": recall_items, "taken": taken, "sections": sections,
+            "reserve": sup_reserve}
+
+
+def _apply_supersessions(conn, cfg, sup: dict, reserve: int, taken: set,
+                         sections: dict) -> tuple[list, list]:
+    """The compile contract (docs/DECISIONS.md): mark every carried
+    superseded item, then carry each carried chain's current version from
+    the reserve or name it loudly. Deterministic, model-free."""
+    from .decisions import current_version, supersession_marker
+    if not sup["edges"]:
+        return [], []
+    edges = sup["edges"]
+    used = 0
+    carried = set()
+    for items in sections.values():
+        carried.update(it["id"] for it in items if it["id"] is not None)
+    for items in sections.values():
+        for it in items:
+            if it["id"] in edges:
+                marker = redact(cfg, supersession_marker(edges, it["id"]))
+                it["text"] = (it["text"] + "\n" + marker) if it["text"] \
+                    else marker
+                extra = est_tokens(marker)
+                it["est_tokens"] += extra
+                used += extra
+    owed, seen_current = [], set()
+    for cid in sorted(carried):
+        if cid not in edges:
+            continue
+        walk = current_version(edges, cid)
+        cur = walk["current"]
+        if walk["cyclic"] or cur is None:
+            continue  # the marker already says the chain is unresolvable
+        if cur in carried or cur in taken or cur in seen_current:
+            continue
+        seen_current.add(cur)
+        owed.append((cid, cur))
+    sup_items, sup_omitted = [], []
+    packing = reserve - 48  # held back so omission is always loud
+    for cid, cur in owed:
+        row = conn.execute(
+            "SELECT * FROM events WHERE id = ?", (cur,)).fetchone()
+        it = _render(cfg, row) if row is not None else None
+        if it is None or not it["text"] or used + it["est_tokens"] > packing:
+            sup_omitted.append({"carried": cid, "current": cur})
+            continue
+        sup_items.append(it)
+        taken.add(cur)
+        used += it["est_tokens"]
+    for miss in sup_omitted:
+        sup_items.append({
+            "id": None, "header": "",
+            "text": f"SUPERSESSION OMITTED: current version "
+                    f"ev {miss['current']} of carried ev {miss['carried']} "
+                    f"— run 'ctx recall'"})
+    return sup_items, sup_omitted
 
 
 # --- repository state --------------------------------------------------------
@@ -304,6 +410,8 @@ SECTION_TITLES = (
     ("notes", "OPERATOR NOTES (deliberate, human-written)"),
     ("episodes", "RECONCILED EPISODE NOTES (model-written, anchor-verified)"),
     ("recall", "TASK-RELEVANT RECALL"),
+    ("supersessions",
+     "CURRENT DECISION VERSIONS (supersede items carried above)"),
     ("tail", "RAW DIALOGUE TAIL (the interrupted session, verbatim excerpts)"),
 )
 
@@ -357,16 +465,39 @@ def compile_checkpoint(conn, cfg, budget: int = 4000, task_hint: str = "",
         package = ("CAPTURE STALENESS: "
                    + "; ".join(stale_line(r) for r in stale)
                    + "\n\n" + package)
+    # standing delegations are loud in every covering checkpoint
+    # (docs/GRANTS.md): the operator and any resuming model cannot not
+    # know what is currently delegated. A repo checkpoint shows global
+    # grants plus its repo's; a global checkpoint shows everything active.
+    from .grants import active_grants, grant_line
+    from .loops import make_scope, scope_str
+    grants = active_grants(conn)
+    if repo_path:
+        want = scope_str(make_scope(repo_path))
+        grants = [g for g in grants
+                  if g["scope"].get("global")
+                  or scope_str(g["scope"]) == want]
+    if grants:
+        package = ("STANDING DELEGATIONS: "
+                   + "; ".join(grant_line(g) for g in grants)
+                   + "\n\n" + package)
     ids = sorted({it["id"]
-                  for k in ("loops", "tail", "episodes", "notes", "recall")
+                  for k in ("loops", "tail", "episodes", "notes", "recall",
+                            "supersessions")
                   for it in selection[k] if it["id"] is not None})
     meta = {"type": "checkpoint", "tip": tip, "task_hint": task_hint,
             "purpose": purpose, "items": ids, "client": client,
             "loop_scope": repo_path or "global",
-            "loops_omitted": selection.get("loops_omitted") or []}
+            "loops_omitted": selection.get("loops_omitted") or [],
+            "supersessions_omitted":
+                selection.get("supersessions_omitted") or []}
     if stale:
         meta["staleness"] = [{"source": r["source"],
                               "age_hours": r["age_hours"]} for r in stale]
+    if grants:
+        meta["delegations"] = [{"class": g["class"], "grant": g["id"],
+                                "scope": scope_str(g["scope"]),
+                                "expires": g["expires"]} for g in grants]
     disclosure = disclose(conn, cfg, package, meta)
     return {"package": disclosure["content"], "items": ids, "tip": tip,
             "egress_id": disclosure["egress_id"],

@@ -227,13 +227,80 @@ def loop_list(scope_repo: str = "", include_candidates: bool = True) -> str:
     return receipt["content"]
 
 
-# There is deliberately no loop_confirm/loop_dismiss tool. The utterance
-# binding built for a model-mediated relay was retired as mechanically
-# unsound before any field use: it verified that quoted words occur in SOME
-# post-candidate operator message — utterance-occurrence, not assent — so a
-# model could promote a candidate with unrelated or even rejecting operator
-# words. Confirmation and dismissal are human CLI acts (ctx loop confirm /
-# dismiss); the negative result is recorded in docs/OPEN_LOOPS.md.
+# loop_confirm/loop_dismiss/decision_supersede are grant-gated
+# (docs/GRANTS.md): without an active operator-recorded delegation for the
+# matching authority class and scope they refuse, and with one they record
+# authority 'model-granted' plus the grant id — never 'operator'. This is a
+# DIFFERENT mechanism from the retired utterance-binding relay (which
+# inferred per-item assent from operator text and was mechanically unsound;
+# negative result in docs/OPEN_LOOPS.md): a grant is explicit class-level
+# assent recorded as its own operator CLI act, and nothing is inferred.
+
+
+def loop_confirm(loop_id: int, reason: str = "") -> str:
+    """Confirm a candidate loop UNDER A STANDING DELEGATION. Refuses unless
+    the operator has an active grant for loop.confirm covering the loop's
+    scope; the confirmation is recorded as model-granted, traceable to the
+    grant."""
+    from .grants import GrantError, require_grant
+    from .loops import LoopError, reduce_loops, transition
+    conn = connect()
+    lp = reduce_loops(conn)["loops"].get(int(loop_id))
+    if lp is None:
+        return f"REFUSED: no loop #{loop_id}"
+    try:
+        g = require_grant(conn, "loop.confirm", lp["scope"])
+        r = transition(conn, int(loop_id), "confirm",
+                       authority="model-granted", client=CLIENT,
+                       reason=redact(load_config(), reason),
+                       grant=g["id"])
+    except (GrantError, LoopError) as e:
+        return f"REFUSED: {e}"
+    return (f"loop#{r['loop']['id']} -> {r['loop']['state']} "
+            f"(model-granted under grant ev {g['id']})")
+
+
+def loop_dismiss(loop_id: int, reason: str = "") -> str:
+    """Dismiss a candidate loop UNDER A STANDING DELEGATION (grant class
+    loop.dismiss); recorded as model-granted, traceable to the grant."""
+    from .grants import GrantError, require_grant
+    from .loops import LoopError, reduce_loops, transition
+    conn = connect()
+    lp = reduce_loops(conn)["loops"].get(int(loop_id))
+    if lp is None:
+        return f"REFUSED: no loop #{loop_id}"
+    try:
+        g = require_grant(conn, "loop.dismiss", lp["scope"])
+        r = transition(conn, int(loop_id), "dismiss",
+                       authority="model-granted", client=CLIENT,
+                       reason=redact(load_config(), reason),
+                       grant=g["id"])
+    except (GrantError, LoopError) as e:
+        return f"REFUSED: {e}"
+    return (f"loop#{r['loop']['id']} -> {r['loop']['state']} "
+            f"(model-granted under grant ev {g['id']})")
+
+
+def decision_supersede(old: int, new: int, reason: str = "") -> str:
+    """Record that event NEW supersedes event OLD, UNDER A STANDING
+    DELEGATION (grant class decision.supersede, global scope only);
+    recorded as model-granted, traceable to the grant."""
+    from .decisions import DecisionError, record_supersession
+    from .grants import GrantError, require_grant
+    conn = connect()
+    try:
+        g = require_grant(conn, "decision.supersede", None)
+        r = record_supersession(conn, int(old), int(new),
+                                reason=redact(load_config(), reason),
+                                client=CLIENT,
+                                authority="model-granted", grant=g["id"])
+    except (GrantError, DecisionError) as e:
+        return f"REFUSED: {e}"
+    e = r["edge"]
+    word = {"created": "recorded", "existing": "already recorded"}
+    return (f"{word[r['result']]}: ev {e['old']} superseded by ev {e['new']} "
+            f"(edge ev {e['edge']}, model-granted under grant ev {g['id']})")
+
 
 TOOLS = {
     "recall": recall,
@@ -242,6 +309,9 @@ TOOLS = {
     "timeline": timeline,
     "loop_candidate": loop_candidate,
     "loop_list": loop_list,
+    "loop_confirm": loop_confirm,
+    "loop_dismiss": loop_dismiss,
+    "decision_supersede": decision_supersede,
 }
 
 

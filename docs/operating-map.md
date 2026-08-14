@@ -35,6 +35,34 @@ handoff, done), not as a journal.
 
 ## Done
 
+- 2026-08-14 — **delegation-grants** (Claude Code / Fable 5, branch
+  `delegation-grants` off decisions-lifecycle): operator-chartered from the
+  authority-model conversation. `ctx grant add/revoke/list` — recorded,
+  class-scoped (loop.confirm / loop.dismiss / decision.supersede), repo- or
+  global-scoped, expiring, revocable delegations (docs/GRANTS.md, frozen
+  before implementation). MCP loop_confirm/loop_dismiss/decision_supersede
+  refuse without a covering grant; under one they record authority
+  `model-granted` + grant id — never operator. Checkpoints carry a
+  STANDING DELEGATIONS line + egress meta while grants are active. The
+  retired utterance-binding stays retired (OPEN_LOOPS.md addendum); two
+  registry guard tests evolved to pin the sharper invariant (tools exist,
+  refuse ungated, never operator). Mechanism only — no calibration claim,
+  zero dispatches. Gates: ruff clean, 230 pytest, smoke, selftest, network
+  grep 2 (pre-existing parse-only).
+- 2026-08-14 — **decisions-lifecycle** (Claude Code / Fable 5, branch
+  `decisions-lifecycle`): **FIX DECLARED** against stale resurrection.
+  Supersession edges (`ctx decision supersede`, docs/DECISIONS.md contract
+  r2) + two-pass compile contract: superseded never served unmarked,
+  current version carried or loudly named, owe-nothing compiles pay
+  nothing. Round 1 (prereg #253) honestly failed bars 2 (scorer artifact)
+  and 4 (reserve tax) — fix not declared, mechanism revised, re-frozen,
+  re-preregistered (#255). Round 2: all 8 bars met — resurrection 0.269 →
+  0.000 (0 silent, 0 unmarked, 0 unpaid losses), behavioral resurrects
+  0.042 pooled (p=5e-5), v2-honors 0.958. Dispatches 273/300 cumulative.
+  Report: runs/decisions-lifecycle-2026-08-14/ (rebuilds via `bench.py
+  contrast-report 255`). Gates: ruff clean, 225 pytest, selftest, smoke.
+  Not licensed: unrecorded supersessions, plain-recall marking,
+  model-proposed edges (candidate follow-up discussed with operator).
 - 2026-08-13 — **selection-stress** (Claude Code / Fable 5, branch
   `selection-stress` @ c6ff6e7): loss surface measured. Validity gate 1.0
   all pairs; 7,830-row grid; silent absence >20% already at t5k/recent/mid

@@ -264,7 +264,8 @@ _TABLE = {
 
 
 def transition(conn, loop_id: int, op: str, authority: str,
-               client: str = "cli", reason: str = "") -> dict:
+               client: str = "cli", reason: str = "",
+               grant: int | None = None) -> dict:
     """One lifecycle transition per the frozen table. No-ops append nothing;
     refusals raise LoopError with the exact rule violated.
 
@@ -286,9 +287,14 @@ def transition(conn, loop_id: int, op: str, authority: str,
     if loop["state"] not in rules["from"]:
         raise LoopError(
             f"loop#{loop_id} is {loop['state']}: {rules['refuse'][loop['state']]}")
+    meta = {"op": op, "loop": loop_id, "authority": authority,
+            "client": client}
+    if grant is not None:
+        # act taken under a delegation: provenance resolves act -> grant ->
+        # operator reason (docs/GRANTS.md); never recorded as operator
+        meta["grant"] = grant
     eid = append_event(conn, "loop", "loop", content=reason.strip() or None,
-                       meta={"op": op, "loop": loop_id,
-                             "authority": authority, "client": client})
+                       meta=meta)
     return {"result": op, "loop": reduce_loops(conn)["loops"][loop_id],
             "event": eid}
 

@@ -113,10 +113,14 @@ def test_loop_scan_grant_can_propose_but_never_promote(tmp_path, monkeypatch):
 
 
 def test_default_registry_shape_and_openclaw_stays_restricted():
-    from contextd.mcp_server import TOOLS
+    from contextd.mcp_server import TOOLS, loop_confirm, loop_dismiss
     assert {"loop_candidate", "loop_list"} <= set(TOOLS)
-    assert not {"loop_confirm", "loop_dismiss"} & set(TOOLS), \
-        "promotion is a human CLI act; the relay was retired as unsound"
+    # promotion tools exist since docs/GRANTS.md but are grant-gated: with
+    # no active operator grant they refuse (the retired utterance-binding
+    # relay stays retired; nothing infers assent)
+    assert {"loop_confirm", "loop_dismiss"} <= set(TOOLS)
+    assert loop_confirm(999999).startswith("REFUSED")
+    assert loop_dismiss(999999).startswith("REFUSED")
     repo = Path(__file__).resolve().parent.parent
     config = (repo / "clients" / "openclaw.json").read_text()
     assert "loop_" not in config, \
