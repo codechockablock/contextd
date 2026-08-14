@@ -7,8 +7,8 @@
   "behavior_p_max": 0.05,
   "behavior_resurrects_max": 0.3,
   "behavior_v2_honors_min": 0.5,
-  "nonreg_cell_max": 0.2,
   "nonreg_pooled_max": 0.02,
+  "nonreg_taxed_max": 0.1,
   "silent_resurrection": 0,
   "surface_movement_max": 0.05,
   "unmarked_superseded_served": 0
@@ -55,15 +55,15 @@
   "planned_dispatches": 24
  },
  "benchmark": "decisions-lifecycle-contrast-v1",
- "contract_sha": "cfbc676af854afcee8921d1664fbfdb897c7402b848f18a5d3e61ff1b1f06fb0",
+ "contract_sha": "d2af25fb471d8e25d4d82d1fb115c8a5b90c152eea6685f15b5722a89bcb6d52",
  "frozen": "2026-08-14",
  "harness": {
   "behavior_sha": "329876139ea63c14a739aa0700f1f2b546fa12a2da34514c542534f0509c9c1c",
-  "contrast_sha": "f40ef558471d3bdb87094372ef9f2933f77c3bd3a1dae19751e546c28ea6e63a"
+  "contrast_sha": "fa5654bc654619696e0e2bf188562f3487e76436ce0452320401b4f7f3d3d8d2"
  },
  "kernel": {
   "decisions_sha": "e05100fc3158b98620de4b78a569bf8e22aaecb3f1bd5c889166ce61a0261e43",
-  "handoff_sha": "a718782cc0b3371f1282ad9e562e9f82b58d0248e9d6ec6a69977346d32cbaf5"
+  "handoff_sha": "9d230d17777942563978210e14fd557b41336671a8095a7f17e4d3d69c18df6e"
  },
  "stats": {
   "bootstrap": "seed-cluster, as r2",
