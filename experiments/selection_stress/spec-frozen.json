@@ -1,0 +1,80 @@
+{
+ "benchmark": "selection-stress-v1",
+ "budgets": [
+  4000,
+  2000,
+  8000
+ ],
+ "coordinates": {
+  "ages": {
+   "deep": "~85% stratum depth, cell-spread, seed-jittered",
+   "mid": "~30% stratum depth, cell-spread, seed-jittered",
+   "recent": "pinned stratum-rank ladder (generator.RECENT_KS), rotated per seed across the 9 band x distractor cells of each stratum"
+  },
+  "bands": {
+   "far": "1 hint term (obj); component replaced by synonym phrase",
+   "mid": "3 hint terms: verb comp obj (template iteration 2; iteration 1's 2-term mid ranked ~97, beyond the 40-hit recall cap \u2014 pipeline-equivalent to far, rejected for resolution before any grid run)",
+   "near": "all 4 hint terms (AND-exclusive)"
+  },
+  "distractors": [
+   "none",
+   "decoy(2 near-duplicates at ranks k-1,k+2)",
+   "super(v1 at cell coords; v2 younger at 0.4k, phrased differently, lexically far)"
+  ],
+  "strata": [
+   "note",
+   "episode",
+   "dialogue"
+  ],
+  "twins": "6 extra near-band pairs (task plant + other-project twin one rank younger, same vocabulary) measuring cross-project bleed; reported separately from the 81-cell grid"
+ },
+ "default_budget": 4000,
+ "frozen": "2026-08-13",
+ "headlines": {
+  "a": "smallest (tier, age, band) region \u2014 severity order: tier ascending, age recent<mid<deep, band near<mid<far \u2014 where silent absence of planted decisions exceeds 20% at the default budget (hinted compiles, all distractors pooled), with a bootstrap CI over generator seeds",
+  "b": "overall stale-resurrection rate where v2 exists (hinted, default budget), bootstrap CI over seeds",
+  "c": "compile latency vs tier (mean ms, bootstrap CI over seeds)"
+ },
+ "instrument": {
+  "carriage_sha": "c29669e43d703c4becd9417c67b92e5f1edcae4975f39db6c0b58e96b01e4516",
+  "generator_sha": "37c656dcfbc02874b2d8e70ad70ed8e5c7ec8a881f9577d2bb86e2060ca321a3",
+  "stats_sha": "8c6fa94c2c696fce3fbfe4f427b4d6005e5cbf24c21823501b0175120a4a695d",
+  "validity_sha": "30100ce7fa9171f80e3d9243157a6af774f2b7f61da234be5b55f01df1e1b4b5",
+  "vocab_sha": "e33aa81de9710e4cb614adc68d4b3ed295f8ff51f80477f219685fca4f09a7ba"
+ },
+ "revision": 2,
+ "revision_history": [
+  "r1 frozen 2026-08-13 sha 9d8a36729926437a5a69eb5f513b0c240d21302fe5371d904dc846c9e71ebecd; superseded same day: payload option tokens were reused across topics, giving the behavioral rubric a false-positive floor (prereg #2 voided, ledger event #35). r2 makes payload tokens globally unique per (topic, role); all deterministic phases rebuilt from scratch under r2."
+ ],
+ "scoring": {
+  "carried": "plant event id in compiled package item list",
+  "no_hint": "one extra compile per (archive, budget) with empty hint, scored against every topic",
+  "omitted_named": "absent but id named in a loud-omission line (measured, expected structurally ~0 outside loops)",
+  "silently_absent": "absent and unnamed",
+  "stale_resurrected": "supersession cells: v1 carried and v2 absent"
+ },
+ "seeds": [
+  101,
+  102,
+  103,
+  104,
+  105
+ ],
+ "stats": {
+  "bootstrap": {
+   "cluster": "seed",
+   "n": 2000,
+   "seed": 20260813
+  },
+  "cell_intervals": "Wilson 95%"
+ },
+ "tiers": {
+  "t20k": 20000,
+  "t5k": 5000,
+  "t80k": 80000
+ },
+ "validity_gate": {
+  "bar": "each band pair strictly ordered in >= 0.9 of matched contexts, pooled per pair over all tiers and seeds",
+  "measure": "plant rank under its own hint via contextd.search.search limit=200 (absent = worse than any rank)"
+ }
+}
