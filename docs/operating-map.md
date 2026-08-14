@@ -31,11 +31,11 @@ handoff, done), not as a journal.
   convention, veto-rate bars). Machine-side verdict capped at CALIBRATION
   NOT EARNED; only the operator's field window earns it. Tracks live
   loop#42848.
-- **Owning session:** unassigned — goal prompt ready
-  (mission-d-grant-calibration.md, repo root)
-- **State:** handoff — chartered by operator 2026-08-14, not yet launched
+- **Owning session:** Claude Code / Fable 5, branch `grant-calibration`
+  (worktree agent-a054d9c593f6f12d3), launched 2026-08-14
+- **State:** in progress — baseline verified (230 passed at 6dcf117)
 - **Blockers:** none (delegation-grants merged at 891aec5; baseline 230)
-- **Last update:** 2026-08-14 — chartered
+- **Last update:** 2026-08-14 — lane taken, Phase 1 starting
 
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
