@@ -26,8 +26,12 @@ class DecisionError(RuntimeError):
 
 
 def record_supersession(conn, old: int, new: int, reason: str = "",
-                        client: str = "cli") -> dict:
-    """Operator-recorded edge: NEW supersedes OLD. Idempotent against an
+                        client: str = "cli", authority: str = "operator",
+                        grant: int | None = None) -> dict:
+    """Recorded edge: NEW supersedes OLD. Operator CLI act by default; the
+    model path passes authority='model-granted' with the covering grant id
+    (docs/GRANTS.md) — enforcement lives at that path's entry, and the
+    provenance is permanently distinguishable. Idempotent against an
     identical live edge (appends nothing); refuses ids that do not name
     content-bearing archive events."""
     old, new = int(old), int(new)
@@ -46,10 +50,12 @@ def record_supersession(conn, old: int, new: int, reason: str = "",
     existing = reduced["edges"].get(old)
     if existing and existing["new"] == new:
         return {"result": "existing", "edge": existing}
+    meta = {"op": "supersede", "old": old, "new": new,
+            "authority": authority, "client": client}
+    if grant is not None:
+        meta["grant"] = grant
     eid = append_event(conn, "decision", "decision",
-                       content=reason.strip() or None,
-                       meta={"op": "supersede", "old": old, "new": new,
-                             "authority": "operator", "client": client})
+                       content=reason.strip() or None, meta=meta)
     return {"result": "created",
             "edge": reduce_supersessions(conn)["edges"][old], "event": eid}
 

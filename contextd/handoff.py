@@ -465,6 +465,22 @@ def compile_checkpoint(conn, cfg, budget: int = 4000, task_hint: str = "",
         package = ("CAPTURE STALENESS: "
                    + "; ".join(stale_line(r) for r in stale)
                    + "\n\n" + package)
+    # standing delegations are loud in every covering checkpoint
+    # (docs/GRANTS.md): the operator and any resuming model cannot not
+    # know what is currently delegated. A repo checkpoint shows global
+    # grants plus its repo's; a global checkpoint shows everything active.
+    from .grants import active_grants, grant_line
+    from .loops import make_scope, scope_str
+    grants = active_grants(conn)
+    if repo_path:
+        want = scope_str(make_scope(repo_path))
+        grants = [g for g in grants
+                  if g["scope"].get("global")
+                  or scope_str(g["scope"]) == want]
+    if grants:
+        package = ("STANDING DELEGATIONS: "
+                   + "; ".join(grant_line(g) for g in grants)
+                   + "\n\n" + package)
     ids = sorted({it["id"]
                   for k in ("loops", "tail", "episodes", "notes", "recall",
                             "supersessions")
@@ -478,6 +494,10 @@ def compile_checkpoint(conn, cfg, budget: int = 4000, task_hint: str = "",
     if stale:
         meta["staleness"] = [{"source": r["source"],
                               "age_hours": r["age_hours"]} for r in stale]
+    if grants:
+        meta["delegations"] = [{"class": g["class"], "grant": g["id"],
+                                "scope": scope_str(g["scope"]),
+                                "expires": g["expires"]} for g in grants]
     disclosure = disclose(conn, cfg, package, meta)
     return {"package": disclosure["content"], "items": ids, "tip": tip,
             "egress_id": disclosure["egress_id"],

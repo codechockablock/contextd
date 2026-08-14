@@ -423,3 +423,18 @@ are reported separately and license nothing beyond themselves.
 - No claim is made about other models, real archives, real operator
   wording/timing, cross-session ecology, or anything the operator trial
   alone can test.
+
+## Addendum 2026-08-14: grant-gated confirmation (docs/GRANTS.md)
+
+The statement above that model-mediated confirmation is absent is amended,
+not retracted. The retired utterance binding remains retired — inferring
+per-item assent from operator text is unsound and stays a demonstrated
+negative. What now exists is a different mechanism with no inference in
+it: the operator may record an explicit, class-level, scoped, expiring,
+revocable delegation (`ctx grant add loop.confirm ...`), after which the
+MCP `loop_confirm` / `loop_dismiss` tools stop refusing — and every
+transition they record carries authority `model-granted` plus the grant's
+event id, permanently distinguishable from an operator act. Without an
+active covering grant the tools refuse exactly as before. The authority
+boundary this contract defends is unchanged: nothing infers operator
+assent; the operator's assent is itself the recorded artifact.

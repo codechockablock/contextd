@@ -35,6 +35,20 @@ handoff, done), not as a journal.
 
 ## Done
 
+- 2026-08-14 — **delegation-grants** (Claude Code / Fable 5, branch
+  `delegation-grants` off decisions-lifecycle): operator-chartered from the
+  authority-model conversation. `ctx grant add/revoke/list` — recorded,
+  class-scoped (loop.confirm / loop.dismiss / decision.supersede), repo- or
+  global-scoped, expiring, revocable delegations (docs/GRANTS.md, frozen
+  before implementation). MCP loop_confirm/loop_dismiss/decision_supersede
+  refuse without a covering grant; under one they record authority
+  `model-granted` + grant id — never operator. Checkpoints carry a
+  STANDING DELEGATIONS line + egress meta while grants are active. The
+  retired utterance-binding stays retired (OPEN_LOOPS.md addendum); two
+  registry guard tests evolved to pin the sharper invariant (tools exist,
+  refuse ungated, never operator). Mechanism only — no calibration claim,
+  zero dispatches. Gates: ruff clean, 230 pytest, smoke, selftest, network
+  grep 2 (pre-existing parse-only).
 - 2026-08-14 — **decisions-lifecycle** (Claude Code / Fable 5, branch
   `decisions-lifecycle`): **FIX DECLARED** against stale resurrection.
   Supersession edges (`ctx decision supersede`, docs/DECISIONS.md contract

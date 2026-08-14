@@ -254,6 +254,72 @@ def cmd_loop(args):
         sys.exit(f"refused: {e}")
 
 
+def cmd_grant(args):
+    """Delegation grants (docs/GRANTS.md): granting and revoking are human
+    CLI acts; acts a grant enables are recorded model-granted, never
+    operator."""
+    from datetime import datetime, timezone
+
+    from .grants import (GrantError, add_grant, grant_line, parse_duration,
+                         reduce_grants, revoke_grant)
+    from .loops import make_scope, scope_str
+    conn = connect()
+    try:
+        if args.action == "add":
+            expires = args.until
+            if args.for_:
+                delta = parse_duration(args.for_)
+                expires = (datetime.now(timezone.utc) + delta).isoformat(
+                    timespec="seconds")
+            scope = (make_scope(None) if args.global_scope
+                     else make_scope(args.repo) if args.repo
+                     else make_scope(None))
+            r = add_grant(conn, args.cls, scope, expires=expires,
+                          reason=args.reason or "", client="cli")
+            word = {"created": "granted", "existing": "already granted"}
+            print(f"{word[r['result']]}: {grant_line(r['grant'])}")
+        elif args.action == "revoke":
+            r = revoke_grant(conn, args.grant_id,
+                             reason=args.reason or "", client="cli")
+            if r["result"] == "already_revoked":
+                print(f"grant ev {args.grant_id} was already revoked "
+                      f"(ev {r['grant']['revoked_by']})")
+            else:
+                print(f"revoked grant ev {args.grant_id} "
+                      f"(revocation ev {r['event']})")
+        else:  # list
+            from .db import now_iso
+            red = reduce_grants(conn)
+            now = now_iso()
+            shown = 0
+            for g in red["grants"]:
+                expired = bool(g["expires"]) and g["expires"] <= now
+                state = ("revoked" if g["revoked_by"] is not None
+                         else "expired" if expired else "ACTIVE")
+                if state != "ACTIVE" and not args.all:
+                    continue
+                shown += 1
+                line = (f"[grant ev {g['id']}] {state:<8} {g['class']} "
+                        f"{scope_str(g['scope'])} since "
+                        f"{g['granted_ts'][:16]}")
+                if g["expires"]:
+                    line += f" expires {g['expires'][:16]}"
+                print(line)
+                if g["reason"]:
+                    print(f"    reason: {g['reason']}")
+                if g["revoked_by"] is not None:
+                    why = f" — {g['revoke_reason']}" if g["revoke_reason"] \
+                        else ""
+                    print(f"    revoked by ev {g['revoked_by']}{why}")
+            for a in red["anomalies"]:
+                print(f"ANOMALY at event #{a['event']}: {a['why']}")
+            if not shown and not red["anomalies"]:
+                print("(no active grants)" if not args.all
+                      else "(no grants ever)")
+    except GrantError as e:
+        sys.exit(f"refused: {e}")
+
+
 def cmd_decision(args):
     """Supersession edges (docs/DECISIONS.md): a human CLI act, like loop
     confirmation — there is no model-mediated path to an edge."""
@@ -622,6 +688,27 @@ def main():
         if name in ("close", "reopen", "dismiss"):
             lt.add_argument("--reason", default="")
 
+    sp = sub.add_parser("grant",
+                        help="delegation grants: recorded, scoped, "
+                             "revocable model authority (docs/GRANTS.md)")
+    gsub = sp.add_subparsers(dest="action", required=True)
+    ga = gsub.add_parser("add", help="delegate an authority class "
+                                     "(operator act)")
+    ga.add_argument("cls", metavar="class",
+                    help="loop.confirm | loop.dismiss | decision.supersede")
+    ga.add_argument("--repo", help="repo scope (default: global)")
+    ga.add_argument("--global", dest="global_scope", action="store_true")
+    ga.add_argument("--for", dest="for_", metavar="DUR",
+                    help="expiry as duration, e.g. 90m, 8h, 3d")
+    ga.add_argument("--until", help="expiry as ISO timestamp")
+    ga.add_argument("-m", "--reason", default="",
+                    help="why you are delegating (carried with the grant)")
+    gr = gsub.add_parser("revoke", help="revoke a grant (operator act)")
+    gr.add_argument("grant_id", type=int)
+    gr.add_argument("-m", "--reason", default="")
+    gl = gsub.add_parser("list", help="active grants (--all: full history)")
+    gl.add_argument("--all", action="store_true")
+
     sp = sub.add_parser("decision",
                         help="decision supersession edges: a superseded "
                              "item is never checkpointed unmarked "
@@ -688,16 +775,19 @@ def main():
         "--tools",
         nargs="+",
         choices=["recall", "search", "note", "timeline", "loop_candidate",
-                 "loop_list"],
+                 "loop_list", "loop_confirm", "loop_dismiss",
+                 "decision_supersede"],
         help="server-enforced MCP tool allowlist (default: all tools); "
-             "omitted tools are absent from the registry itself. Loop "
-             "confirm/dismiss are deliberately CLI-only (docs/OPEN_LOOPS.md)",
+             "omitted tools are absent from the registry itself. "
+             "loop_confirm/loop_dismiss/decision_supersede additionally "
+             "refuse without an active operator grant (docs/GRANTS.md)",
     )
 
     args = p.parse_args()
     {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
      "search": cmd_search, "recall": cmd_recall, "checkpoint": cmd_checkpoint,
-     "loop": cmd_loop, "decision": cmd_decision, "timeline": cmd_timeline,
+     "loop": cmd_loop, "decision": cmd_decision, "grant": cmd_grant,
+     "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
      "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
      "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,
