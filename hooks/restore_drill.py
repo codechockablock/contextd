@@ -85,18 +85,18 @@ class _PeakSampler(threading.Thread):
 
     def __init__(self, root: Path):
         super().__init__(daemon=True)
-        self.root, self.peak, self._stop = root, 0, threading.Event()
+        self.root, self.peak, self._stop_event = root, 0, threading.Event()
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 self.peak = max(self.peak, _tree_bytes(self.root))
             except OSError:
                 pass
-            self._stop.wait(0.2)
+            self._stop_event.wait(0.2)
 
     def stop(self) -> int:
-        self._stop.set()
+        self._stop_event.set()
         self.join()
         try:
             self.peak = max(self.peak, _tree_bytes(self.root))
