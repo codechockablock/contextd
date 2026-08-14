@@ -256,6 +256,10 @@ def loop_confirm(loop_id: int, reason: str = "") -> str:
                        grant=g["id"])
     except (GrantError, LoopError) as e:
         return f"REFUSED: {e}"
+    if r["result"] == "noop":
+        # nothing was appended; claiming a granted act here would be a lie
+        return (f"loop#{r['loop']['id']} already {r['loop']['state']}; "
+                f"nothing appended")
     return (f"loop#{r['loop']['id']} -> {r['loop']['state']} "
             f"(model-granted under grant ev {g['id']})")
 
@@ -277,6 +281,9 @@ def loop_dismiss(loop_id: int, reason: str = "") -> str:
                        grant=g["id"])
     except (GrantError, LoopError) as e:
         return f"REFUSED: {e}"
+    if r["result"] == "noop":
+        return (f"loop#{r['loop']['id']} already {r['loop']['state']}; "
+                f"nothing appended")
     return (f"loop#{r['loop']['id']} -> {r['loop']['state']} "
             f"(model-granted under grant ev {g['id']})")
 

@@ -84,6 +84,14 @@ def test_refusal_without_grant_and_provenance_with():
                        (confirm["event"],)).fetchone()
     assert json.loads(row["meta"])["grant"] == g["id"]
 
+    # confirming an already-open loop appends nothing and says so — the
+    # tool must never claim a granted act for a no-op (a real display bug:
+    # it once reported "model-granted" for a loop the operator had already
+    # confirmed, and the false claim propagated into a field-window count)
+    out = loop_confirm(cand["id"], reason="again")
+    assert "already open; nothing appended" in out
+    assert "model-granted" not in out
+
     # revocation is immediate: identical act now refuses
     cand2 = add_candidate(conn, "expand the flange telemetry", REPO_A,
                           client="model")["loop"]
