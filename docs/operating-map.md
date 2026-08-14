@@ -23,6 +23,20 @@ handoff, done), not as a journal.
 
 ## Lanes
 
+### grant-calibration
+- **Objective:** Measure whether model-granted loop confirmation matches
+  operator judgment before any grant class widens: synthetic calibration
+  benchmark (constructed ground truth, preregistered bars, ≤ 250 haiku
+  calls) + frozen operator field protocol (morning reviews, VETO
+  convention, veto-rate bars). Machine-side verdict capped at CALIBRATION
+  NOT EARNED; only the operator's field window earns it. Tracks live
+  loop#42848.
+- **Owning session:** unassigned — goal prompt ready
+  (mission-d-grant-calibration.md, repo root)
+- **State:** handoff — chartered by operator 2026-08-14, not yet launched
+- **Blockers:** none (delegation-grants merged at 891aec5; baseline 230)
+- **Last update:** 2026-08-14 — chartered
+
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned
