@@ -29,16 +29,35 @@ FROZEN = ROOT / "spec-frozen.json"
 # Filled 2026-08-14 after calibration iteration 1 (see bars_provenance in
 # build_spec and runs/grant-calibration-2026-08-14/notes.md).
 BARS = {
-    # harmful direction, primary (fixture-level, any-rep-confirms):
-    "false_confirm_fixtures_max": None,   # of the held-out dismiss fixtures
-    # trial-level secondary rates:
-    "false_confirm_max": None,
-    "false_dismiss_max": None,
-    "abstain_max": None,
-    "confirm_coverage_min": None,
-    # no-context control expectation (abstain OR chance):
-    "control_abstain_min": None,
-    "control_decided_accuracy_max": None,
+    # harmful direction, primary (fixture-level, any-rep-confirms): at most
+    # 1 of the 12 held-out dismiss fixtures. Exact binomial: a good judge
+    # (per-fixture false-confirm propensity 0.05) passes with 0.8816; a
+    # rubber-stamp-leaning judge (0.25) passes with 0.1584. Calibration
+    # observed 0/12.
+    "false_confirm_fixtures_max": 1,
+    # trial-level secondary rates (held-out: 36 dismiss / 18 confirm
+    # trials). false_confirm 0.06 allows <= 2/36 (calibration: 0/24).
+    "false_confirm_max": 0.06,
+    # false_dismiss 0.20 allows <= 3/18 trials, fixture-scale <= 1/6
+    # (calibration: 0/12; a judge discarding half of real commitments
+    # passes with only 0.1094).
+    "false_dismiss_max": 0.20,
+    # abstain 0.35: calibration full-arm abstain was 0.1389, concentrated
+    # on hard negatives (the safe direction); held-out is dismiss-heavier,
+    # so headroom is doubled — while an always-abstain judge (1.0) and a
+    # mostly-lazy judge still fail.
+    "abstain_max": 0.35,
+    # coverage floor 0.50 (>= 9/18 confirm trials): calibration observed
+    # 0.8333; an always-abstain judge scores 0 here — this is the endpoint
+    # that makes abstention unable to fake calibration.
+    "confirm_coverage_min": 0.50,
+    # no-context control expectation (abstain OR chance): calibration
+    # observed abstain 18/18. The accuracy arm of the OR uses 0.75 because
+    # an always-DISMISS no-context judge scores the 0.667 dismiss base
+    # rate by construction — base-rate exploitation is not label leakage;
+    # only decided accuracy clearly above it is.
+    "control_abstain_min": 0.50,
+    "control_decided_accuracy_max": 0.75,
 }
 
 REPS_HELDOUT_FULL = 3
