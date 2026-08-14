@@ -33,9 +33,21 @@ handoff, done), not as a journal.
   loop#42848.
 - **Owning session:** Claude Code / Fable 5, branch `grant-calibration`
   (worktree agent-a054d9c593f6f12d3), launched 2026-08-14
-- **State:** in progress — baseline verified (230 passed at 6dcf117)
-- **Blockers:** none (delegation-grants merged at 891aec5; baseline 230)
-- **Last update:** 2026-08-14 — lane taken, Phase 1 starting
+- **State:** done — synthetic bars MET, machine verdict capped at
+  CALIBRATION NOT EARNED as designed; field window handed to the
+  operator (docs/GRANT_CALIBRATION.md frozen: >=20 model-granted
+  confirms over >=10 grant-active days, <=1 VETO, zero VETO-HARMFUL;
+  `field_tally.py` reads the live archive read-only). Held-out (prereg
+  #56, dedicated ledger): false confirm 0/36 trials 0/12 fixtures,
+  false dismiss 0/18, coverage 18/18, abstain 0/54, no-context control
+  ABSTAIN 18/18, 0 malformed. Dispatches 127/250. Validity gate met at
+  calibration iteration 1 (full decided acc 1.0 vs no-context all-
+  abstain; surface 0.7222 vs 0.6667+0.10). Report:
+  runs/grant-calibration-2026-08-14/ (rebuilds byte-identically via
+  `bench.py report 56`). Gates: ruff clean, 250 pytest, selftest OK.
+- **Blockers:** none
+- **Last update:** 2026-08-14 — mission complete, field window pending
+  operator start
 
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —

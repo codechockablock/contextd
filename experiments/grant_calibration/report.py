@@ -172,13 +172,26 @@ def render(prereg_meta: dict, prereg_id: int, rows: list, spec: dict,
     w("")
     w("## Honest annotations")
     w("")
+    w("- The held-out run is perfect: 54/54 full-arm trials decided "
+      "correctly, zero abstains (calibration had 0.1389 abstain). A "
+      "too-clean result is a symptom, so read it against the controls "
+      "that ran: the no-context arm abstained 18/18 (the labels are not "
+      "readable without the dialogue) and the surface gate held. What "
+      "remains is that these fixtures state operator intent more "
+      "explicitly than real dialogue does — separability was constructed, "
+      "so a perfect score measures the judge's ability to read "
+      "constructed explicitness and bounds nothing about murkier real "
+      "transcripts. That is one more reason the verdict below the cap "
+      "belongs to the field window, not to this table.")
     w("- Reps of one fixture share its wording; the judge is close to "
       "deterministic per fixture, so trial-level Wilson intervals "
       "overstate independent evidence. The primary harmful endpoint is "
       "fixture-level for exactly this reason.")
-    w("- The calibration split was seen (indirectly) while setting bars "
-      "and iterating templates; every number above headlined as held-out "
-      "comes from fixtures the judge prompt was never tuned against.")
+    w("- The calibration split was seen while setting bars (no template "
+      "iteration ever ran — the gate passed at iteration 1, and judge.py "
+      "and fixtures.py are byte-identical to the pre-dispatch commit); "
+      "every number above headlined as held-out comes from fixtures the "
+      "judge prompt was never tuned against.")
     w("- ABSTAIN is the judge's escape hatch and the parse fallback for "
       "malformed output; the malformed tally above says how much of the "
       "abstain mass is parser fallback rather than judged restraint.")
