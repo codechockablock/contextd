@@ -23,41 +23,6 @@ handoff, done), not as a journal.
 
 ## Lanes
 
-### lineage-drift-audit
-- **Objective:** Deterministic derivation-depth gauge (`ctx lineage`, depth>1
-  alert) + judge-calibrated sampled fidelity audit of model-written notes,
-  advisory-only, `AUDIT NOT EARNED` shipped honestly if calibration bars miss.
-- **Owning session:** Claude Code (Fable 5), worktree `/Users/joseph/ctx-b`,
-  branch `lineage-drift-audit` (goal prompt: mission-b-lineage-drift.md)
-- **State:** done — ready for review/merge. Gauge + calibrated audit shipped;
-  calibration verdict **AUDIT EARNED** (prereg #76, held-out 150/150 bars
-  passed, quantitative-shift ceiling 1.00); live baseline measured (29 notes,
-  all depth 1, 38/38 anchors); first live audit ran (7 advisory verdicts);
-  183/250 dispatches used. Report: runs/lineage-audit-2026-08-13/.
-  Note: mission's `actor='mcp'` filter didn't match the live archive
-  (notes carry client names); audit uses the provenance_class boundary —
-  surfaced in the final report, not silently adapted.
-- **Blockers:** —
-- **Last update:** 2026-08-13 — mission complete, gates green (185 pytest,
-  smoke, ruff, network grep 3)
-
-### restore-firedrill
-- **Objective:** Weekly restore drill with behavioral-equivalence battery and
-  a tested alarm path, multi-GB scale trial with cliff-hunting, expanded
-  adversarial bundle corpus.
-- **Owning session:** Claude Code (Fable 5), worktree `/Users/joseph/ctx-c`,
-  branch `restore-firedrill` (goal prompt: mission-c-restore-firedrill.md)
-- **State:** done — branch ready for review/merge. Drill + tested alarm +
-  status line shipped; 6/6 scale cells PASS at full size (8 GiB included)
-  with temp ratio exactly 1.0 (preflight pinned 1.5×); cross-machine
-  rehearsal PASS; 9-case adversarial corpus, distinct refusals; 3 defects
-  fixed with regression tests (incl. a kernel retention/ordering bug found
-  by the new smoke alarm), 2 design questions stopped-and-reported. Gates:
-  ruff clean, 178 pytest, smoke ALL PASSED, network grep 3. Report:
-  runs/restore-firedrill-20260813/final-report.md
-- **Blockers:** — (launchd plist install is an operator act, post-merge)
-- **Last update:** 2026-08-13 — mission complete on branch
-
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned
@@ -81,3 +46,29 @@ handoff, done), not as a journal.
   0.9) — instrument finding (placement salience). Report:
   runs/selection-stress-2026-08-13/ (rebuilds byte-identically via
   `bench.py report 36`). Gates: ruff clean, 164 pytest, selftest green.
+- 2026-08-13 — **lineage-drift-audit** (Claude Code / Fable 5, branch
+  `lineage-drift-audit` @ 7273da6): derivation-depth gauge (`ctx lineage`,
+  depth>1 DEPTH ALERT) shipped; calibration verdict **AUDIT EARNED**
+  (prereg #76, held-out 150/150 bars passed); live baseline measured (29
+  notes, all depth 1, 38/38 anchors); first live audit ran (7 advisory
+  verdicts); 183/250 dispatches used. Note: mission's `actor='mcp'` filter
+  didn't match the live archive (notes carry client names); audit uses the
+  provenance_class boundary instead, surfaced honestly in the final report.
+  Report: runs/lineage-audit-2026-08-13/. Gates: ruff clean, 185 pytest,
+  smoke, network grep 3.
+- 2026-08-13 — **restore-firedrill** (Claude Code / Fable 5, branch
+  `restore-firedrill` @ 1f6df05): weekly restore drill with tested alarm
+  (PASS→forced FAIL→recovery exercised by pytest and smoke) shipped; 6/6
+  scale cells PASS at full size (8 GiB included), temp ratio exactly 1.0;
+  cross-machine rehearsal PASS; 9-case adversarial corpus, distinct
+  refusals; 3 defects fixed with regression tests (incl. a bundle
+  sequence-number reuse bug found by the new smoke alarm), 2 design
+  questions stopped-and-reported. Report:
+  runs/restore-firedrill-20260813/final-report.md. Gates: ruff clean, 178
+  pytest, smoke ALL PASSED, network grep 3.
+- 2026-08-13 — **merge**: all three lanes merged into master sequentially
+  (`36ce893`→`9fd8550`), real conflicts in `contextd/__init__.py`,
+  `contextd/cli.py`, `tests/smoke.py` between lineage-drift-audit and
+  restore-firedrill (both inserted disjoint blocks at the same point —
+  no logical overlap, both kept in full). Post-merge: 219 pytest, ruff
+  clean, smoke ALL PASSED, network grep 3.
