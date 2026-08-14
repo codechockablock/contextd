@@ -400,7 +400,8 @@ def behavioral_baseline_runs(doc: dict) -> dict:
     for c in doc["behavioral"]["cells"]:
         ci = c["cell_index"]
         rows = [r for r in runs if r["cell_index"] == ci
-                and r["arm"] == "as_compiled" and r["status"] == "succeeded"]
+                and r["arm"] == "as_compiled"
+                and r["dispatch_status"] == "succeeded"]
         out[ci] = rows
     return out
 

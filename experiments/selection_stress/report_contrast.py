@@ -110,6 +110,25 @@ def render_report(prereg_id: int) -> str:
     w("")
     w("## Honest annotations")
     w("")
+    w("- This is round 2. Round 1 (prereg #253, outcome #254) ran the r1 "
+      "mechanism and FAILED bars 2 and 4: the scorer's block extractor "
+      "split on episode-note anchor citations (instrument artifact — the "
+      "kernel was verified compliant on every flagged row), and the "
+      "unconditional reserve taxed compiles that owed nothing (real "
+      "mechanism cost, one cell lost 0.6). Fix was not declared; the "
+      "mechanism was revised to two-pass, the bars were re-frozen with "
+      "the unpaid/taxed distinction, and round 2 re-preregistered "
+      "(#255) before any round-2 data existed. Zero behavioral "
+      "dispatches were spent on round 1.")
+    w("- After all 24 round-2 dispatches completed and were scored, the "
+      "results aggregator crashed reading prereg #36's stored rows "
+      "(key-name mismatch) and was fixed post-run; the fix touches only "
+      "the stored-row reader — every per-run score was computed at "
+      "dispatch time, before the crash. Recorded as a harness note in "
+      "the experiment ledger with the post-fix module sha.")
+    w("- Bar 4c's taxed-pair delta is measured on planted items only; the "
+      "reserve may displace organic (unscored) content. The bound it "
+      "certifies is about the measured surface, not every token.")
     w("- Lifecycle worlds append every supersession edge after the full "
       "event stream (digest-verified copies of the r2 worlds), not at the "
       "moment v2 was written. Edge position never enters selection or "
