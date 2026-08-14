@@ -254,6 +254,48 @@ def cmd_loop(args):
         sys.exit(f"refused: {e}")
 
 
+def cmd_decision(args):
+    """Supersession edges (docs/DECISIONS.md): a human CLI act, like loop
+    confirmation — there is no model-mediated path to an edge."""
+    from .decisions import (DecisionError, current_version,
+                            record_supersession, reduce_supersessions)
+    conn = connect()
+    try:
+        if args.action == "supersede":
+            r = record_supersession(conn, args.old, args.new,
+                                    reason=args.reason or "", client="cli")
+            e = r["edge"]
+            word = {"created": "recorded", "existing": "already recorded"}
+            print(f"{word[r['result']]}: ev {e['old']} superseded by "
+                  f"ev {e['new']} (edge ev {e['edge']})")
+        elif args.action == "list":
+            red = reduce_supersessions(conn)
+            for old, e in sorted(red["edges"].items()):
+                walk = current_version(red["edges"], old)
+                tail = (" [CYCLIC]" if walk["cyclic"] else
+                        f" -> current ev {walk['current']}"
+                        if walk["current"] != e["new"] else "")
+                print(f"ev {old} -> ev {e['new']} (edge ev {e['edge']})"
+                      f"{tail}")
+            for a in red["anomalies"]:
+                print(f"ANOMALY at event #{a['event']}: {a['why']}")
+            if not red["edges"] and not red["anomalies"]:
+                print("(no supersession edges)")
+        else:  # current
+            red = reduce_supersessions(conn)
+            walk = current_version(red["edges"], args.event_id)
+            if walk["cyclic"]:
+                print(f"ev {args.event_id}: chain "
+                      f"{' -> '.join(str(i) for i in walk['chain'])} is "
+                      f"CYCLIC; no resolvable current version")
+            else:
+                chain = " -> ".join(str(i) for i in walk["chain"])
+                print(f"current version of ev {args.event_id}: "
+                      f"ev {walk['current']}  (chain {chain})")
+    except DecisionError as e:
+        sys.exit(f"refused: {e}")
+
+
 def cmd_timeline(args):
     rows = timeline(connect(), since=args.since, until=args.until,
                     source=args.source, limit=args.limit)
@@ -580,6 +622,21 @@ def main():
         if name in ("close", "reopen", "dismiss"):
             lt.add_argument("--reason", default="")
 
+    sp = sub.add_parser("decision",
+                        help="decision supersession edges: a superseded "
+                             "item is never checkpointed unmarked "
+                             "(docs/DECISIONS.md)")
+    dsub = sp.add_subparsers(dest="action", required=True)
+    ds = dsub.add_parser("supersede",
+                         help="record that NEW supersedes OLD (operator act)")
+    ds.add_argument("old", type=int)
+    ds.add_argument("new", type=int)
+    ds.add_argument("-m", "--reason", default="")
+    dsub.add_parser("list", help="all edges + anomalies")
+    dc = dsub.add_parser("current",
+                         help="follow the chain from an event id")
+    dc.add_argument("event_id", type=int)
+
     sp = sub.add_parser("timeline", help="browse events by time")
     sp.add_argument("--since")
     sp.add_argument("--until")
@@ -640,7 +697,7 @@ def main():
     args = p.parse_args()
     {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
      "search": cmd_search, "recall": cmd_recall, "checkpoint": cmd_checkpoint,
-     "loop": cmd_loop, "timeline": cmd_timeline,
+     "loop": cmd_loop, "decision": cmd_decision, "timeline": cmd_timeline,
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
      "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
      "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,

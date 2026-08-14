@@ -23,6 +23,20 @@ handoff, done), not as a journal.
 
 ## Lanes
 
+### decisions-lifecycle
+- **Objective:** Attack the single most expensive measured failure under the
+  thesis — stale resurrection (0.269 carriage, 0.625–0.875 behavioral
+  v1-as-current) — with event-sourced supersession edges + a checkpoint
+  compile contract (superseded never served unmarked; current version
+  carried or loudly named). Fix declared only if a preregistered contrast
+  moves the surface; silent omission stays measurable.
+- **Owning session:** Claude Code (Fable 5), branch `decisions-lifecycle`
+  (off master 2b359b2), worktree `/Users/joseph/ctx-a`
+- **State:** active — chartered by operator 2026-08-14; contract doc first,
+  then kernel + instrument arm + prereg + contrast
+- **Blockers:** none
+- **Last update:** 2026-08-14 — lane taken
+
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned

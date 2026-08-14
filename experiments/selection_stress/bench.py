@@ -213,7 +213,21 @@ def main() -> int:
     p_rep.add_argument("prereg_id", type=int)
     p_rep.add_argument("--write", action="store_true",
                        help="write the report to runs/ instead of comparing")
+    sub.add_parser("contrast-prereg")
+    for name in ("contrast-run", "contrast-behavior"):
+        cp = sub.add_parser(name)
+        cp.add_argument("prereg_id", type=int)
+    c_rep = sub.add_parser("contrast-report")
+    c_rep.add_argument("prereg_id", type=int)
+    c_rep.add_argument("--write", action="store_true")
     args = ap.parse_args()
+    if args.cmd.startswith("contrast"):
+        from experiments.selection_stress import contrast, report_contrast
+        return {"contrast-prereg": contrast.cmd_contrast_prereg,
+                "contrast-run": contrast.cmd_contrast_run,
+                "contrast-behavior": contrast.cmd_contrast_behavior,
+                "contrast-report": report_contrast.cmd_contrast_report,
+                }[args.cmd](args)
     if args.cmd in ("probe", "prereg", "run-behavior", "report"):
         from experiments.selection_stress import behavior
         return {"probe": behavior.cmd_probe,
