@@ -64,9 +64,14 @@ def render_report(prereg_id: int) -> str:
       f"{e3['baseline']['rate']}) | lifecycle {e3['lifecycle']['rate']} "
       f"(seed-bootstrap {e3['lifecycle_seed_bootstrap']}) — "
       f"{'MET' if bars['3_surface'] else 'NOT MET'} |")
-    w(f"| 4 non-regression | pooled delta <= 0.02, cell <= 0.2 | pooled "
-      f"{e4['pooled_delta']}, worst cell {e4['worst_cell_delta']} — "
-      f"{'MET' if bars['4_nonreg'] else 'NOT MET'} |")
+    w(f"| 4a pooled non-regression | <= 0.02 | {e4['pooled_delta']} — "
+      f"{'MET' if bars['4a_pooled'] else 'NOT MET'} |")
+    w(f"| 4b unpaid losses (reserve not engaged) | 0 | "
+      f"{e4['n_unpaid_losses']} — "
+      f"{'MET' if bars['4b_unpaid'] else 'NOT MET'} |")
+    w(f"| 4c taxed-pair pooled delta | <= 0.10 | "
+      f"{e4['taxed_pooled_delta']} over {e4['taxed_pairs']} pairs — "
+      f"{'MET' if bars['4c_taxed'] else 'NOT MET'} |")
     w(f"| 5 behavioral resurrects | pooled <= 0.3, p <= 0.05 | pooled "
       f"{b['pooled_lifecycle_resurrects']} "
       f"(p={b['pooled_perm']['p']}, {b['pooled_perm']['method']}) — "

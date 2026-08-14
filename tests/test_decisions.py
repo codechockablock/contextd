@@ -111,6 +111,8 @@ def test_compile_current_already_carried_needs_no_section():
     note_ids = {it["id"] for it in sel["notes"]}
     assert {v1, v2} <= note_ids
     assert sel["supersessions"] == [] and sel["supersessions_omitted"] == []
+    # nothing owed => the reserve pass never runs and no compile pays for it
+    assert sel["supersession_reserve_engaged"] is False
     marked = next(it for it in sel["notes"] if it["id"] == v1)
     assert f"SUPERSEDED by ev {v2}" in marked["text"]
 
@@ -129,6 +131,7 @@ def test_compile_loud_omission_when_current_cannot_fit():
     assert v1 in out["items"] and v2 not in out["items"]
     assert f"SUPERSEDED by ev {v2}" in pkg
     assert f"SUPERSESSION OMITTED: current version ev {v2}" in pkg
+    assert out["selection"]["supersession_reserve_engaged"] is True
     assert out["selection"]["supersessions_omitted"] == [
         {"carried": v1, "current": v2}]
 

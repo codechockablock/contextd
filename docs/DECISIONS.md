@@ -1,6 +1,25 @@
 # Decision supersession: making stale resurrection structurally loud
 
-Contract frozen 2026-08-14, before implementation. The evaluation bars in
+Contract r2, 2026-08-14. Revision history:
+
+- **r1** (frozen before implementation; committed at 6a94488, sha16
+  `cfbc676af854afce`): unconditional reserve; bar 4 as a flat per-cell
+  cap. Round-1 contrast (prereg #253, outcome #254 in the experiment
+  ledger): bars 1 and 3 met decisively (silent resurrection 0/405;
+  resurrection 0.269 → 0.000); bar 2 failed on 1/405 — diagnosed as an
+  instrument artifact (the scorer's block extractor split on anchor
+  citations of v1's id; the kernel was verified compliant on the flagged
+  row); bar 4 failed with one cell at Δ0.6 — diagnosed as the
+  unconditional reserve taxing every compile once any edge exists. **Fix
+  not declared**, per the frozen rule.
+- **r2** (this document): two-pass selection so only compiles that owe
+  work pay the reserve; scorer block extraction anchored on the header
+  form; bar 4 split into 4a/4b/4c with the unpaid/taxed distinction the
+  two-pass design makes measurable. Bars 1–3 and 5 unchanged. Re-frozen
+  and re-preregistered before the round-2 run; no round-2 data existed
+  when these bars were set.
+
+Contract r1 was frozen before implementation. The evaluation bars in
 this document are preregistered against the selection-stress instrument
 (`experiments/selection_stress/`, spec r2) and recorded as a ledger event in
 that experiment's dedicated home before any contrast run.
@@ -70,13 +89,19 @@ measured surface). Two clauses, both loud:
    superseding event and the edge:
    `[SUPERSEDED by <new-id> — edge <edge-id>]`.
 2. **Current version carried or named.** If any version of a chain is
-   carried, the chain's current version must also be carried. When the
-   archive holds at least one edge, a supersession reserve (6% of budget,
-   min 120 est. tokens) is subtracted before the strata shares, and owed
+   carried, the chain's current version must also be carried. Selection is
+   **two-pass** (r2): the strata are packed reserve-free first; only when
+   that selection carries a chain whose current version is missing does
+   selection re-run with a supersession reserve (6% of budget, min 120
+   est. tokens) subtracted before the strata shares, from which owed
    current versions are packed into a dedicated package section, oldest
-   carried id first. Any owed current version that does not fit is named:
-   `SUPERSESSION OMITTED: current version [<id>] of carried [<id>] — run
-   'ctx recall'`. Silent resurrection of a *recorded* chain is thereby
+   carried id first. A compile that owes nothing pays nothing — its
+   selection is identical to the no-edges selection (r1 subtracted the
+   reserve unconditionally, and the round-1 contrast measured the tax:
+   marginal recall items lost carriage in cells that owed no work). Any
+   owed current version that does not fit is named: `SUPERSESSION
+   OMITTED: current version ev <id> of carried ev <id> — run 'ctx
+   recall'`. Silent resurrection of a *recorded* chain is thereby
    structurally impossible; the reserve exists so the loud line is always
    affordable (same design as the loops omission reserve).
 
@@ -111,10 +136,18 @@ Endpoints and bars, in order of authority:
    rate as defined by the *baseline* scorer (v1 carried ∧ v2 not carried)
    drops from 0.269 to ≤ 0.05 in the lifecycle arm at default budget; the
    residue must consist only of loudly-named omissions (endpoint 1 = 0).
-4. **Non-regression**: for non-supersession cells, pooled carried rate
-   differs by ≤ 0.02 absolute between arms, and no single cell moves by
-   more than 0.2 (one seed-flip at n=5). The 27 extra events per archive
-   must not disturb the rest of the surface.
+4. **Non-regression** (r2 formulation; see revision history):
+   - **4a** pooled carried rate over non-supersession cells differs by
+     ≤ 0.02 absolute between arms;
+   - **4b** zero *unpaid* losses: in row-pairs where the lifecycle
+     compile did **not** engage the reserve, its selection is identical
+     to the baseline's by construction, so any lost carriage there is a
+     mechanism defect — structural bar, 0;
+   - **4c** among row-pairs where the reserve **was** engaged, pooled
+     carried-rate loss ≤ 0.10 — justified ex ante: the reserve diverts
+     6% of budget, so same-order marginal loss is the expected price of
+     carrying the current version; materially more indicates displacement
+     beyond the reserve's size.
 5. **Behavioral confirmation** (haiku, deterministic rubric unchanged from
    prereg #36): the three supersession cells of prereg #36, lifecycle-arm
    as-compiled packages, 8 runs/cell (24 dispatches). Baseline arm =

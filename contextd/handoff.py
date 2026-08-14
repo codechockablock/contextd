@@ -200,15 +200,57 @@ def select_checkpoint_context(conn, cfg, budget: int = 4000,
     slice cannot carry every active loop, the section names the omitted ids
     and count: silent loss is forbidden by contract.
     """
-    from .decisions import (SUPERSEDE_RESERVE_MIN, SUPERSEDE_RESERVE_SHARE,
-                            reduce_supersessions)
+    from .decisions import reduce_supersessions
     from .loops import select_loop_section
     loop_sec = select_loop_section(conn, budget, repo_path)
-    # supersession reserve (docs/DECISIONS.md): subtracted before shares so
-    # the loud marker and the owed current version are always affordable
+    # supersession handling is two-pass (docs/DECISIONS.md r2): selection
+    # runs reserve-free first; only when a carried chain's current version
+    # is owed does it re-run with the reserve, so compiles that owe nothing
+    # pay nothing. _select_strata is the shared single pass.
     sup = reduce_supersessions(conn)
-    sup_reserve = (max(int(budget * SUPERSEDE_RESERVE_SHARE),
-                       SUPERSEDE_RESERVE_MIN) if sup["edges"] else 0)
+    picked = _select_strata(conn, cfg, budget, task_hint, loop_sec, 0)
+    sup_items: list = []
+    sup_omitted: list = []
+    reserve_engaged = False
+    if sup["edges"]:
+        if _owed_work(sup, picked):
+            from .decisions import (SUPERSEDE_RESERVE_MIN,
+                                    SUPERSEDE_RESERVE_SHARE)
+            reserve = max(int(budget * SUPERSEDE_RESERVE_SHARE),
+                          SUPERSEDE_RESERVE_MIN)
+            picked = _select_strata(conn, cfg, budget, task_hint, loop_sec,
+                                    reserve)
+            reserve_engaged = True
+        else:
+            reserve = 0
+        sup_items, sup_omitted = _apply_supersessions(
+            conn, cfg, sup, reserve, picked["taken"], picked["sections"])
+    return {"loops": loop_sec["items"], "loops_omitted": loop_sec["omitted"],
+            "tail": picked["tail"], "episodes": picked["episodes"],
+            "notes": picked["notes"], "recall": picked["recall"],
+            "supersessions": sup_items, "supersessions_omitted": sup_omitted,
+            "supersession_reserve_engaged": reserve_engaged,
+            "budget": budget, "task_hint": task_hint}
+
+
+def _owed_work(sup: dict, selected: dict) -> bool:
+    """True iff a carried item's chain has a current version that is not
+    itself carried (the condition that engages the reserve pass)."""
+    from .decisions import current_version
+    carried = set()
+    for items in selected["sections"].values():
+        carried.update(it["id"] for it in items if it["id"] is not None)
+    for cid in carried:
+        if cid in sup["edges"]:
+            walk = current_version(sup["edges"], cid)
+            if (not walk["cyclic"] and walk["current"] is not None
+                    and walk["current"] not in carried):
+                return True
+    return False
+
+
+def _select_strata(conn, cfg, budget: int, task_hint: str, loop_sec: dict,
+                   sup_reserve: int) -> dict:
     remaining = budget - loop_sec["slice"] - sup_reserve
     shares = {"tail": 0.45, "episodes": 0.20, "notes": 0.15, "recall": 0.20}
     if not task_hint:
@@ -258,16 +300,11 @@ def select_checkpoint_context(conn, cfg, budget: int = 4000,
     # freshest evidence and the package places it last on purpose
     for section in (notes, episodes, tail):
         section.reverse()
-
-    sup_items, sup_omitted = _apply_supersessions(
-        conn, cfg, sup, sup_reserve, taken,
-        {"tail": tail, "episodes": episodes, "notes": notes,
-         "recall": recall_items})
-    return {"loops": loop_sec["items"], "loops_omitted": loop_sec["omitted"],
-            "tail": tail, "episodes": episodes, "notes": notes,
-            "recall": recall_items, "supersessions": sup_items,
-            "supersessions_omitted": sup_omitted,
-            "budget": budget, "task_hint": task_hint}
+    sections = {"tail": tail, "episodes": episodes, "notes": notes,
+                "recall": recall_items}
+    return {"tail": tail, "episodes": episodes, "notes": notes,
+            "recall": recall_items, "taken": taken, "sections": sections,
+            "reserve": sup_reserve}
 
 
 def _apply_supersessions(conn, cfg, sup: dict, reserve: int, taken: set,
