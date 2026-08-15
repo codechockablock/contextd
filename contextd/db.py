@@ -892,6 +892,10 @@ class BlobPrivacyError(ValueError):
     """A blob cannot cross the persistence privacy boundary safely."""
 
 
+class BlobIntegrityError(BlobPrivacyError):
+    """A stored object's bytes do not hash to its content address."""
+
+
 def _binary_blob_has_secret(cfg: dict, data: bytes) -> bool:
     """Detect floor/config secrets embedded in otherwise binary bytes.
 
@@ -972,9 +976,60 @@ def _verify_existing_blob(shard_fd: int, digest: str) -> None:
         while chunk := os.read(fd, 1024 * 1024):
             observed.update(chunk)
         if observed.hexdigest() != digest:
-            raise BlobPrivacyError("stored blob digest does not verify")
+            raise BlobIntegrityError("stored blob digest does not verify")
     finally:
         os.close(fd)
+
+
+_BLOB_TEMP_TTL_SECONDS = 86_400
+
+
+def _quarantine_corrupt_blob(shard_fd: int, digest: str) -> None:
+    """Set a digest-mismatched object aside instead of overwriting it.
+
+    A mismatch is a torn pre-hardening write or bit rot; either way the bytes
+    are evidence, so they are preserved under a name that backup, restore, and
+    the drill never reference, the content address becomes writable again, and
+    the repair is loud on stderr instead of silent.
+    """
+    stamp = int(datetime.now(timezone.utc).timestamp())
+    aside = f"{digest}.corrupt.{stamp}"
+    n = 0
+    while True:
+        try:
+            os.stat(aside, dir_fd=shard_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            break
+        n += 1
+        aside = f"{digest}.corrupt.{stamp}.{n}"
+    try:
+        os.rename(digest, aside, src_dir_fd=shard_fd, dst_dir_fd=shard_fd)
+    except FileNotFoundError:
+        return  # a concurrent writer quarantined it first
+    print(
+        f"contextd: WARNING quarantined corrupt blob {digest[:12]}… as "
+        f"{aside}; rewriting verified content",
+        file=sys.stderr,
+    )
+
+
+def _reap_stale_blob_temps(shard_fd: int) -> None:
+    """Unlink day-old temp files a killed writer abandoned in this shard.
+
+    Only names matching the exact temp scheme written below qualify; anything
+    else in the shard is left alone. A fresh temp may belong to a live
+    concurrent writer and is never touched.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - _BLOB_TEMP_TTL_SECONDS
+    for name in os.listdir(shard_fd):
+        if not (name.startswith(".") and name.endswith(".tmp")):
+            continue
+        try:
+            info = os.stat(name, dir_fd=shard_fd, follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                os.unlink(name, dir_fd=shard_fd)
+        except FileNotFoundError:
+            continue
 
 
 def store_blob(data: bytes) -> str:
@@ -1011,11 +1066,16 @@ def store_blob(data: bytes) -> str:
     temp_name = f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
     temp_fd = None
     try:
+        _reap_stale_blob_temps(shard_fd)
         try:
             _verify_existing_blob(shard_fd, digest)
             return digest
         except FileNotFoundError:
             pass
+        except BlobIntegrityError:
+            # torn pre-hardening write or bit rot at this content address:
+            # keep the evidence aside, then rewrite verified bytes below
+            _quarantine_corrupt_blob(shard_fd, digest)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -1029,16 +1089,26 @@ def store_blob(data: bytes) -> str:
         os.fsync(temp_fd)
         os.close(temp_fd)
         temp_fd = None
-        try:
-            os.link(
-                temp_name,
-                digest,
-                src_dir_fd=shard_fd,
-                dst_dir_fd=shard_fd,
-                follow_symlinks=False,
-            )
-        except FileExistsError:
-            _verify_existing_blob(shard_fd, digest)
+        for retry in (False, True):
+            try:
+                os.link(
+                    temp_name,
+                    digest,
+                    src_dir_fd=shard_fd,
+                    dst_dir_fd=shard_fd,
+                    follow_symlinks=False,
+                )
+                break
+            except FileExistsError:
+                # a concurrent writer linked first; accept its object only if
+                # it verifies, quarantine and retry exactly once if it does not
+                try:
+                    _verify_existing_blob(shard_fd, digest)
+                    break
+                except BlobIntegrityError:
+                    if retry:
+                        raise
+                    _quarantine_corrupt_blob(shard_fd, digest)
         os.fsync(shard_fd)
     finally:
         if temp_fd is not None:

@@ -132,3 +132,52 @@ def test_blob_store_refuses_symlinked_final_object(tmp_path):
     with pytest.raises(OSError):
         store_blob(data)
     assert outside.read_bytes() == b"do not overwrite"
+
+
+def test_torn_blob_is_quarantined_and_healed(capsys):
+    connect().close()
+    data = b"healed blob content"
+    digest = hashlib.sha256(data).hexdigest()
+    store = home() / "store"
+    shard = store / digest[:2]
+    shard.mkdir(parents=True, mode=0o700)
+    os.chmod(store, 0o700)
+    os.chmod(shard, 0o700)
+    torn = b"torn partial wri"
+    (shard / digest).write_bytes(torn)
+    os.chmod(shard / digest, 0o600)
+
+    assert store_blob(data) == digest
+    assert (shard / digest).read_bytes() == data
+    quarantined = list(shard.glob(f"{digest}.corrupt.*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == torn
+    assert "quarantined corrupt blob" in capsys.readouterr().err
+
+
+def test_intact_existing_blob_is_left_alone(capsys):
+    connect().close()
+    data = b"stable blob"
+    digest = store_blob(data)
+    assert store_blob(data) == digest
+    shard = home() / "store" / digest[:2]
+    assert list(shard.glob("*.corrupt.*")) == []
+    assert "quarantined" not in capsys.readouterr().err
+
+
+def test_stale_blob_temp_is_reaped_and_fresh_kept():
+    connect().close()
+    data = b"temp reap probe"
+    digest = store_blob(data)
+    shard = home() / "store" / digest[:2]
+    stale = shard / f".{digest}.999.888.tmp"
+    fresh = shard / f".{digest}.777.666.tmp"
+    for leftover in (stale, fresh):
+        leftover.write_bytes(b"x")
+        os.chmod(leftover, 0o600)
+    old = os.stat(stale).st_mtime - 200_000
+    os.utime(stale, (old, old))
+
+    assert store_blob(data) == digest
+    assert not stale.exists()
+    assert fresh.exists()
