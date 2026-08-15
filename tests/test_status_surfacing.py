@@ -27,7 +27,10 @@ def test_status_names_the_unenrolled_signer(monkeypatch):
     out = _status()
     assert "operator signer: NOT ENROLLED" in out
     assert "WARNING: every operator CLI act refuses" in out
-    assert "ctx security key register" in out
+    # the remedy must be the development FIRST-KEY path: plain register
+    # cannot self-authorize on a keyless archive
+    assert "ctx security key bootstrap" in out
+    assert "--development" in out
 
 
 def test_status_reports_test_mode_signer_without_warning():

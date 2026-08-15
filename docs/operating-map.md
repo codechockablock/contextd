@@ -20,7 +20,10 @@ warns about the first two until they are done.
    then; a model must never create the operator key, so this stays human):
    `native/build.sh`, then
    `native/contextd-signer enroll --key-id default > operator-key.der`,
-   then `ctx security key register operator-key.der`
+   then `ctx security key bootstrap operator-key.der --signer-tag default
+   --development --acknowledge-first-key-bootstrap` — the development
+   first-key path; plain `key register` cannot self-authorize on a keyless
+   archive and is for later, already-attested keys
    (docs/OPERATOR_CEREMONY.md).
 2. **Grant Full Disk Access** for Safari history capture: System Settings →
    Privacy & Security → Full Disk Access, for your terminal and the watch

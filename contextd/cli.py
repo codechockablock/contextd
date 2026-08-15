@@ -270,10 +270,14 @@ def operator_authorization(conn, action: str, scope: str = "global",
             sys.exit(
                 f"refused: {action} is an operator act and no production "
                 f"signer is enrolled.\n"
-                f"  build:    native/build.sh\n"
-                f"  enroll:   native/contextd-signer enroll --key-id default "
+                f"  build:     native/build.sh\n"
+                f"  enroll:    native/contextd-signer enroll --key-id default "
                 f"> operator-key.der\n"
-                f"  register: ctx security key register operator-key.der\n"
+                f"  first key: ctx security key bootstrap operator-key.der "
+                f"--signer-tag default --development "
+                f"--acknowledge-first-key-bootstrap\n"
+                f"  (a later, already-attested key: ctx security key register "
+                f"<der> --signer-tag <tag>)\n"
                 f"({exc})"
             )
     key_id = keys[-1]["key_id"]
@@ -763,8 +767,9 @@ def cmd_status(args):
         print("WARNING: every operator CLI act refuses until a production "
               "signer is enrolled — build: native/build.sh; enroll: "
               "native/contextd-signer enroll --key-id default > "
-              "operator-key.der; register: ctx security key register "
-              "operator-key.der (docs/OPERATOR_CEREMONY.md)")
+              "operator-key.der; first key: ctx security key bootstrap "
+              "operator-key.der --signer-tag default --development "
+              "--acknowledge-first-key-bootstrap (docs/OPERATOR_CEREMONY.md)")
     for browser in ("chrome", "safari"):
         if not cfg["browser"].get(browser):
             continue
