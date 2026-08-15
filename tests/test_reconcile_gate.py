@@ -106,3 +106,41 @@ def test_reconciler_timeout_is_linked_and_retryable(monkeypatch):
     )
     assert outcome["status"] == "timeout"
     assert epoch_id in {eid for eid, _ in reconciler.unreconciled_epochs(conn)}
+
+
+def test_reconcile_marker_passes_the_closed_registry_and_marks_the_epoch():
+    """Regression: the per-epoch marker main() appends must validate.
+
+    The 2026-08 hardening closed the metadata registry without declaring
+    ("claude_code", "reconcile"), so every launchd run dispatched the model
+    successfully and then crashed appending the marker — the epoch was never
+    marked reconciled, and the next run re-dispatched it. This pins the exact
+    meta shape main() writes.
+    """
+    conn = connect()
+    epoch_id, _ = _epoch(conn)
+    assert epoch_id in {eid for eid, _ in reconciler.unreconciled_epochs(conn)}
+    append_event(
+        conn,
+        "claude_code",
+        "reconcile",
+        meta={
+            "epoch_id": epoch_id,
+            "model": reconciler.MODEL,
+            "messages": reconciler.MIN_MESSAGES,
+            "notes": 2,
+            "exit": 0,
+            "egress_id": 7,
+        },
+    )
+    assert epoch_id not in {eid for eid, _ in reconciler.unreconciled_epochs(conn)}
+    # the skip paths write a marker with no dispatch fields at all
+    epoch2_id, _ = _epoch(conn)
+    append_event(
+        conn,
+        "claude_code",
+        "reconcile",
+        meta={"epoch_id": epoch2_id, "model": reconciler.MODEL,
+              "skipped": "too_small", "messages": 1},
+    )
+    assert epoch2_id not in {eid for eid, _ in reconciler.unreconciled_epochs(conn)}

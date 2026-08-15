@@ -307,6 +307,22 @@ for _browser in ("chrome", "safari"):
 # disclosures, but they are still archive writes, so they are declared and
 # bounded like everything else.
 HARNESS_SCHEMAS: dict = {
+    # The reconciler's per-epoch completion marker (hooks/reconcile.py).
+    # unreconciled_epochs() treats an epoch as reconciled only when a marker
+    # names it, so an unregistered marker meant every run re-dispatched the
+    # same epoch: the registry closing over this type is what makes
+    # reconciliation resumable at all.
+    ("claude_code", "reconcile"): {
+        "epoch_id": Field("int", required=True),
+        "model": Field("ident", max_len=MAX_LABEL),
+        "messages": Field("int"),
+        "notes": Field("int"),
+        "exit": Field("int"),
+        "egress_id": Field("int"),
+        # skip-path markers ({"skipped": "too_small" | "self_documented"})
+        # carry no dispatch fields at all
+        "skipped": Field("ident", max_len=MAX_LABEL),
+    },
     ("eval", "lineage_audit"): {
         "egress_id": Field("int"), "evidence_ids": Field("int_list"),
         "judge_sha": Field("digest"), "note_age_days": Field("number"),
