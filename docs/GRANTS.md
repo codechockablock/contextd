@@ -43,6 +43,24 @@ displayed, because *why* you delegated is part of the record). A revoke is
 another (`{op: "revoke", grant: <id>}`). Current state is the reduction of
 grant events in id order; no UPDATE, no DELETE.
 
+
+> **Superseded trust model.** This section predates the hardening pass. The
+> "same-owner processes are trusted / attribution, not authentication" model it
+> describes is **no longer what contextd claims**: a hostile same-UID agent is
+> now in scope (`docs/SECURITY.md` §1), and the parts of this document that
+> rest on same-owner trust are historical. Read `docs/SECURITY.md` for what is
+> claimed today and `docs/SECURITY.md` "Implementation status" for what is
+> actually enforced.
+
+Granting and revoking now require a **verified `OperatorActionV1`** signature
+(`contextd/attest.py`), not merely a CLI invocation: a grant event whose
+assurance is not operator-authorized is an anomaly the reduction ignores, so
+the model cannot grant to itself. Grants also require a finite, timezone-aware
+UTC expiry, and the covering grant is re-verified **inside** the append
+transaction of the act it authorizes.
+
+Historical text follows.
+
 Granting and revoking are human CLI acts. A grant event whose meta does
 not carry operator authority is ignored by the reduction and surfaced as
 an anomaly — the model cannot grant to itself. (Attribution, not

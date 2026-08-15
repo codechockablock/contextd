@@ -1,0 +1,24 @@
+{
+  "contains_personal_data": false,
+  "corpus_event_ids": [
+    1001,
+    1015,
+    1023,
+    1030,
+    1042,
+    1055,
+    1060,
+    1067,
+    1071
+  ],
+  "derived_from_live_archive": false,
+  "deterministic": true,
+  "files": {
+    "retrieval-contradiction-sets.json": "f3cfeabd42f91ca00ab10148793720ba48623470ff60f13c9d8724b2f478ed20",
+    "retrieval-synthesis-sets.json": "36c125a77d3ca8af5ac2104597df3b3fe916e7def18857ee6c2ce7f17a1bfedd"
+  },
+  "generated_by": "scripts/generate_retrieval_fixtures.py",
+  "generator_version": 1,
+  "note": "These fixtures replaced frozen selections taken from a live personal archive. They exercise retrieval structure only: a contradiction pair (1001/1042), a synthesis pair (1067/1071), and on-topic distractors. Regenerate with the command above; output is byte-stable.",
+  "provenance": "synthetic"
+}

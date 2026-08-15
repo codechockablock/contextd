@@ -30,7 +30,7 @@ def test_scan_dispatches_only_receipted_redacted_payload(monkeypatch):
     _dialogue(conn)
     dead = add_candidate(conn, "learn per-feed cadence",
                          make_scope(REPO))["loop"]
-    transition(conn, dead["id"], "dismiss", "operator", reason="noise")
+    transition(conn, dead["id"], "dismiss", reason="noise")
     observed = {}
 
     def fake_run(*args, **kwargs):

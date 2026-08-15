@@ -248,6 +248,77 @@ def _validate_tip(value: Any, label: str) -> None:
         raise BackupError(f"{label} has an invalid chain hash")
 
 
+def _signable(manifest: dict) -> dict:
+    """The manifest fields a signature covers, in a canonically encodable form.
+
+    An empty archive has a null tip, and the canonical encoder refuses None on
+    purpose (absence must be an omitted key, not a value) — so nulls are mapped
+    to the empty string here rather than the encoder being loosened for one
+    caller.
+    """
+    def scrub(value):
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            return {k: scrub(v) for k, v in sorted(value.items())}
+        if isinstance(value, list):
+            return [scrub(v) for v in value]
+        return value
+
+    payload = {k: scrub(manifest[k]) for k in
+               ("format", "version", "created_at", "snapshot")}
+    payload["files"] = [f["sha256"] for f in manifest["files"]]
+    payload["blobs"] = list(manifest["blobs"])
+    return payload
+
+
+def _sign_manifest(conn, manifest: dict) -> dict:
+    """Sign the manifest with the service key, if one is available.
+
+    Returns ``{"signed": false, "why": ...}`` rather than raising when the
+    archive has no service key: a backup must still be creatable in an archive
+    that has never run the authority plane, and `validate_bundle` reports the
+    difference instead of treating unsigned as signed.
+    """
+    from .canonical import canonical_bytes
+    from .ledger_sig import _load_or_create_key
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    try:
+        private, key_id = _load_or_create_key(conn)
+    except Exception as exc:                    # noqa: BLE001
+        return {"signed": False, "why": type(exc).__name__}
+    payload = _signable(manifest)
+    signature = private.sign(
+        canonical_bytes("contextd.BackupManifestV1", payload),
+        _ec.ECDSA(_hashes.SHA256()))
+    return {"signed": True, "key_id": key_id, "signature": signature.hex()}
+
+
+def verify_manifest_signature(conn, manifest: dict) -> dict:
+    """Check a bundle manifest's service signature against this archive."""
+    from .canonical import canonical_bytes
+    from .ledger_sig import LedgerSignatureError, _public
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes as _hashes
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    block = manifest.get("service_signature") or {}
+    if not block.get("signed"):
+        return {"ok": False, "signed": False,
+                "why": "the bundle manifest carries no service signature"}
+    payload = _signable(manifest)
+    try:
+        _public(conn, block["key_id"]).verify(
+            bytes.fromhex(block["signature"]),
+            canonical_bytes("contextd.BackupManifestV1", payload),
+            _ec.ECDSA(_hashes.SHA256()))
+    except (InvalidSignature, ValueError, LedgerSignatureError) as exc:
+        return {"ok": False, "signed": True,
+                "why": f"manifest signature does not verify: "
+                       f"{type(exc).__name__}"}
+    return {"ok": True, "signed": True, "key_id": block["key_id"]}
+
+
 def _new_bundle_path(destination: Path, stamp: str) -> Path:
     # Never reuse a freed name. Retention and the restore drill both order
     # bundles by (stamp, sequence); if pruning frees the bare-stamp name and
@@ -386,6 +457,11 @@ def create_backup(
             "blobs": blobs,
             "files": files,
         }
+        # A manifest hash proves the bundle is internally consistent; it proves
+        # nothing about who made it, because whoever rewrote the bundle also
+        # rewrote the hash. The service signature is what an attacker who
+        # rebuilds a bundle cannot produce.
+        manifest["service_signature"] = _sign_manifest(conn, manifest)
         manifest_bytes = _canonical_json(manifest)
         (stage / MANIFEST_NAME).write_bytes(manifest_bytes)
         os.chmod(stage / MANIFEST_NAME, 0o600)

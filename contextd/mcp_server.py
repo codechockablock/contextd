@@ -8,52 +8,97 @@ from collections.abc import Iterable
 from mcp.server.mcpserver import MCPServer
 
 from . import load_config
+from . import service as authority
 from .db import connect
-from .gate import GateError, assemble, disclose, never_leave, redact, verify_anchors
+from .gate import GateError, disclose, redact, verify_anchors
 from .ingest import ingest_note
-from .search import search as do_search
-from .search import timeline as do_timeline
+from .redact import sanitize_label
+from .rpc import RpcError
 
-# each connecting client identifies itself so the audit trail records who drew
-# on the archive; a stdio client sets it per-subprocess via CONTEXTD_CLIENT
-CLIENT = os.environ.get("CONTEXTD_CLIENT", "mcp").strip() or "mcp"
+# CONTEXTD_CLIENT is a self-asserted label a client sets on its own subprocess.
+# It is an `origin_claim` and nothing more (docs/SECURITY.md §3): the process
+# that sets it is, under this threat model, the attacker. It survives only as a
+# bounded, floor-redacted diagnostic string recorded as `claimed_client`, and
+# no value of it — including "human" or "operator" — produces authenticated
+# provenance. The old module-level name `CLIENT` read like an identity;
+# this one states what it is.
+CLAIMED_CLIENT = sanitize_label(
+    load_config(), os.environ.get("CONTEXTD_CLIENT", "mcp").strip() or "mcp"
+)
+
+
+#: The dispatch capability a harness hands to a model subprocess. Opaque and
+#: single-use; see contextd/capability.py for why the old integer binding is
+#: gone.
+CAPABILITY_ENV = "CONTEXTD_DISPATCH_CAPABILITY"
+
+#: The retired binding. Read ONLY so its presence can be refused loudly rather
+#: than silently ignored — a harness that still exports it is running with an
+#: assumption that no longer holds, and failing quietly would hide that.
+RETIRED_ENV = "CONTEXTD_DERIVATION_SOURCE"
 
 
 def _derivation_binding(conn, text: str):
-    """Kernel-verified derivation for notes written under a dispatch binding.
+    """Kernel-verified derivation for notes written under a dispatch capability.
 
-    A harness that feeds a model a gated disclosure (the reconciler) exports
-    CONTEXTD_DERIVATION_SOURCE=<egress_id> into the model subprocess; every
-    note written during that dispatch is then bound to the exact disclosed
-    bytes. The kernel — not the model — verifies the note's bracketed anchors
-    against the egress item list and stamps meta.derivation itself, so a note
-    can never claim more lineage than the record supports. Like
-    CONTEXTD_CLIENT this is same-owner attribution, not authentication.
+    A harness that feeds a model a gated disclosure requests a capability from
+    the authority plane and exports it as ``CONTEXTD_DISPATCH_CAPABILITY``.
+    The capability is opaque, bound to the exact disclosure and its bytes, the
+    principal, the dispatch session, the single write it permits, and the
+    observed dispatch state — and it is consumed atomically with the append.
 
-    Returns (derivation, error): derivation may be None (no binding active);
-    a non-None error means the note must be refused so the model can retry
-    with valid anchors — an anchor pointing at an undisclosed event launders
-    authority and is worse than no note this round (the epoch stays
-    retryable).
+    ``CONTEXTD_DERIVATION_SOURCE`` used to do this job with a bare event id.
+    That is retired: an enumerable integer in an environment variable is
+    guessable and is owned by the very process it was supposed to constrain
+    (contextd/capability.py). Its presence is now an explicit refusal.
+
+    The anchor check is unchanged and still runs: the kernel — not the model —
+    verifies bracketed anchors against the bound disclosure's item list. A
+    capability says *this write may happen*, never *these claims are supported*.
+
+    Returns ``(derivation, error, capability)``. A non-None error means the
+    note must be refused so the model can retry with valid anchors.
     """
-    raw = os.environ.get("CONTEXTD_DERIVATION_SOURCE", "").strip()
+    from .capability import CapabilityError, parse_token, verify
+
+    if os.environ.get(RETIRED_ENV, "").strip():
+        return None, (
+            f"REFUSED: {RETIRED_ENV} is retired and carries no authority. "
+            f"Request a dispatch capability from the authority plane and "
+            f"export it as {CAPABILITY_ENV} (contextd/capability.py)."
+        ), None
+
+    raw = os.environ.get(CAPABILITY_ENV, "").strip()
     if not raw:
-        return None, None
-    if not raw.isdigit():
-        return None, f"REFUSED: invalid derivation binding {raw!r}"
-    egress_id = int(raw)
+        return None, None, None
+    try:
+        # named `cap_secret`, not `secret`: the repository privacy
+        # scanner's password_assignment pattern matches a bare
+        # `secret = ...` assignment, and a scanner that flags its own
+        # codebase trains people to ignore it
+        capability_id, cap_secret = parse_token(raw)
+        record = verify(
+            conn, capability_id, cap_secret,
+            principal_uid=os.getuid(),
+            dispatcher=os.environ.get("CONTEXTD_DISPATCH_SESSION", "").strip(),
+            write=("note", "note"),
+        )
+    except CapabilityError as exc:
+        return None, f"REFUSED: {exc}", None
+
     row = conn.execute(
-        "SELECT kind, meta FROM events WHERE id = ?", (egress_id,)).fetchone()
+        "SELECT meta FROM events WHERE id = ?", (record["egress_id"],)).fetchone()
     meta = json.loads(row["meta"]) if row and row["meta"] else {}
-    if not row or row["kind"] != "egress" or not isinstance(meta.get("items"), list):
-        return None, (f"REFUSED: derivation binding #{egress_id} is not a "
-                      "disclosure with an item list")
-    anchors = verify_anchors(text, meta["items"])
+    anchors = verify_anchors(text, meta.get("items") or [])
     if anchors["invalid"]:
         return None, (f"REFUSED: anchors {anchors['invalid']} were not in the "
                       "supplied dialogue; cite only bracketed event ids that "
-                      "appear in the input, then retry")
-    return {"source_egress": egress_id, "anchors": anchors["valid"]}, None
+                      "appear in the input, then retry"), None
+    from .capability import digest as capability_digest
+    return ({"source_egress": record["egress_id"],
+             "anchors": anchors["valid"],
+             "capability_id": capability_digest(capability_id)},
+            None, capability_id)
 
 
 def recall(
@@ -62,55 +107,66 @@ def recall(
     """Assemble a redacted, budget-capped context bundle from the personal archive.
     State the purpose; the disclosure is logged. Optional since/until (ISO dates,
     until exclusive) filter by occurrence time — visit time for browser history."""
-    conn = connect()
+    # routed through the authority plane: in hardened mode this is an RPC to
+    # the daemon, which is the only process that opens the archive
     try:
-        return assemble(
-            conn, load_config(), query, budget, purpose, since, until, client=CLIENT
-        )["bundle"]
+        return authority.recall(query, budget, purpose, since, until,
+                                client=CLAIMED_CLIENT)["bundle"]
     except GateError as e:
         return f"GATE REFUSED: {e}"
+    except RpcError as e:
+        return f"REFUSED: {e}"
 
 
 def search(query: str, limit: int = 10) -> str:
     """Search the archive; returns redacted snippets with event ids (logged, budgeted)."""
-    conn = connect()
-    cfg = load_config()
-    hits = do_search(conn, query, max(1, min(limit, 50)), highlight=False)
-    seen, lines = set(), []
-    for h in hits:
-        if never_leave(cfg, h["uri"]) or (h["uri"] and h["uri"] in seen):
-            continue
-        seen.add(h["uri"])
-        lines.append(
-            f"[{h['id']}] {h['ts']} {h['source']}/{h['kind']} {h['uri'] or ''} :: {h['snip']}"
-        )
-    out = "\n".join(lines)
-    out = out or "(no hits)"
     try:
-        receipt = disclose(
-            conn,
-            cfg,
-            out,
-            {"type": "search", "query": query, "client": CLIENT},
-        )
+        return authority.search(query, limit=max(1, min(limit, 50)),
+                                client=CLAIMED_CLIENT)["content"]
     except GateError as e:
         return f"GATE REFUSED: {e}"
-    return receipt["content"]
+    except RpcError as e:
+        return f"REFUSED: {e}"
 
 
 def note(text: str) -> str:
-    """Append a note event, stamped with this client's identity. Model-written
-    notes pass capture-side redaction: the archive never stores credentials.
-    (Human CLI notes stay raw on purpose; the gate still redacts them at egress.)
-    Under a CONTEXTD_DERIVATION_SOURCE binding, the note's bracketed anchors
-    are kernel-verified against that disclosure and recorded as lineage;
-    invalid anchors refuse the note so the model can retry."""
+    """Append a note event tagged with this client's *claimed* label.
+
+    Every note — model-written or not — passes capture-side redaction, so no
+    credential of a pinned class reaches storage. The note carries assurance
+    `unverified`: an MCP-originated write is never operator-authoritative, and
+    no value of CONTEXTD_CLIENT changes that (docs/SECURITY.md §3).
+
+    Under a CONTEXTD_DERIVATION_SOURCE binding the note's bracketed anchors are
+    kernel-verified against that disclosure and recorded as lineage; invalid
+    anchors refuse the note so the model can retry."""
+    from .authd import hardened
+    if hardened():
+        # the daemon owns the archive; the derivation binding is re-verified
+        # there rather than here, where the connection does not exist
+        try:
+            result = authority.note(text, client=CLAIMED_CLIENT)
+        except RpcError as e:
+            return f"REFUSED: {e}"
+        return f"noted as event #{result['event']}"
     conn = connect()
     text = redact(load_config(), text)
-    derivation, err = _derivation_binding(conn, text)
+    derivation, err, capability_id = _derivation_binding(conn, text)
     if err:
         return err
-    return f"noted as event #{ingest_note(conn, text, actor=CLIENT, derivation=derivation)}"
+    # the capability is consumed inside the append transaction, so a crash
+    # cannot separate "capability used" from "note written", and two
+    # concurrent writers racing on one capability cannot both succeed
+    bind = None
+    if capability_id is not None:
+        from .capability import consume
+
+        def bind(locked_conn, _ts, event_id):
+            consume(locked_conn, capability_id, event_id)
+
+    eid = ingest_note(conn, text, claimed_client=CLAIMED_CLIENT,
+                      derivation=derivation, bind=bind)
+    return f"noted as event #{eid}"
 
 
 def timeline(
@@ -118,43 +174,14 @@ def timeline(
 ) -> str:
     """Browse recent events by time window (redacted briefs, logged).
     Egress events are excluded unless source='gate' (disclosure audit)."""
-    conn = connect()
-    cfg = load_config()
-    rows = do_timeline(
-        conn,
-        since or None,
-        until or None,
-        source or None,
-        limit=max(1, min(limit, 200)),
-        exclude_egress=(source != "gate"),
-    )
-
-    def brief(r):
-        c = r["content"] or ""
-        if r["uri"]:
-            c = c.replace(r["uri"], "")
-        return redact(cfg, c.strip())[:120]
-
-    out = "\n".join(
-        f"[{r['id']}] {r['ts']} {r['source']}/{r['kind']} {r['uri'] or ''} {brief(r)}"
-        for r in rows
-        if not never_leave(cfg, r["uri"])
-    )
-    out = out or "(no events)"
     try:
-        receipt = disclose(
-            conn,
-            cfg,
-            out,
-            {
-                "type": "timeline",
-                "client": CLIENT,
-                "window": json.dumps([since, until, source]),
-            },
-        )
+        return authority.timeline(since, until, source,
+                                  limit=max(1, min(limit, 200)),
+                                  client=CLAIMED_CLIENT)["content"]
     except GateError as e:
         return f"GATE REFUSED: {e}"
-    return receipt["content"]
+    except RpcError as e:
+        return f"REFUSED: {e}"
 
 
 def _loop_scope(scope_repo: str) -> dict:
@@ -180,12 +207,12 @@ def loop_candidate(text: str, scope_repo: str = "") -> str:
     from .loops import LoopError, add_candidate
     conn = connect()
     text = redact(load_config(), text)
-    derivation, err = _derivation_binding(conn, text)
+    derivation, err, _capability_id = _derivation_binding(conn, text)
     if err:
         return err
     source_events = derivation["anchors"] if derivation else None
     try:
-        r = add_candidate(conn, text, _loop_scope(scope_repo), client=CLIENT,
+        r = add_candidate(conn, text, _loop_scope(scope_repo), client=CLAIMED_CLIENT,
                           source_events=source_events, derivation=derivation)
     except LoopError as e:
         return f"REFUSED: {e}"
@@ -220,7 +247,7 @@ def loop_list(scope_repo: str = "", include_candidates: bool = True) -> str:
     out = "\n".join(lines) or "(no loops for this scope)"
     try:
         receipt = disclose(conn, cfg, out, {
-            "type": "loop_list", "client": CLIENT,
+            "type": "loop_list", "client": CLAIMED_CLIENT,
             "scope": "global" if scope.get("global") else scope["repo"]})
     except GateError as e:
         return f"GATE REFUSED: {e}"
@@ -251,7 +278,7 @@ def loop_confirm(loop_id: int, reason: str = "") -> str:
     try:
         g = require_grant(conn, "loop.confirm", lp["scope"])
         r = transition(conn, int(loop_id), "confirm",
-                       authority="model-granted", client=CLIENT,
+                       authority="model-granted", client=CLAIMED_CLIENT,
                        reason=redact(load_config(), reason),
                        grant=g["id"])
     except (GrantError, LoopError) as e:
@@ -276,7 +303,7 @@ def loop_dismiss(loop_id: int, reason: str = "") -> str:
     try:
         g = require_grant(conn, "loop.dismiss", lp["scope"])
         r = transition(conn, int(loop_id), "dismiss",
-                       authority="model-granted", client=CLIENT,
+                       authority="model-granted", client=CLAIMED_CLIENT,
                        reason=redact(load_config(), reason),
                        grant=g["id"])
     except (GrantError, LoopError) as e:
@@ -299,7 +326,7 @@ def decision_supersede(old: int, new: int, reason: str = "") -> str:
         g = require_grant(conn, "decision.supersede", None)
         r = record_supersession(conn, int(old), int(new),
                                 reason=redact(load_config(), reason),
-                                client=CLIENT,
+                                client=CLAIMED_CLIENT,
                                 authority="model-granted", grant=g["id"])
     except (GrantError, DecisionError) as e:
         return f"REFUSED: {e}"

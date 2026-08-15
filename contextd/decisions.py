@@ -15,7 +15,7 @@ text, recency, or anything else; that refusal is the authority boundary.
 
 import json
 
-from .db import append_event
+from .assurance import refuse_forged_authority
 
 SUPERSEDE_RESERVE_SHARE = 0.06   # of budget, when any edge exists
 SUPERSEDE_RESERVE_MIN = 120      # est. tokens; keeps the loud line affordable
@@ -25,15 +25,38 @@ class DecisionError(RuntimeError):
     """Invalid edge or unknown event."""
 
 
+def _require_authorization(conn, authorization, reason, old, new):
+    """Operator authorization covering exactly this edge."""
+    from .attest import AttestationError, test_mode_authorization
+    arguments = {"old": int(old), "new": int(new)}
+    body = reason.strip() or None
+    if authorization is None:
+        try:
+            return test_mode_authorization(
+                conn, "decision.supersede", "global", arguments, body, reason)
+        except AttestationError as exc:
+            raise DecisionError(
+                f"recording a supersession is an operator act and requires a "
+                f"verified authorization (contextd/attest.py). ({exc})"
+            ) from exc
+    if not authorization.matches("decision.supersede", "global", arguments,
+                                 body, reason):
+        raise DecisionError(
+            "the authorization does not cover exactly this supersession edge"
+        )
+    return authorization
+
+
 def record_supersession(conn, old: int, new: int, reason: str = "",
-                        client: str = "cli", authority: str = "operator",
-                        grant: int | None = None) -> dict:
+                        client: str = "cli", authority: str | None = None,
+                        grant: int | None = None, authorization=None) -> dict:
     """Recorded edge: NEW supersedes OLD. Operator CLI act by default; the
     model path passes authority='model-granted' with the covering grant id
     (docs/GRANTS.md) — enforcement lives at that path's entry, and the
     provenance is permanently distinguishable. Idempotent against an
     identical live edge (appends nothing); refuses ids that do not name
     content-bearing archive events."""
+    refuse_forged_authority(authority=authority)
     old, new = int(old), int(new)
     if old == new:
         raise DecisionError("an event cannot supersede itself")
@@ -51,11 +74,24 @@ def record_supersession(conn, old: int, new: int, reason: str = "",
     if existing and existing["new"] == new:
         return {"result": "existing", "edge": existing}
     meta = {"op": "supersede", "old": old, "new": new,
-            "authority": authority, "client": client}
+            "claimed_client": client}
     if grant is not None:
-        meta["grant"] = grant
-    eid = append_event(conn, "decision", "decision",
-                       content=reason.strip() or None, meta=meta)
+        # delegated act: the covering grant is verified inside the append
+        # transaction, so a revoke that commits first is seen
+        from .grants import granted_append
+        eid = granted_append(
+            conn, "decision", "decision", "decision.supersede", None,
+            content=reason.strip() or None, meta=meta,
+        )["event"]
+    else:
+        authorization = _require_authorization(conn, authorization, reason,
+                                               old, new)
+        from .attest import authorized_append
+        eid = authorized_append(
+            conn, "decision", "decision", authorization, "decision.supersede",
+            "global", arguments={"old": old, "new": new},
+            content=reason.strip() or None, reason=reason, meta=meta,
+        )
     return {"result": "created",
             "edge": reduce_supersessions(conn)["edges"][old], "event": eid}
 

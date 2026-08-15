@@ -23,7 +23,7 @@ def test_disclose_redacts_exact_bytes_and_records_linked_outcome():
     conn = connect()
     cfg = load_config()
     raw = "send sk-abcdefghijklmnop1234 to the model"
-    intent = {"type": "test", "purpose": "exact bytes"}
+    intent = {"type": "probe", "label": "exact-bytes"}
 
     result = disclose(conn, cfg, raw, intent)
 
@@ -60,10 +60,10 @@ def test_exactly_at_cap_is_accepted_and_next_byte_is_refused():
     payload = "12345678"
     cfg["gate"]["daily_token_budget"] = est_tokens(payload)
 
-    accepted = disclose(conn, cfg, payload, {"type": "cap"})
+    accepted = disclose(conn, cfg, payload, {"type": "probe", "label": "cap"})
     assert spent_today(conn) == accepted["est_tokens"]
     with pytest.raises(GateError):
-        disclose(conn, cfg, "x", {"type": "over-cap"})
+        disclose(conn, cfg, "x", {"type": "probe", "label": "over-cap"})
     assert (
         conn.execute("SELECT COUNT(*) FROM events WHERE kind='egress'").fetchone()[0]
         == 1
@@ -84,7 +84,8 @@ def test_32_callers_cannot_overspend_and_refusals_disclose_nothing():
         conn = connect()
         try:
             barrier.wait()
-            result = disclose(conn, cfg, raw, {"type": "barrier", "caller": index})
+            result = disclose(conn, cfg, raw,
+                              {"type": "probe", "label": f"barrier-{index}"})
             return ("accepted", result["egress_id"])
         except GateError as exc:
             return ("refused", str(exc))
@@ -122,9 +123,9 @@ def test_daily_charge_uses_the_receipt_timestamp_day(monkeypatch):
     cfg["gate"]["daily_token_budget"] = est_tokens(payload)
 
     monkeypatch.setattr(event_db, "now_iso", lambda: "2026-08-12T23:59:59+00:00")
-    disclose(conn, cfg, payload, {"type": "day-one"})
+    disclose(conn, cfg, payload, {"type": "probe", "label": "day-one"})
     monkeypatch.setattr(event_db, "now_iso", lambda: "2026-08-13T00:00:00+00:00")
-    disclose(conn, cfg, payload, {"type": "day-two"})
+    disclose(conn, cfg, payload, {"type": "probe", "label": "day-two"})
 
     assert spent_on_day(conn, "2026-08-12") == est_tokens(payload)
     assert spent_on_day(conn, "2026-08-13") == est_tokens(payload)

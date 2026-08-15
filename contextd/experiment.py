@@ -36,6 +36,7 @@ from itertools import combinations
 
 from .db import append_event
 from .gate import disclose, est_tokens, select_items
+from .assurance import is_authenticated_human
 from .search import search
 
 PROVENANCE_CLASSES = ("human", "model", "activity", "other")
@@ -61,27 +62,53 @@ def provenance_class(source, kind, meta: dict) -> str:
 
 
 def epistemic_type(source, kind, meta: dict) -> str:
-    """Best-effort epistemic type from what ingestion already recorded:
-    observation (behavioral/file traces), human_assertion (deliberate human
-    text), model_inference (model-written text), system (kernel bookkeeping).
-    A first-class ingest-time field remains future work; this derivation is
-    honest about resting on transport metadata."""
+    """Epistemic type from what ingestion recorded.
+
+    Five levels, and the split between the middle two is the point:
+
+        observation                behavioral/file traces
+        attested_human_assertion   human text carrying a VERIFIED operator
+                                   attestation (contextd/attest.py)
+        claimed_human_assertion    text a transport label *says* is human —
+                                   `actor="human"`, `role="user"`,
+                                   `authority="operator"`. Every one of those
+                                   is a caller-writable string, so this level
+                                   means "recorded as human", never
+                                   "authenticated as human"
+        model_inference            model-written text
+        system                     kernel bookkeeping
+
+    The old vocabulary called the third level `human_assertion`, which read as
+    authentication and was not. Renaming it is the fix: no metadata-only path
+    can now produce an *attested* level, because that level is reachable only
+    through `assurance.is_authenticated_human`.
+
+    Grounding (contextd/provenance.py) is a different axis from authentication:
+    a claimed human assertion still terminates a derivation chain in non-model
+    content, which is what the closure verdict measures.
+    """
     if kind in ("page_visit", "file_write", "file_delete"):
         return "observation"
-    if kind == "note":
-        return "human_assertion" if meta.get("actor") == "human" else "model_inference"
-    if kind == "loop":
-        # loop lifecycle events speak with their recorded authority
-        # (docs/OPEN_LOOPS.md): operator acts are assertions, proposals and
-        # model-relayed transitions are inference
-        return ("human_assertion" if meta.get("authority") == "operator"
-                else "model_inference")
-    if source == "claude_code" and kind == "message":
-        return "human_assertion" if meta.get("role") == "user" else "model_inference"
     if kind in ("epoch", "reconcile", "egress", "egress_outcome",
                 "experiment", "exp_run", "exp_report", "outcome"):
         return "system"
-    return "unknown"
+
+    human_shaped = (
+        (kind == "note" and meta.get("actor") not in (None, "mcp"))
+        or (kind == "loop" and meta.get("authority") == "operator")
+        or (kind == "decision" and meta.get("authority") == "operator")
+        or (source == "claude_code" and kind == "message"
+            and meta.get("role") == "user")
+    )
+    if not human_shaped:
+        if kind in ("note", "loop", "decision") or (
+            source == "claude_code" and kind == "message"
+        ):
+            return "model_inference"
+        return "unknown"
+    if is_authenticated_human(meta):
+        return "attested_human_assertion"
+    return "claimed_human_assertion"
 
 
 def _sha(text: str) -> str:
@@ -368,6 +395,12 @@ def get_experiment(conn, exp_id: int) -> dict:
 
 
 def record_run(conn, exp_id: int, run: dict) -> int:
+    """Record one run. The dispatched process's stderr is dropped here rather
+    than archived: it is unbounded text produced by whatever the harness
+    invoked, and an append-only log keeps it forever. The exit code carries
+    the failure signal; the model's own output is retained (bounded and
+    floor-redacted by the schema) because it is the measurement."""
+    run = {k: v for k, v in run.items() if k != "stderr"}
     return append_event(conn, "eval", "exp_run", meta={"exp_id": exp_id, **run})
 
 

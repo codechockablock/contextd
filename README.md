@@ -23,6 +23,20 @@ secrets redacted before storage, and every message role-tagged for provenance.
 **Zero network code.** Nothing in this package opens a socket except the MCP
 stdio server talking to a local client. Verify: `grep -rn "http\|socket\|urllib\|requests" contextd/`.
 
+## Security
+
+The threat model is a **hostile same-UID agent**: an untrusted model or agent
+running as the normal desktop user, controlling every MCP argument and
+environment variable. Under that model no caller-supplied string —
+`CONTEXTD_CLIENT`, `actor`, `authority`, `role` — establishes anything.
+Operator-authoritative acts require a verified `OperatorActionV1` signature
+from a presence-bound Secure Enclave key.
+
+**Production is not hardened.** Read [`docs/SECURITY.md`](docs/SECURITY.md) for
+the contract, its "Implementation status" table for what is actually enforced
+today, and [`docs/adr/0001-two-plane-authority.md`](docs/adr/0001-two-plane-authority.md)
+for the architecture and the exact signed bytes.
+
 ## Quickstart
 
 ```bash
@@ -48,7 +62,7 @@ launchctl load ~/Library/LaunchAgents/com.contextd.watch.plist
 ## Hook it into Claude
 
 ```bash
-claude mcp add contextd -- /Users/joseph/contextd/.venv/bin/ctx serve
+claude mcp add contextd -- __CONTEXTD_REPO__/.venv/bin/ctx serve
 ```
 
 Tools exposed: `recall(query, budget, purpose, since, until)`, `search(query)`,

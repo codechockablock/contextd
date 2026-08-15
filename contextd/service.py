@@ -1,0 +1,180 @@
+"""Client-plane access to the archive.
+
+Every client — CLI, MCP server, hook — goes through here instead of calling
+``db.connect()`` itself. What that buys:
+
+* **In hardened mode** the call becomes an RPC to the authority plane, which is
+  the only process that opens the database. If no service is listening, or the
+  trust material is missing, the call **fails closed**: there is no
+  direct-SQLite fallback, because a fallback is exactly the thing an attacker
+  arranges by killing the daemon.
+* **In development mode** it calls the kernel in-process, as before, and says
+  so. The point is that the client code is identical in both, so the hardened
+  path is the one that is actually exercised rather than a branch nobody runs.
+
+The distinction is never inferred from whether a connection happened to
+succeed. It is read from configuration and reported by `ctx security doctor`.
+"""
+
+from . import load_config
+from .authd import hardened, socket_path
+from .rpc import RpcClient, RpcError, ServiceUnavailable
+
+__all__ = [
+    "ClientRefused", "RpcError", "ServiceUnavailable",
+    "backup", "hardened", "loop_candidate", "loop_confirm", "loop_dismiss",
+    "loop_list", "note", "raw_read", "recall", "search", "status", "timeline",
+]
+
+
+class ClientRefused(RuntimeError):
+    """The client plane cannot satisfy this call without the authority plane."""
+
+
+def _client() -> RpcClient:
+    return RpcClient(socket_path())
+
+
+def _call(op: str, **args):
+    with _client() as client:
+        return client.call(op, **args)
+
+
+def _direct(fn, *a, **kw):
+    """Run a kernel function in-process. Development mode only."""
+    if hardened():
+        raise ClientRefused(
+            f"hardened mode: {fn.__name__} must go through the authority "
+            f"service, not an in-process call. This is a bug in the caller."
+        )
+    from .db import connect
+    conn = connect()
+    try:
+        return fn(conn, *a, **kw)
+    finally:
+        conn.close()
+
+
+# --- model-tier operations --------------------------------------------------
+
+def recall(query: str, budget: int = 8000, purpose: str = "", since: str = "",
+           until: str = "", client: str = "cli") -> dict:
+    if hardened():
+        return _call("recall", query=query, budget=budget, purpose=purpose,
+                     since=since, until=until, client=client)
+    from .gate import assemble
+    return _direct(lambda conn: assemble(conn, load_config(), query, budget,
+                                         purpose, since, until, client=client))
+
+
+def search(query: str, limit: int = 10, client: str = "cli") -> dict:
+    if hardened():
+        return _call("search", query=query, limit=limit, client=client)
+    from .authd import AuthorityService, op_search, service_context
+    with service_context():
+        return op_search(AuthorityService.__new__(AuthorityService), None,
+                         "model", {"query": query, "limit": limit,
+                                   "client": client})
+
+
+def timeline(since: str = "", until: str = "", source: str = "",
+             limit: int = 30, client: str = "cli") -> dict:
+    if hardened():
+        return _call("timeline", since=since, until=until, source=source,
+                     limit=limit, client=client)
+    from .authd import AuthorityService, op_timeline, service_context
+    with service_context():
+        return op_timeline(AuthorityService.__new__(AuthorityService), None,
+                           "model", {"since": since, "until": until,
+                                     "source": source, "limit": limit,
+                                     "client": client})
+
+
+def note(text: str, client: str = "cli") -> dict:
+    if hardened():
+        return _call("note", text=text, client=client)
+    from .ingest import ingest_note
+    return {"event": _direct(lambda conn: ingest_note(conn, text,
+                                                      claimed_client=client))}
+
+
+def loop_candidate(text: str, scope_repo: str = "") -> dict:
+    if hardened():
+        return _call("loop_candidate", text=text, scope_repo=scope_repo)
+    from .authd import AuthorityService, op_loop_candidate, service_context
+    with service_context():
+        return op_loop_candidate(AuthorityService.__new__(AuthorityService),
+                                 None, "model",
+                                 {"text": text, "scope_repo": scope_repo})
+
+
+def loop_list(scope_repo: str = "", include_candidates: bool = True) -> dict:
+    if hardened():
+        return _call("loop_list", scope_repo=scope_repo,
+                     include_candidates=include_candidates)
+    from .authd import AuthorityService, op_loop_list, service_context
+    with service_context():
+        return op_loop_list(AuthorityService.__new__(AuthorityService), None,
+                            "model", {"scope_repo": scope_repo,
+                                      "include_candidates": include_candidates})
+
+
+def loop_confirm(loop_id: int, reason: str = "") -> dict:
+    if hardened():
+        return _call("loop_confirm", loop_id=loop_id, reason=reason)
+    from .authd import AuthorityService, op_loop_confirm, service_context
+    with service_context():
+        return op_loop_confirm(AuthorityService.__new__(AuthorityService),
+                               None, "model",
+                               {"loop_id": loop_id, "reason": reason})
+
+
+def loop_dismiss(loop_id: int, reason: str = "") -> dict:
+    if hardened():
+        return _call("loop_dismiss", loop_id=loop_id, reason=reason)
+    from .authd import AuthorityService, op_loop_dismiss, service_context
+    with service_context():
+        return op_loop_dismiss(AuthorityService.__new__(AuthorityService),
+                               None, "model",
+                               {"loop_id": loop_id, "reason": reason})
+
+
+def status() -> dict:
+    if hardened():
+        return _call("status")
+    from .authd import AuthorityService, op_status, service_context
+    with service_context():
+        return op_status(AuthorityService.__new__(AuthorityService), None,
+                         "model", {})
+
+
+# --- operator-tier operations -----------------------------------------------
+
+def raw_read(event_id: int, authorization) -> dict:
+    """Unredacted event content. Always requires an attestation, in both modes.
+
+    This is the read that bypasses the gate, so it is the one that must never
+    become reachable by being on the right machine.
+    """
+    blob = {"action": authorization.action,
+            "signature": authorization.signature.hex()}
+    if hardened():
+        return _call("raw_read", event_id=event_id, authorization=blob)
+    from .authd import AuthorityService, op_raw_read, service_context
+    with service_context():
+        return op_raw_read(AuthorityService.__new__(AuthorityService), None,
+                           "operator", {"event_id": event_id,
+                                        "authorization": blob})
+
+
+def backup(destination: str, authorization, keep: int = 0) -> dict:
+    blob = {"action": authorization.action,
+            "signature": authorization.signature.hex()}
+    if hardened():
+        return _call("backup", destination=destination, keep=keep,
+                     authorization=blob)
+    from .authd import AuthorityService, op_backup, service_context
+    with service_context():
+        return op_backup(AuthorityService.__new__(AuthorityService), None,
+                         "operator", {"destination": destination, "keep": keep,
+                                      "authorization": blob})

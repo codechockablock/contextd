@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import threading
 from collections.abc import Callable
@@ -14,7 +15,9 @@ from pathlib import Path
 
 import fcntl
 
-from . import home
+from . import home, load_config
+from .redact import redact
+from .schemas import validate_egress_meta, validate_event_meta
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -52,6 +55,38 @@ CREATE TABLE IF NOT EXISTS chain_state (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   witness_initialized INTEGER NOT NULL CHECK (witness_initialized = 1)
 );
+
+-- Authority-plane state (contextd/attest.py) lives in THIS database on
+-- purpose: a nonce must be consumed inside the same transaction as the append
+-- it authorizes, and a transaction cannot span two SQLite files. Putting them
+-- apart would leave a window where a crash consumes a nonce with no event, or
+-- appends an event with the nonce still live. The append-only triggers apply
+-- to `events` only, so these tables remain mutable as their semantics require.
+CREATE TABLE IF NOT EXISTS operator_keys (
+  key_id      TEXT PRIMARY KEY,
+  public_der  BLOB NOT NULL,
+  signer      TEXT NOT NULL,
+  registered  TEXT NOT NULL,
+  revoked     TEXT
+);
+CREATE TABLE IF NOT EXISTS operator_nonces (
+  nonce          TEXT PRIMARY KEY,
+  key_id         TEXT NOT NULL,
+  sequence       INTEGER NOT NULL,
+  issued_at      INTEGER NOT NULL,
+  expires_at     INTEGER NOT NULL,
+  action         TEXT NOT NULL,
+  digest         TEXT NOT NULL,
+  consumed_event INTEGER
+);
+CREATE TABLE IF NOT EXISTS operator_sequence (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  value     INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_identity (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  uuid      TEXT NOT NULL
+);
 """
 
 WITNESS_VERSION = 1
@@ -71,7 +106,105 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_CONFIG_CACHE: dict = {}
+
+
+def _append_config() -> dict:
+    """Config for the capture-side floor, cached on (home, config mtime).
+
+    Every append consults it, and a bulk ingest appends thousands of times, so
+    re-reading config.toml per event is a real cost. The cache key includes the
+    mtime, so an edited config takes effect on the next append rather than the
+    next process — it can only ever *add* patterns (contextd/redact.py), so a
+    stale read cannot weaken the floor.
+    """
+    root = home()
+    path = root / "config.toml"
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        stamp = 0
+    key = (str(root), stamp)
+    cached = _CONFIG_CACHE.get(key)
+    if cached is None:
+        cached = load_config()
+        _CONFIG_CACHE.clear()
+        _CONFIG_CACHE[key] = cached
+    return cached
+
+
+class DirectAccessRefused(RuntimeError):
+    """Hardened mode: the client plane may not open the archive directly."""
+
+
+def _guard_direct_access() -> None:
+    """In hardened mode only the authority plane opens the production archive.
+
+    In a real hardened deployment the enforcement is the operating system: the
+    database is owned by the service UID with mode 0600, so a client process
+    physically cannot open it. This check exists for two reasons, neither of
+    which is "it is the security boundary":
+
+    * it makes development mode able to *simulate* the boundary, so the
+      client-plane code paths are exercised against a refusal; and
+    * it turns what would otherwise be an opaque `sqlite3.OperationalError:
+      unable to open database file` into a refusal that says which path was
+      taken and what the caller should have used instead.
+
+    A hostile same-UID process can set the marker this consults. That does not
+    matter: in a hardened deployment it still cannot read the file, and in a
+    development deployment there is no boundary to defeat.
+    """
+    from .authd import hardened, is_service_process
+    if not hardened() or is_service_process():
+        return
+    raise DirectAccessRefused(
+        "hardened mode: this process is in the client plane and may not open "
+        "the archive directly. Use the authority service RPC surface "
+        "(contextd/service.py). There is no direct-SQLite fallback — see "
+        "docs/SECURITY.md, Deployment states."
+    )
+
+
+class SchemaVersionError(RuntimeError):
+    """The archive was written by a newer contextd than this one."""
+
+
+def assert_supported_schema(path: Path | None = None) -> int:
+    """Refuse an unsupported future schema **before touching anything**.
+
+    Order matters here and is the whole point of the function. The archive is
+    opened read-only to read `user_version`, and every mutating step —
+    `mkdir`, `chmod`, `PRAGMA journal_mode=WAL`, `executescript(SCHEMA)` —
+    happens only after this returns. Previously a newer archive was opened,
+    upgraded in place with this version's schema, and used: an older binary
+    would silently write rows a newer one might not be able to interpret, and
+    the damage was done before anyone could notice.
+
+    A missing database is not a version problem; there is nothing to refuse.
+    """
+    path = path or (home() / "contextd.db")
+    if not path.exists():
+        return 0
+    probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        version = probe.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        probe.close()
+    if version > SCHEMA_VERSION:
+        raise SchemaVersionError(
+            f"{path} was written by a newer contextd (schema version "
+            f"{version}; this build supports {SCHEMA_VERSION}). Refusing "
+            f"before any filesystem or database change — upgrade contextd "
+            f"rather than letting an older build write to it."
+        )
+    return version
+
+
 def connect() -> sqlite3.Connection:
+    _guard_direct_access()
+    # BEFORE mkdir, chmod, WAL, or schema application
+    assert_supported_schema()
     home().mkdir(parents=True, exist_ok=True)
     os.chmod(home(), 0o700)
     conn = sqlite3.connect(home() / "contextd.db")
@@ -85,12 +218,31 @@ def connect() -> sqlite3.Connection:
     _migrate_chain(conn)
     _bootstrap_witness(conn)
     recover_chain_state(conn)
+    _reap_scratch()
     for f in home().glob("contextd.db*"):
         try:
             os.chmod(f, 0o600)
         except OSError:
             pass
     return conn
+
+
+def _reap_scratch() -> None:
+    """Startup recovery for scratch a killed process left behind.
+
+    Only positively identified, sufficiently old contextd scratch directly
+    under this archive's scratch root qualifies (contextd/scratch.py) — never a
+    glob over a shared temp directory, never a symlink target. A failure here
+    warns on stderr instead of raising: an undeletable stale directory must be
+    visible, but it must not make the archive unopenable.
+    """
+    from .scratch import ScratchCleanupError, reap_stale
+    try:
+        for name in reap_stale():
+            print(f"contextd: removed stale scratch {name}", file=sys.stderr)
+    except (OSError, ScratchCleanupError) as exc:
+        print(f"contextd: WARNING stale scratch not removed: {exc}",
+              file=sys.stderr)
 
 
 def chain_state_paths(root: Path | None = None) -> dict[str, Path]:
@@ -426,20 +578,58 @@ def append_event_checked(
     content_hash=None,
     meta=None,
     check: Callable[[sqlite3.Connection, str], None] | None = None,
+    prepare: Callable[[sqlite3.Connection, str], dict] | None = None,
+    bind: Callable[[sqlite3.Connection, str, int], None] | None = None,
     fault: Callable[[str], None] | None = None,
 ) -> int:
     """Append under one witness-first lock/transaction with crash recovery.
 
     ``check`` executes after ``BEGIN IMMEDIATE`` and immediately before the
-    insert. The gate uses it for an atomic spend check. ``fault`` is an
-    explicit deterministic test hook; raising :class:`InjectedCrash` leaves
-    the journal in the state a killed process would leave behind.
+    insert. The gate uses it for an atomic spend check.
+
+    ``prepare`` runs under the chain lock, *before* the chain hash is computed,
+    and returns extra metadata to merge into the row. It exists because the
+    witness-first protocol has to know the exact bytes before it opens the
+    transaction, so anything that must be resolved atomically with the append
+    and then *written into it* — the covering grant for a delegated act — has
+    to be resolved here. The chain lock is exclusive, so a concurrent revoke
+    either committed before this call (and is seen) or commits after this
+    append (and does not precede it).
+
+    ``bind`` also runs inside that transaction, and additionally receives the
+    id the new event will have. It exists so that consuming a single-use
+    authorization (contextd/attest.py) and appending the event it authorizes
+    are one atomic step: a crash between them is not representable, and two
+    concurrent appends racing on one authorization cannot both commit.
+
+    ``fault`` is an explicit deterministic test hook; raising
+    :class:`InjectedCrash` leaves the journal in the state a killed process
+    would leave behind.
     """
     # append_event historically committed any caller transaction. End it before
     # taking the witness lock so every writer observes the one global lock
     # order (witness, then SQLite) and cannot deadlock another appender.
     if conn.in_transaction:
         conn.commit()
+    # The one capture-side privacy choke point. Every write to the archive
+    # passes here, so applying the redaction floor and the closed schema at
+    # this exact spot is what makes "no credential of a pinned class reaches
+    # storage" a structural property rather than a convention each caller has
+    # to remember (docs/SECURITY.md §6). Historical rows are never touched:
+    # this runs only on the bytes of a new append.
+    cfg = _append_config()
+    if content is not None:
+        content = redact(cfg, content)
+    if uri is not None:
+        uri = redact(cfg, uri)
+
+    def _validated(raw):
+        if kind == "egress":
+            return validate_egress_meta(cfg, raw)
+        return validate_event_meta(cfg, source, kind, raw)
+
+    raw_meta = meta
+    meta = _validated(meta)
     if content is not None and content_hash is None:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
     meta_json = json.dumps(meta) if meta else None
@@ -447,6 +637,10 @@ def append_event_checked(
     with _chain_lock(_connection_root(conn)) as paths:
         previous = _recover_locked(conn, paths)
         ts = now_iso()
+        if prepare is not None:
+            extra = prepare(conn, ts) or {}
+            meta = _validated({**(raw_meta or {}), **extra})
+            meta_json = json.dumps(meta) if meta else None
         eid = previous["id"] + 1
         chain = _chain_hash(
             previous["chain_hash"],
@@ -473,6 +667,8 @@ def append_event_checked(
             conn.execute("BEGIN IMMEDIATE")
             if check is not None:
                 check(conn, ts)
+            if bind is not None:
+                bind(conn, ts, eid)
             conn.execute(
                 "INSERT INTO events (id, ts, source, kind, uri, content, "
                 "content_hash, meta, prev_hash, chain_hash) "
@@ -540,6 +736,19 @@ def last_hash(conn, uri):
 
 
 def store_blob(data: bytes) -> str:
+    """Content-addressed blob storage, floor-redacted when the bytes are text.
+
+    An oversized watched file is stored here instead of in `events.content`,
+    which made the blob store a way around capture-side redaction. Anything
+    that decodes as UTF-8 goes through the same floor as event content; binary
+    blobs are stored as-is and are *not* covered by the redaction claim.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    else:
+        data = redact(_append_config(), text).encode("utf-8")
     digest = hashlib.sha256(data).hexdigest()
     path = home() / "store" / digest[:2] / digest
     if not path.exists():

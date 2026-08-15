@@ -240,9 +240,9 @@ def test_trial_scorer_math_on_a_synthetic_window(isolated_contextd_home):
     scope = make_scope("/synthetic/amberlight")
     a = add_loop(conn, "re-run the drift correction", scope)["loop"]
     cand = add_candidate(conn, "audit the sitemap generator", scope)["loop"]
-    transition(conn, cand["id"], "confirm", "operator")
+    transition(conn, cand["id"], "confirm")
     junk = add_candidate(conn, "polish every docstring", scope)["loop"]
-    transition(conn, junk["id"], "dismiss", "operator", reason="noise")
+    transition(conn, junk["id"], "dismiss", reason="noise")
     append_event(conn, "claude_code", "message", uri="claude://t1",
                  content="working", meta={"role": "user", "session_id": "s1"})
     ck = compile_checkpoint(conn, load_config(), budget=4000,

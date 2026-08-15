@@ -8,6 +8,11 @@ import tempfile
 from pathlib import Path
 
 os.environ["CONTEXTD_HOME"] = tempfile.mkdtemp(prefix="contextd-test-")
+# Operator acts need a verified signature; this throwaway archive has no Secure
+# Enclave, so opt into the TEST-ONLY software signer. It is refused unless the
+# archive is temporary, and everything it authorizes is stamped
+# INSECURE_TEST_SIGNER (contextd/attest.py).
+os.environ["CONTEXTD_INSECURE_TEST_SIGNER"] = "1"
 Path(os.environ["CONTEXTD_HOME"], "config.toml").write_text(
     '[browser]\nskip_domains = ["blocked.test"]\n'
     '[gate]\nnever_leave = ["*/.ssh/*", "*/.aws/*", "*.pem", "*/.env*", "*blocked.test*"]\n'
@@ -182,7 +187,8 @@ from contextd.mcp_server import note as mcp_note
 
 nid = int(mcp_note("model-written test note").rsplit("#", 1)[1])
 row = conn.execute("SELECT meta FROM events WHERE id = ?", (nid,)).fetchone()
-assert json.loads(row["meta"])["actor"] == "mcp", "mcp note missing provenance"
+assert json.loads(row["meta"])["claimed_client"] == "mcp", "mcp note missing label"
+assert json.loads(row["meta"])["assurance"] == "unverified", "mcp note claimed assurance"
 cfg_low = load_config()
 cfg_low["gate"]["daily_token_budget"] = 10
 try:
@@ -299,24 +305,30 @@ assert scan_claude(conn, cfg)["epoch"] == 1
 out = rec.reconcile(conn, *rec.unreconciled_epochs(conn)[-1])
 assert out["skipped"] == "self_documented", out
 
-# 24. client attribution: egress records who drew on the archive, notes get actor
+# 24. claimed-client labelling: egress records the UNVERIFIED label the
+# caller supplied; it identifies nobody (docs/SECURITY.md §3)
 r = assemble(conn, cfg, "zebra service", budget=2000, purpose="attrib", client="openclaw")
 egmeta = json.loads(conn.execute(
     "SELECT meta FROM events WHERE id = ?", (r["egress_id"],)).fetchone()["meta"])
-assert egmeta["client"] == "openclaw", egmeta
+assert egmeta["claimed_client"] == "openclaw", egmeta
 from contextd.ingest import ingest_note as _note
-nid = _note(conn, "client-tagged note", actor="openclaw")
-assert json.loads(conn.execute("SELECT meta FROM events WHERE id=?", (nid,)).fetchone()["meta"])["actor"] == "openclaw"
+nid = _note(conn, "client-tagged note", claimed_client="openclaw")
+_nm = json.loads(conn.execute("SELECT meta FROM events WHERE id=?", (nid,)).fetchone()["meta"])
+assert _nm["claimed_client"] == "openclaw" and _nm["assurance"] == "unverified", _nm
 
-# 25. model-written notes are redacted at capture; human CLI notes stay raw,
-# but the gate still redacts them at egress
+# 25. EVERY note is redacted at capture, model-written or human. The archive
+# is append-only, so a credential that reaches storage is there forever and is
+# paid for again at every disclosure; "the gate redacts it on the way out"
+# only holds if no path ever reads the row directly. Capture-side redaction is
+# now the single choke point (contextd/db.py append_event_checked).
 nid = int(mcp_note("rotate gateway key sk-qqqqqqqqqqqqqqqq1234 tomorrow").rsplit("#", 1)[1])
 row = conn.execute("SELECT content FROM events WHERE id = ?", (nid,)).fetchone()
 assert "sk-qqqqqqqqqqqqqqqq1234" not in row["content"], "model note stored a credential"
 assert "[REDACTED:api_key]" in row["content"]
-hid = _note(conn, "human kept raw key sk-wwwwwwwwwwwwwwww5678 on purpose")
+hid = _note(conn, "human kept purpose key sk-wwwwwwwwwwwwwwww5678 written by hand")
 raw = conn.execute("SELECT content FROM events WHERE id = ?", (hid,)).fetchone()["content"]
-assert "sk-wwwwwwwwwwwwwwww5678" in raw, "human deliberate notes should stay raw"
+assert "sk-wwwwwwwwwwwwwwww5678" not in raw, "human note stored a credential"
+assert "[REDACTED:api_key]" in raw
 r_eg = assemble(conn, cfg, "human kept purpose", budget=2000)
 assert "sk-wwwwwwwwwwwwwwww5678" not in r_eg["bundle"], "egress redaction failed on raw note"
 
@@ -481,7 +493,7 @@ for arm, scores in [("full", [1.0, 1.0]), ("no_context", [0.0, 0.5]),
         record_run(conn, exp_id, {
             "arm": arm, "run": i, "egress_id": None, "session_id": f"t-{arm}-{i}",
             "model": "haiku", "duration_ms": 1, "exit": 0, "output": "x",
-            "output_sha": "x", "score": sc,
+            "output_sha": "0" * 64, "score": sc,
             "hits": {"decision": sc >= 1.0, "plan": sc > 0}})
 rep = build_report(conn, exp_id)
 assert rep["arms"]["full"]["mean"] == 1.0
@@ -536,7 +548,7 @@ assert human_id not in [it["id"] for it in kept], "drop_origins missed override"
 kept = apply_arm(fz_ov["items"], {"name": "y", "drop_classes": ["human"]})
 assert human_id not in [it["id"] for it in kept], "drop_classes broke"
 assert epistemic_type("chrome", "page_visit", {}) == "observation"
-assert epistemic_type("note", "note", {"actor": "human"}) == "human_assertion"
+assert epistemic_type("note", "note", {"actor": "human"}) == "claimed_human_assertion"
 assert epistemic_type("claude_code", "message", {"role": "assistant"}) == "model_inference"
 assert epistemic_type("gate", "egress", {}) == "system"
 
@@ -579,7 +591,7 @@ for arm, (scores, tok) in fake.items():
         record_run(conn, exp2, {
             "arm": arm, "run": i, "egress_id": None, "context_est_tokens": tok,
             "session_id": f"s-{arm}-{i}", "model": "haiku", "duration_ms": 1,
-            "exit": 0, "output": "x", "output_sha": "x", "score": sc,
+            "exit": 0, "output": "x", "output_sha": "0" * 64, "score": sc,
             "hits": {"decision": sc >= 1.0, "plan": sc >= 0.5},
             "citations": {"cited": [human_id], "valid": [human_id]}})
 rep2 = build_report(conn, exp2)

@@ -5,3 +5,5 @@ __pycache__/
 experiments/results/
 runs/
 experiments/open_loops/results/
+build/
+native/contextd-signer

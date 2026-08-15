@@ -7,21 +7,28 @@ import re
 
 from .db import append_event, append_event_checked, now_iso
 from .domains import blocked, load_skip_domains
+from .redact import redact
 from .search import search
+
+__all__ = [
+    "GateError",
+    "assemble",
+    "check_budget",
+    "disclose",
+    "est_tokens",
+    "log_egress",
+    "never_leave",
+    "record_dispatch_outcome",
+    "redact",
+    "select_items",
+    "spent_on_day",
+    "spent_today",
+    "verify_anchors",
+]
 
 
 class GateError(Exception):
     pass
-
-
-def _patterns(cfg):
-    return [(name, re.compile(pat)) for name, pat in cfg["gate"]["redact"].items()]
-
-
-def redact(cfg, text: str) -> str:
-    for name, rx in _patterns(cfg):
-        text = rx.sub(f"[REDACTED:{name}]", text)
-    return text
 
 
 def never_leave(cfg, uri) -> bool:
@@ -88,10 +95,16 @@ def disclose(conn, cfg, payload: str, intent: dict) -> dict:
     budget callback runs under the same write lock as the chained egress
     insert, so concurrent callers cannot all pass against a stale spend total.
     Refusal appends nothing and exposes only numeric accounting in its error.
+
+    ``intent`` is validated against the closed schema for its disclosure type
+    (contextd/schemas.py) *before* anything is appended. It used to be written
+    verbatim, which made every disclosure an arbitrary-content write into the
+    archive by whoever controlled the caller. An undeclared field is refused,
+    not dropped.
     """
     content = redact(cfg, payload)
     tokens = est_tokens(content)
-    meta = {**intent, "est_tokens": tokens}
+    meta = {**(intent or {}), "est_tokens": tokens}
 
     def within_budget(locked_conn, event_ts):
         check_budget(locked_conn, cfg, upcoming=tokens, day=event_ts[:10])
@@ -115,20 +128,34 @@ def log_egress(conn, cfg, content: str, meta: dict) -> int:
 DISPATCH_STATUSES = frozenset({"succeeded", "failed", "timeout"})
 
 
-def record_dispatch_outcome(conn, egress_id: int, status: str, **details) -> int:
-    """Append an immutable result linked to a pre-dispatch egress receipt."""
+def record_dispatch_outcome(
+    conn,
+    egress_id: int,
+    status: str,
+    *,
+    exit: int | None = None,
+    timeout_seconds: int | None = None,
+) -> int:
+    """Append an immutable result linked to a pre-dispatch egress receipt.
+
+    This used to take ``**details`` and persist them verbatim, which is how
+    exception text, stderr, and command output reached the archive unbounded
+    and unredacted. The outcome record now carries only two integers: an exit
+    code and a configured timeout. A *class* of failure is representable; the
+    failing process's own bytes are not.
+    """
     if status not in DISPATCH_STATUSES:
         raise ValueError(f"invalid dispatch status: {status}")
     if not conn.execute(
         "SELECT 1 FROM events WHERE id = ? AND kind = 'egress'", (egress_id,)
     ).fetchone():
         raise ValueError(f"no egress event #{egress_id}")
-    return append_event(
-        conn,
-        "gate",
-        "egress_outcome",
-        meta={**details, "egress_id": egress_id, "status": status},
-    )
+    meta = {"egress_id": egress_id, "status": status}
+    if exit is not None:
+        meta["exit"] = int(exit)
+    if timeout_seconds is not None:
+        meta["timeout_seconds"] = int(timeout_seconds)
+    return append_event(conn, "gate", "egress_outcome", meta=meta)
 
 
 def select_items(
@@ -217,6 +244,9 @@ def assemble(
         if items
         else "(no matching events)"
     )
+    # the raw query is not persisted: it is caller-controlled, unbounded, and
+    # is usually the most revealing string in the request. The schema keys it
+    # (contextd/correlate.py) so two recalls of the same query still correlate.
     meta = {
         "type": "recall",
         "query": query,

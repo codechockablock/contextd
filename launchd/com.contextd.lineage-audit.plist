@@ -10,15 +10,15 @@
     <string>com.contextd.lineage-audit</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/joseph/contextd/.venv/bin/python</string>
-        <string>/Users/joseph/contextd/hooks/lineage_audit.py</string>
+        <string>__CONTEXTD_REPO__/.venv/bin/python</string>
+        <string>__CONTEXTD_REPO__/hooks/lineage_audit.py</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
         <key>PATH</key>
-        <string>/Users/joseph/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
     <key>StartCalendarInterval</key>
     <dict>
@@ -30,8 +30,8 @@
         <integer>30</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/joseph/.contextd/lineage-audit.log</string>
+    <string>__CONTEXTD_ARCHIVE__/lineage-audit.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/joseph/.contextd/lineage-audit.log</string>
+    <string>__CONTEXTD_ARCHIVE__/lineage-audit.log</string>
 </dict>
 </plist>

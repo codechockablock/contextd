@@ -31,6 +31,7 @@ measurement with margin for WAL/scratch surprises.
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -48,6 +49,9 @@ from contextd.backup import BackupError, restore_backup  # noqa: E402
 from contextd.db import append_event, connect  # noqa: E402
 from contextd.liveness import capture_liveness  # noqa: E402
 from contextd.loops import reduce_loops  # noqa: E402
+from contextd.scratch import (  # noqa: E402
+    ScratchCleanupError, remove_scratch, scratch_root,
+)
 from contextd.search import search, timeline  # noqa: E402
 
 # Measured in experiments/restore_scale (results.json, 2026-08-13): peak
@@ -203,6 +207,7 @@ def run_drill(backup_dir: Path | None = None,
     stages: dict[str, float] = {}
     meta: dict = {"verdict": "FAIL", "stages": stages, "peak_temp_bytes": 0}
     temp_root: Path | None = None
+    temp_parent: Path | None = None
     sampler: _PeakSampler | None = None
     stage = "locate"
     try:
@@ -217,9 +222,13 @@ def run_drill(backup_dir: Path | None = None,
         stages[stage] = round(time.monotonic() - mark, 3)
 
         stage, mark = "preflight", time.monotonic()
+        # a restored archive is a full plaintext copy, so the staging tree is
+        # 0700, named for positive identification, and removed loudly below
+        temp_parent = Path(temp_dir).expanduser() if temp_dir else scratch_root()
+        temp_parent.mkdir(parents=True, exist_ok=True)
         temp_root = Path(tempfile.mkdtemp(
-            prefix="contextd-restore-drill-",
-            dir=str(temp_dir) if temp_dir else None))
+            prefix="contextd-restore-drill-", dir=temp_parent))
+        os.chmod(temp_root, 0o700)
         required = int(bundle_bytes * DRILL_TEMP_MULTIPLE)
         free = shutil.disk_usage(temp_root).free
         if free < required:
@@ -286,7 +295,14 @@ def run_drill(backup_dir: Path | None = None,
         if sampler is not None:
             meta["peak_temp_bytes"] = sampler.stop()
         if temp_root is not None:
-            shutil.rmtree(temp_root, ignore_errors=True)
+            try:
+                remove_scratch(temp_root, temp_parent)
+            except ScratchCleanupError as exc:
+                # ignore_errors=True used to turn "a full plaintext archive is
+                # still on disk" into a silent no-op. It is a drill FAILURE.
+                meta["verdict"] = "FAIL"
+                meta["failed_stage"] = "cleanup"
+                meta["reason"] = str(exc)[:500]
     meta["total_seconds"] = round(time.monotonic() - started, 3)
 
     conn = connect()

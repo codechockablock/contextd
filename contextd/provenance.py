@@ -29,10 +29,12 @@ verified quote can still decorate a false claim; the verifier's job is to
 make that laundering *legible* (the evidence sits next to the claim, checked)
 rather than to pretend it is impossible. See docs/PROVENANCE.md.
 
-Trust boundary, unchanged: same-owner processes are trusted. An owner-level
-forger can write a well-formed derivation record; the chain witness and this
-verifier detect after-the-fact tampering and structural fabrication, not a
-dishonest owner.
+Trust boundary (revised, docs/SECURITY.md): same-UID processes are NOT
+trusted. A same-UID forger can still write a well-formed derivation record and
+recompute the hash chain; what this verifier detects is structural fabrication
+and after-the-fact tampering, not a hostile owner. Detecting *that* requires
+the service signature layer (contextd/attest.py), which this module does not
+duplicate. Grounding verdicts here are about chain shape, never authentication.
 """
 
 import hashlib
@@ -66,7 +68,13 @@ ERRORS = frozenset({
 ANCHOR_RX = re.compile(r"\[(\d+)\]")
 _HEADER_RX = re.compile(r"^--- \[(\d+)\] .*? ---$", re.M)
 
-GROUNDED_TYPES = ("observation", "human_assertion")
+# Grounding asks a different question from authentication: does this chain
+# terminate in something other than model output? A *claimed* human assertion
+# still does, so it grounds — while carrying no authentication whatsoever
+# (contextd/assurance.py). `ctx why` prints both axes so the distinction
+# cannot be read away.
+GROUNDED_TYPES = ("observation", "claimed_human_assertion",
+                  "attested_human_assertion")
 
 
 def parse_claims(text: str) -> list:
@@ -358,5 +366,8 @@ def format_closure(node: dict, depth: int = 0) -> str:
         out.append("mechanically verified: anchor resolution, disclosure "
                    "membership, quote-span membership, hash integrity, "
                    "chain shape. NOT verified (semantic judgment): whether "
-                   "any claim's wording is actually supported by its evidence.")
+                   "any claim's wording is actually supported by its evidence. "
+                   "NOT verified (authentication): a 'claimed_human_assertion' "
+                   "terminal rests on a caller-writable label, not on any "
+                   "signature — see docs/SECURITY.md §3.")
     return "\n".join(out)

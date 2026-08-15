@@ -27,13 +27,13 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from contextd import load_config  # noqa: E402
 from contextd.db import connect  # noqa: E402
+from contextd.scratch import scratch_dir  # noqa: E402
 from contextd.gate import (GateError, disclose, record_dispatch_outcome,  # noqa: E402
                            select_items, verify_anchors)
 
@@ -62,14 +62,16 @@ def distill(payload: str, model: str, timeout: int = 300):
     env = os.environ.copy()
     env["MCP_CONNECTION_NONBLOCKING"] = "false"
     env["ENABLE_TOOL_SEARCH"] = "off"
-    r = subprocess.run(
-        [CLAUDE_BIN, "-p", "--model", model, "--tools", "",
-         "--strict-mcp-config", "--no-session-persistence",
-         "--setting-sources", "", "--output-format", "json",
-         "--max-budget-usd", "0.50"],
-        input=payload, capture_output=True,
-        text=True, timeout=timeout, cwd=tempfile.mkdtemp(prefix="ctx-synth-"),
-        env=env)
+    # the distiller's working directory is removed in `finally`, including on
+    # timeout and KeyboardInterrupt; it used to be an uncleaned mkdtemp
+    with scratch_dir("synthesis-distill") as workdir:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--model", model, "--tools", "",
+             "--strict-mcp-config", "--no-session-persistence",
+             "--setting-sources", "", "--output-format", "json",
+             "--max-budget-usd", "0.50"],
+            input=payload, capture_output=True,
+            text=True, timeout=timeout, cwd=workdir, env=env)
     if r.returncode != 0:
         raise DistillError(
             f"distiller failed (exit {r.returncode}): {r.stderr[-500:]}",
@@ -126,15 +128,10 @@ def main():
             )
             sys.exit("distiller timed out after 300 seconds")
         except DistillError as e:
-            record_dispatch_outcome(
-                conn, src_egress, "failed", exit=e.exit_code,
-                error_type=type(e).__name__,
-            )
+            record_dispatch_outcome(conn, src_egress, "failed", exit=e.exit_code)
             sys.exit(str(e))
-        except BaseException as e:
-            record_dispatch_outcome(
-                conn, src_egress, "failed", error_type=type(e).__name__,
-            )
+        except BaseException:
+            record_dispatch_outcome(conn, src_egress, "failed")
             raise
         record_dispatch_outcome(conn, src_egress, "succeeded", exit=0)
         anchors = verify_anchors(text, ids)

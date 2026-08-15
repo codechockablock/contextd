@@ -1,5 +1,5 @@
 [mcp_servers.contextd]
-command = "/Users/joseph/contextd/.venv/bin/ctx"
+command = "__CONTEXTD_REPO__/.venv/bin/ctx"
 args = ["serve"]
 startup_timeout_sec = 30
 tool_timeout_sec = 60

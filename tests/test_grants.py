@@ -4,7 +4,10 @@ and immediate revocation."""
 
 import json
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
+
 
 from contextd import load_config
 from contextd.db import append_event, connect
@@ -14,6 +17,15 @@ from contextd.handoff import compile_checkpoint
 from contextd.loops import add_candidate, make_scope, reduce_loops, scope_str
 from contextd.mcp_server import decision_supersede, loop_confirm
 
+
+def _soon(hours: int = 8) -> str:
+    """A finite, timezone-aware expiry. Grants without one are refused."""
+    return (datetime.now(timezone.utc)
+            + timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+SOON = _soon()
+
 GLOBAL = make_scope(None)
 REPO_A = make_scope("/home/sim/aster")
 REPO_B = make_scope("/home/sim/brontide")
@@ -22,25 +34,44 @@ REPO_B = make_scope("/home/sim/brontide")
 def test_reduction_grant_revoke_expiry_idempotence():
     conn = connect()
     with pytest.raises(GrantError):
-        add_grant(conn, "grant.grant", GLOBAL)  # no meta-grants, ever
+        add_grant(conn, "grant.grant", GLOBAL, expires=SOON)  # unknown class
     with pytest.raises(GrantError):
-        add_grant(conn, "decision.supersede", REPO_A)  # global-only class
-    g = add_grant(conn, "loop.confirm", REPO_A, reason="tired tonight")
+        add_grant(conn, "grant.add", GLOBAL, expires=SOON)  # no meta-grants
+    with pytest.raises(GrantError):
+        # global-only class
+        add_grant(conn, "decision.supersede", REPO_A, expires=SOON)
+    with pytest.raises(GrantError):
+        add_grant(conn, "loop.confirm", REPO_A)          # permanent: refused
+    with pytest.raises(GrantError):
+        # naive timestamps cannot express one instant everywhere
+        add_grant(conn, "loop.confirm", REPO_A, expires="2099-01-01T00:00:00")
+    g = add_grant(conn, "loop.confirm", REPO_A, expires=SOON,
+                  reason="tired tonight")
     assert g["result"] == "created"
-    again = add_grant(conn, "loop.confirm", REPO_A)
+    again = add_grant(conn, "loop.confirm", REPO_A, expires=SOON)
     assert again["result"] == "existing"  # appends nothing
 
     assert active_grant_for(conn, "loop.confirm", REPO_A) is not None
     assert active_grant_for(conn, "loop.confirm", REPO_B) is None
     assert active_grant_for(conn, "loop.dismiss", REPO_A) is None
 
-    # expiry is evaluated at act time; expired == absent
+    # expiry is evaluated at act time; expired == absent. The instants below
+    # are computed rather than literal so the test does not silently start
+    # asserting "already past" as the calendar moves.
+    horizon = datetime.now(timezone.utc) + timedelta(hours=2)
     e = add_grant(conn, "loop.dismiss", GLOBAL,
-                  expires="2026-01-01T00:00:00+00:00")
+                  expires=horizon.isoformat(timespec="seconds"))
+    just_before = (horizon - timedelta(seconds=1)).isoformat(timespec="seconds")
     assert active_grant_for(conn, "loop.dismiss", REPO_A,
-                            now="2025-12-31T23:59:59+00:00") is not None
+                            now=just_before) is not None
     assert active_grant_for(conn, "loop.dismiss", REPO_A,
-                            now="2026-01-01T00:00:00+00:00") is None
+                            now=horizon.isoformat(timespec="seconds")) is None
+    # the same instant written in another offset decides identically; the old
+    # string comparison made this depend on formatting rather than on time
+    other_offset = horizon.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    assert active_grant_for(
+        conn, "loop.dismiss", REPO_A,
+        now=other_offset.isoformat(timespec="seconds")) is None
 
     r = revoke_grant(conn, g["grant"]["id"], reason="back at keyboard")
     assert r["result"] == "revoked"
@@ -73,7 +104,7 @@ def test_refusal_without_grant_and_provenance_with():
     assert out.startswith("REFUSED") and "ctx grant add loop.confirm" in out
     assert reduce_loops(conn)["loops"][cand["id"]]["state"] == "candidate"
 
-    g = add_grant(conn, "loop.confirm", REPO_A)["grant"]
+    g = add_grant(conn, "loop.confirm", REPO_A, expires=SOON)["grant"]
     out = loop_confirm(cand["id"], reason="matches the sprint plan")
     assert "model-granted" in out and f"grant ev {g['id']}" in out
     lp = reduce_loops(conn)["loops"][cand["id"]]
@@ -106,7 +137,7 @@ def test_decision_supersede_grant_gated():
     v2 = append_event(conn, "note", "note", content="revisited: green path",
                       meta={"actor": "human"})
     assert decision_supersede(v1, v2).startswith("REFUSED")
-    g = add_grant(conn, "decision.supersede", GLOBAL,
+    g = add_grant(conn, "decision.supersede", GLOBAL, expires=SOON,
                   reason="reconciler may link obvious replacements")["grant"]
     out = decision_supersede(v1, v2, reason="v2 explicitly replaces v1")
     assert "model-granted" in out
@@ -128,7 +159,8 @@ def test_checkpoint_loudness():
     out = compile_checkpoint(conn, cfg, budget=2000)
     assert "STANDING DELEGATIONS" not in out["package"]
 
-    g = add_grant(conn, "loop.confirm", REPO_A, reason="overnight")["grant"]
+    g = add_grant(conn, "loop.confirm", REPO_A, expires=SOON,
+                  reason="overnight")["grant"]
     out = compile_checkpoint(conn, cfg, budget=2000)
     assert "STANDING DELEGATIONS" in out["package"]
     assert f"grant ev {g['id']}" in out["package"]
@@ -138,7 +170,7 @@ def test_checkpoint_loudness():
         (out["egress_id"],)).fetchone()["meta"])
     assert meta["delegations"] == [
         {"class": "loop.confirm", "grant": g["id"],
-         "scope": scope_str(REPO_A), "expires": None}]
+         "scope": scope_str(REPO_A), "expires": SOON}]
 
     # a checkpoint for an uncovered repo does not carry the repo-A grant
     out_b = compile_checkpoint(conn, cfg, budget=2000,
