@@ -7,3 +7,5 @@ runs/
 experiments/open_loops/results/
 build/
 native/contextd-signer
+.metadata_never_index
+operator-key.der
