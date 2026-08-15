@@ -5,6 +5,32 @@ joining this project reads this file before starting work and records itself
 as owning session if it takes a lane. Update on state change (start, block,
 handoff, done), not as a journal.
 
+**Canonical copy: master.** From any lane, read it with
+`git show master:docs/operating-map.md`; never trust a lane checkout's copy
+and never hand-mirror master content onto lanes — divergent copies drifted
+and the 2026-08-15 flaw sweep retired that practice along with the stale
+lane checkouts themselves.
+
+## Operator queue
+
+Everything the machinery cannot do for you, with the exact act. `ctx status`
+warns about the first two until they are done.
+
+1. **Enroll the production signer** (all operator CLI acts refuse until
+   then; a model must never create the operator key, so this stays human):
+   `native/build.sh`, then
+   `native/contextd-signer enroll --key-id default > operator-key.der`,
+   then `ctx security key register operator-key.der`
+   (docs/OPERATOR_CEREMONY.md).
+2. **Grant Full Disk Access** for Safari history capture: System Settings →
+   Privacy & Security → Full Disk Access, for your terminal and the watch
+   daemon — or set `[browser] safari=false`. Status now warns from the
+   scanner's recorded no-access state and self-clears on the next good scan.
+3. **Start the grant-calibration field window** when ready (tally 0/20,
+   0/10; protocol frozen in the grant-calibration lane report). Machine-side
+   results cannot substitute; the verdict stays capped at NOT EARNED until
+   the field bars are met.
+
 ## Decisions
 
 - 2026-08-13 — Open-loops capture verdict is `NOT EARNED` pending the real
@@ -61,6 +87,27 @@ handoff, done), not as a journal.
 
 ## Done
 
+- 2026-08-15 — **flaw-sweep** (Claude Code / Fable 5, branch `flaw-sweep`,
+  operator-chartered: "completely fix 1-6 end to end" from the repo-flaws
+  review). Fixed: blob store quarantine-and-heal for a corrupt content
+  address + dead-temp reaping (a torn blob no longer bricks ingest and the
+  weekly backup); reconciler self-documentation now counts only notes whose
+  kernel-stamped anchors cite into the epoch window (id-window co-location
+  marked epochs self-documented under parallel sessions and silently never
+  distilled them), and a size-capped disclosure's item list now names
+  exactly the messages the payload carries (omission loud in payload and
+  meta.omitted_messages, registered); `ctx status` surfaces the unenrolled
+  signer with the enrollment remedy and browser no-access states recorded
+  by the scanner; README + DECISIONS.md truth sweep (model-facing claim,
+  zero-network claim vs authority socket, retired derivation env, schema 2,
+  DECISIONS addendum for grant-gated supersession). Ops: stale worktrees
+  ctx-b (lineage-drift-audit) and ctx-c (restore-firedrill) removed, ctx-a
+  (delegation-grants) venv deleted — pre-hardening checkouts can no longer
+  execute against the schema-2 live archive (their code predates the
+  forward refusal); branches kept as history. Verified already fixed on
+  master, no change needed: forward schema refusal in both directions
+  (assert_supported_schema + tests), grants expiry as UTC instants,
+  mandatory bounded expiry, attestation-gated grant registry.
 - 2026-08-14 — **delegation-grants** (Claude Code / Fable 5, branch
   `delegation-grants` off decisions-lifecycle): operator-chartered from the
   authority-model conversation. `ctx grant add/revoke/list` — recorded,
