@@ -20,6 +20,13 @@ EXPECTED_SUBPROCESS_CALLS = {
         "the macOS Secure Enclave signer helper; it receives only the exact "
         "canonical bytes to be signed and no archive content, and it is not a "
         "model",
+    ("hooks/health_sweep.py", "_live_launchctl", "run"):
+        "launchctl list, read-only local service state; nothing from the "
+        "archive is passed and it is not a model",
+    ("hooks/health_sweep.py", "notify", "run"):
+        "osascript local notification; carries only check names from the "
+        "fixed CHECK_NAMES registry, never detail strings or archive "
+        "content, and it is not a model",
     ("scripts/triage_history_credentials.py", "triage", "run"):
         "local `git rev-list` over this repository's own history to enumerate "
         "blobs for classification; no archive bytes, no model, and no matched "

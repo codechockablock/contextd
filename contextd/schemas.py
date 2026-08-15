@@ -398,6 +398,17 @@ HARNESS_SCHEMAS: dict = {
         "origin_caveats": Field("json"), "interpretation": Field("json"),
         "not_licensed": Field("json"),
     },
+    # The health sweep's verdict (hooks/health_sweep.py, docs/AGENTS.md
+    # stage 1). Content-NULL like every instrument: never in FTS, never
+    # recallable — and deliberately so, because these events are the
+    # future coordinator's entire diet and must never carry free text.
+    ("health", "sweep"): {
+        "verdict": Field("ident", max_len=MAX_LABEL),
+        "checks": Field("json"),
+        "degraded": Field("str_list", max_items=32),
+        "new_degradations": Field("str_list", max_items=32),
+        "grant_anomalies": Field("int"),
+    },
     ("eval", "restore_drill"): {
         "bundle": Field("text", max_len=512), "bundle_bytes": Field("int"),
         "failed_stage": Field("ident", max_len=MAX_LABEL),

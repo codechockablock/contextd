@@ -229,6 +229,27 @@ exercised by test and smoke. Scale behavior (1–8 GiB, event-heavy and
 blob-heavy) is measured, not assumed: `experiments/restore_scale/trial.py`
 holds the inflator, the measurements, and the cross-machine rehearsal.
 
+## The health sweep
+
+A daemon that degrades quietly is supervised, restarted, logged — and
+invisible (the 2026-08-15 specimen: 42 identical reconciler refusals into a
+log nobody read). `hooks/health_sweep.py` (launchd, every 30 min, zero
+model dispatches) reduces existing evidence — ledger liveness watermarks,
+unreconciled-backlog age, launchd states, log-tail failure fingerprints,
+backup and drill ages, grant-reduction anomalies — into one content-NULL
+`health` event per run. `ctx status` prints the last verdict; a local
+notification fires only on a NEW degradation, naming check names only,
+never detail strings (attacker-influenceable text stays out of trusted
+prompts). These structured verdicts are deliberately free-text-free: they
+are the future coordinator's entire input feed
+([docs/AGENTS.md](docs/AGENTS.md), the frozen agent-plane contract —
+non-convertibility, the trifecta rule, workflows as promoted artifacts).
+
+```bash
+cp launchd/com.contextd.health.plist ~/Library/LaunchAgents/   # then sed the __PLACEHOLDERS__
+launchctl load ~/Library/LaunchAgents/com.contextd.health.plist
+```
+
 ## Synthesis-mode recall
 
 Plain recall serves raw items. Synthesis mode serves a ~150-word distillate

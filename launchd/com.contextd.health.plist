@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contextd.health</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__CONTEXTD_REPO__/.venv/bin/python</string>
+        <string>__CONTEXTD_REPO__/hooks/health_sweep.py</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>StandardOutPath</key>
+    <string>__CONTEXTD_ARCHIVE__/health.log</string>
+    <key>StandardErrorPath</key>
+    <string>__CONTEXTD_ARCHIVE__/health.log</string>
+</dict>
+</plist>

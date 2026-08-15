@@ -36,6 +36,16 @@ handoff, done), not as a journal.
   hardening — enrollment steps in GRANTS-r2-proposal.md), Safari FDA missing,
   grant-calibration field window not started (tally at 0/20, 0/10).
 
+- 2026-08-15 — Agent-plane contract frozen before implementation
+  (docs/AGENTS.md: trifecta rule, starved coordinator, workflows as
+  promoted artifacts, injection claims empirical-only). Stage 1 built
+  inline: health sweep (hooks/health_sweep.py, launchd every 30 min,
+  content-NULL `health` events, notify on new degradation only). First
+  live sweep found two instrument artifacts (kickstart's -15 read as
+  failure; historical error streak read as current), both corrected and
+  pinned by test — sweep now OK. Stage 2 (workflow artifact format +
+  policy lint) not started; earn condition for stage 1 met.
+
 ## Lanes
 
 ### operator-trial

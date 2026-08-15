@@ -137,7 +137,7 @@ grants, no auto-renew, no retroactive authority, no laundering —
 
 2. Operator starts the field window (the trial r1 was built for):
 
-       ctx grant add loop.confirm --repo /Users/joseph/contextd --for 12h -m "field window night 3"
+       ctx grant add loop.confirm --repo "$(pwd)" --for 12h -m "field window night 3"
 
 3. Mornings: the ritual in docs/GRANT_CALIBRATION.md;
    `experiments/grant_calibration/field_tally.py` shows running state.

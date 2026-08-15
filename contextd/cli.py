@@ -783,6 +783,30 @@ def cmd_status(args):
             print(f"WARNING: restore drill last ran {format_age(age)} ago "
                   f"(threshold {threshold:g}h) — the drill itself may be "
                   "stalled")
+    sweep = conn.execute(
+        "SELECT ts, meta FROM events WHERE source='health' AND kind='sweep' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    if sweep is None:
+        # never-run stays quiet, same rule as the drill: the sweep is
+        # installed per machine
+        print("health sweep: never run")
+    else:
+        smeta = json.loads(sweep["meta"] or "{}")
+        from datetime import datetime
+        age = (datetime.fromisoformat(liveness_module.now_iso())
+               - datetime.fromisoformat(sweep["ts"])).total_seconds() / 3600
+        verdict = smeta.get("verdict", "?")
+        print(f"health sweep: {verdict} {format_age(max(age, 0.0))} ago")
+        if verdict != "OK":
+            names = ", ".join(smeta.get("degraded", [])) or "?"
+            print(f"WARNING: health sweep DEGRADED ({names}) — details in "
+                  "the sweep event meta, `ctx why` the latest health event")
+        stale_after = (cfg.get("health", {}) or {}).get(
+            "sweep_stale_after_hours", 2)
+        if age > stale_after:
+            print(f"WARNING: health sweep last ran {format_age(age)} ago "
+                  f"(threshold {stale_after:g}h) — the sweep itself may be "
+                  "stalled")
 
 
 def cmd_outcome(args):
