@@ -203,3 +203,71 @@ def test_deployment_templates_render_to_real_paths(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "__CONTEXTD_REPO__" not in result.stdout
     assert str(REPO_ROOT) in result.stdout
+
+
+# --- history credential triage ----------------------------------------------
+
+def test_triage_never_emits_a_matched_value(tmp_path):
+    """The triage reads real values in-process; it must never emit one.
+
+    Both surfaces are checked: stdout and the JSON report. A tool that helpfully
+    shows you the secret it found puts that secret into CI logs and scrollback.
+    """
+    report = tmp_path / "triage.json"
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "triage_history_credentials.py"),
+         "--report", str(report)],
+        capture_output=True, text=True, cwd=REPO_ROOT, timeout=900,
+    )
+    combined = result.stdout + result.stderr + report.read_text()
+    # every planted canary this repository knows about must be absent
+    for needle in ("canary0000000000zzz1", "AKIACANARY0000000000",
+                   "ghp_canary000000000", "xoxb-canary000000000",
+                   "123-45-6789", "4111 1111 1111 1111",
+                   "Q0FOQVJZQ0FOQVJZ", "eyJjYW5hcnkiOnRydWV9",
+                   "sk-planted00000000000000"):
+        assert needle not in combined, "the triage emitted a matched value"
+    payload = json.loads(report.read_text())
+
+    def keys(node):
+        """Every key name anywhere in the report."""
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield k
+                yield from keys(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from keys(v)
+
+    # no field CARRIES a value; the word appears only in the report's own prose
+    assert not {"value", "secret", "match", "matched"} & set(keys(payload))
+    for item in payload["unclassified"]:
+        assert set(item) == {"pattern", "path", "object", "line", "length",
+                             "entropy_bits_per_char"}
+
+
+def test_triage_accounts_for_every_history_credential_finding():
+    """The triage must explain every finding, or exit nonzero saying it cannot."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from scripts.triage_history_credentials import triage
+    result = triage()
+    assert result["total"] > 0, "no findings to triage — has the scanner broken?"
+    assert sum(result["by_class"].values()) == result["total"]
+    assert not result["unclassified"], (
+        f"{len(result['unclassified'])} history finding(s) have no innocent "
+        f"explanation; see docs/REPOSITORY_HISTORY_REMEDIATION.md"
+    )
+
+
+def test_triage_classifiers_reject_a_realistic_secret():
+    """The classifier must not explain away something that looks real.
+
+    Without this, a classifier that returns 'planted_canary' for everything
+    would pass the suite above while proving nothing.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from scripts.triage_history_credentials import classify
+    realistic = "sk-" + "T9xQm2vHpL4wZ7cR8nK1yB6dF3gJ5sA0eU"
+    assert classify(realistic, "contextd/thing.py", "key = load()") == \
+        "UNCLASSIFIED"
+    assert classify(realistic, "docs/notes.md", "we used it") == "UNCLASSIFIED"

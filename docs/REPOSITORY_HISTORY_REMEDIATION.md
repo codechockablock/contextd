@@ -1,8 +1,12 @@
 # Repository history remediation — findings and options
 
-**Status: NOT REMEDIATED. No history was rewritten. This document records what
-is there and what removing it would cost, so the decision can be made
-deliberately rather than by default.**
+**Status: TRIAGED, NOT REMEDIATED. No history was rewritten.**
+
+**Triage result: zero credentials require rotation.** All 314 credential-shaped
+strings in history have a non-secret explanation (§ "Credential triage" below).
+The remaining exposure is 21 `archive_dialogue` + 5 `session_uuid` findings —
+real private material, and the only part of this document still awaiting a
+decision.
 
 Git history rewriting was explicitly out of scope for the hardening pass that
 produced this document. Nothing here has been acted on.
@@ -67,6 +71,50 @@ Concentration by path (top locations):
 | 3 | `clients/codex.toml` |
 | 3 | `launchd/com.contextd.backup.plist` |
 
+## Credential triage — complete
+
+Run it yourself:
+
+```bash
+.venv/bin/python scripts/triage_history_credentials.py --report /tmp/triage.json
+```
+
+Exit 0 means every finding is explained; exit 1 lists the ones that are not.
+The tool reads matched values in-process and **never emits one** — not to
+stdout, not to the report. `tests/test_repository_privacy.py` asserts that,
+asserts the triage accounts for every finding, and includes a negative control
+proving the classifier still returns UNCLASSIFIED for a realistic-looking key
+(without which "explain everything" would be trivially passable).
+
+| Count | Class | What it means |
+|---|---|---|
+| 214 | `planted_canary` | A test literal: a repeated-character run, a sequential run, an explicit marker word, or a base64 body that decodes to one. Concentrated in `tests/smoke.py` and the canary suite. |
+| 80 | `reserved_domain` | Points at an RFC 2606 / RFC 6761 reserved domain (`example.com`, `.test`, `.invalid`). Cannot be a working credential for anything. |
+| 31 | `documented_example` | Prose. Mostly the redaction table's own explanatory comment illustrating the shape the pattern beneath it detects. |
+| 4 | `code_identifier` | The regex matched source code, not data — an assignment whose right-hand side is an expression, e.g. `capability_id, secret = raw.split(".", 1)`. |
+| 1 | `pem_header_only` | A `-----BEGIN … KEY-----` delimiter with no base64 body. A header carries no key material. |
+| 1 | `low_entropy` | Below the entropy a real key of that length would carry. |
+| 1 | `pattern_definition` | Regex source matching itself. |
+| **0** | **UNCLASSIFIED** | **Nothing requires rotation.** |
+
+### Why the raw count was so misleading
+
+The 314 findings collapse to a handful of causes, each counted once per
+historical blob that contained it. `tests/smoke.py` alone accounts for 256 of
+them across ~20 revisions of the same planted canaries. A scanner counting
+blob-occurrences will always inflate this way; that is a property of scanning
+history, not evidence of scale.
+
+### What the triage does NOT establish
+
+- It does not prove the redaction floor caught everything. A secret of an
+  *unlisted* shape was never a finding to begin with (`docs/SECURITY.md` §6
+  pins the covered classes).
+- It classifies by structure and context, not by testing whether a credential
+  works. A high-entropy string that happened to sit on a line with a regex tell
+  would be filed as a pattern. The negative-control test bounds this, but the
+  method is heuristic and is documented as such.
+
 ### Reading these numbers honestly
 
 - **The `credential` count is dominated by two non-secret sources**, based on
@@ -101,20 +149,18 @@ the old objects.
 
 **Cost: none. Risk: unchanged, and permanent.**
 
-### Option B — triage first, then decide
+### Option B — triage first, then decide — **DONE**
 
-Classify the 257 `credential` findings as synthetic vs. real. This requires
-reading matched values, which the hardening pass was forbidden to do.
+Completed; see "Credential triage" above. **No credential requires rotation.**
 
-- If **all** are synthetic/pattern text, the remaining exposure is 26 findings
-  (dialogue + session UUIDs) plus 59 home paths, and Option C becomes a
-  proportionate response.
-- If **any** is a real credential, **rotation comes first** and rewriting
-  history is secondary — a secret in a published repository must be assumed
-  compromised regardless of whether the commit is later removed.
+That resolves the branch this decision was waiting on: the remaining exposure
+is 21 `archive_dialogue` + 5 `session_uuid` findings (the two live-derived
+retrieval fixtures, since replaced with synthetic data in the working tree, and
+two tracked benchmark artifacts) plus 59 low-sensitivity `home_path` findings.
 
-**Recommended first step.** It is the only option that produces the information
-the other two need.
+Option C is now a judgement about **private conversation content and session
+identifiers**, not about leaked keys — a materially smaller and less urgent
+problem than the raw 257 suggested.
 
 ### Option C — rewrite history
 

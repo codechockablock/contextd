@@ -138,6 +138,13 @@
       ],
       "status": "synthetic",
       "reason": "Planted canary proving the doctor's report carries no archive content. An invented literal, asserted absent from the doctor's output."
+    },
+    "docs/REPOSITORY_HISTORY_REMEDIATION.md": {
+      "classes": [
+        "credential"
+      ],
+      "status": "synthetic",
+      "reason": "The triage write-up quotes a line of contextd's own source as its example of the code_identifier class \u2014 an assignment whose right-hand side is an expression, containing no secret. Documenting why a shape matches necessarily contains the shape."
     }
   }
 }
