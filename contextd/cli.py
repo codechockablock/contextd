@@ -17,6 +17,7 @@ from .db import (
     SchemaMigrationRequired,
     append_event,
     connect,
+    get_cursor,
     verify_chain,
 )
 from .gate import GateError, assemble, spent_today
@@ -746,6 +747,34 @@ def cmd_status(args):
     size = (home() / "contextd.db").stat().st_size // 1024
     print(f"  total: {total} events, {size} KB")
     print(f"  egress today: ~{spent_today(conn)}/{cfg['gate']['daily_token_budget']} est. tokens")
+    from .attest import SIGNER_SECURE_ENCLAVE, TEST_MODE_ENV, registered_keys
+    enclave_keys = [k for k in registered_keys(conn)
+                    if k["signer"] == SIGNER_SECURE_ENCLAVE
+                    and not k["revoked"]]
+    if enclave_keys:
+        print(f"operator signer: {len(enclave_keys)} Secure Enclave key(s) "
+              "enrolled")
+    elif os.environ.get(TEST_MODE_ENV):
+        print("operator signer: test-mode software signer (dev only)")
+    else:
+        # the single loudest operator-queue item: without an enrolled key,
+        # every operator CLI act refuses (docs/OPERATOR_CEREMONY.md)
+        print("operator signer: NOT ENROLLED")
+        print("WARNING: every operator CLI act refuses until a production "
+              "signer is enrolled — build: native/build.sh; enroll: "
+              "native/contextd-signer enroll --key-id default > "
+              "operator-key.der; register: ctx security key register "
+              "operator-key.der (docs/OPERATOR_CEREMONY.md)")
+    for browser in ("chrome", "safari"):
+        if not cfg["browser"].get(browser):
+            continue
+        state = get_cursor(conn, browser)
+        last = state.get("last_status", "") if isinstance(state, dict) else ""
+        if isinstance(last, str) and last.startswith("no access"):
+            print(f"WARNING: {browser} history is unreadable ({last}) — "
+                  "grant Full Disk Access to this process and the launchd "
+                  "daemon (System Settings → Privacy & Security → Full "
+                  f"Disk Access), or set [browser] {browser}=false")
     rows = capture_liveness(conn, cfg)
     if rows:
         print("capture liveness:")

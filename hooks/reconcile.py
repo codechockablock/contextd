@@ -5,9 +5,10 @@ this script invokes a model (via `claude -p` on your existing subscription);
 the kernel never does. Models call the kernel; the kernel never calls models.
 
 The reconciler reads dialogue the daemon already ingested (redacted at ingest),
-skips epochs that self-documented with live notes, and asks a cheap model to
-write 3-10 standalone notes for the rest. Every outcome is recorded back into
-the archive as a claude_code/reconcile event referencing its epoch."""
+skips epochs whose dialogue is already cited by live anchored notes, and asks a
+cheap model to write 3-10 standalone notes for the rest. Every outcome is
+recorded back into the archive as a claude_code/reconcile event referencing its
+epoch."""
 
 import fcntl
 import json
@@ -28,9 +29,10 @@ from contextd.redact import sanitize_content  # noqa: E402
 CLAUDE_BIN = os.environ.get("RECONCILE_CLAUDE_BIN", "claude")
 MODEL = os.environ.get("RECONCILE_MODEL", "haiku")
 MIN_MESSAGES = 6        # tiny epochs aren't worth a model call
-LIVE_NOTE_SKIP = 3      # epochs already documented by live notes are skipped
+LIVE_NOTE_SKIP = 3      # epochs already documented by citing notes are skipped
 MAX_EPOCHS_PER_RUN = 5
 MAX_DIALOGUE_CHARS = 300_000
+MAX_DIALOGUE_MESSAGES = 1024   # the registry's items bound (schemas._COMMON)
 
 PROMPT = """You are the archivist for a personal context daemon. Below is the \
 dialogue from one work episode (roles: user, assistant, delegation, subagent); \
@@ -68,25 +70,57 @@ def epoch_messages(conn, meta):
     ).fetchall()
 
 
-def live_notes(conn, start_id, epoch_id) -> int:
-    # anything noted while the episode's events were being appended counts
-    return conn.execute(
-        "SELECT COUNT(*) FROM events WHERE kind='note' AND id > ? AND id < ?",
-        (start_id, epoch_id)).fetchone()[0]
+def cited_live_notes(conn, start_id: int, end_id: int) -> int:
+    """Notes that demonstrably document THIS episode.
+
+    A note counts only when its kernel-verified anchors cite into the epoch's
+    event window. Sharing the id window is not enough: with parallel sessions
+    writing into one archive, an unrelated note routinely lands between
+    another episode's events, and counting it marked epochs self-documented
+    that nobody had documented — silently never distilled. Counting by
+    citation also lets a crashed run's own notes stand: the retry sees them
+    and skips instead of double-distilling the same dialogue."""
+    count = 0
+    for r in conn.execute(
+            "SELECT meta FROM events WHERE kind='note' AND id > ?",
+            (start_id,)):
+        meta = json.loads(r["meta"] or "{}")
+        anchors = (meta.get("derivation") or {}).get("anchors") or []
+        if any(start_id < a <= end_id for a in anchors):
+            count += 1
+    return count
 
 
 def reconcile(conn, epoch_id, meta) -> dict:
     msgs = epoch_messages(conn, meta)
     if len(msgs) < MIN_MESSAGES:
         return {"skipped": "too_small", "messages": len(msgs)}
-    if live_notes(conn, meta.get("start_event_id") or 0, epoch_id) >= LIVE_NOTE_SKIP:
+    start_id = meta.get("start_event_id") or 0
+    end_id = meta.get("end_event_id") or 0
+    if cited_live_notes(conn, start_id, end_id) >= LIVE_NOTE_SKIP:
         return {"skipped": "self_documented", "messages": len(msgs)}
-    dialogue = "\n\n".join(
-        f"[{m['id']}] {m['role']}: {m['content']}" for m in msgs)[:MAX_DIALOGUE_CHARS]
+    # Whole messages only, oldest first, until the size or count cap; the
+    # disclosure's item list is exactly what the payload carries, so an anchor
+    # can never resolve to dialogue the model was never shown.
+    included, size = [], 0
+    for m in msgs:
+        entry = f"[{m['id']}] {m['role']}: {m['content']}"
+        if included and (size + len(entry) + 2 > MAX_DIALOGUE_CHARS
+                         or len(included) >= MAX_DIALOGUE_MESSAGES):
+            break
+        included.append((m["id"], entry))
+        size += len(entry) + 2
+    omitted = len(msgs) - len(included)
+    dialogue = "\n\n".join(entry for _, entry in included)
+    if omitted:
+        dialogue += (f"\n\n[reconciler: {omitted} later message(s) omitted "
+                     "for size — their ids are not in this disclosure and "
+                     "cannot be cited]")
     payload = f"{PROMPT}\n\n{dialogue}"
     disclosure = disclose(conn, load_config(), payload, {
         "type": "reconcile_dialogue", "epoch_id": epoch_id,
-        "model": MODEL, "items": [m["id"] for m in msgs],
+        "model": MODEL, "items": [i for i, _ in included],
+        "omitted_messages": omitted,
         "client": "reconciler",
     })
     # The model subprocess (and the ctx serve it spawns) inherits this env:

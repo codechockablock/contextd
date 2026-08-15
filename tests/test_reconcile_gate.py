@@ -144,3 +144,97 @@ def test_reconcile_marker_passes_the_closed_registry_and_marks_the_epoch():
               "skipped": "too_small", "messages": 1},
     )
     assert epoch2_id not in {eid for eid, _ in reconciler.unreconciled_epochs(conn)}
+
+
+def _fake_done(observed=None):
+    def run(*args, **kwargs):
+        if observed is not None:
+            observed["input"] = kwargs["input"]
+        return SimpleNamespace(returncode=0, stdout="DONE", stderr="")
+    return run
+
+
+def test_unrelated_concurrent_notes_do_not_mark_self_documented(monkeypatch):
+    """A parallel session's notes share the id window but cite nothing here;
+    the epoch must still be distilled (previously: silently skipped forever)."""
+    conn = connect()
+    session_id = "epoch-under-test"
+    message_ids = []
+    for index in range(reconciler.MIN_MESSAGES):
+        message_ids.append(
+            append_event(conn, "claude_code", "message",
+                         content=f"dialogue {index}",
+                         meta={"role": "user", "session_id": session_id}))
+        if index == 2:
+            for n in range(reconciler.LIVE_NOTE_SKIP):
+                append_event(conn, "note", "note",
+                             content=f"unrelated concurrent note {n}",
+                             meta={"actor": "human"})
+    meta = {"session_id": session_id,
+            "start_event_id": message_ids[0] - 1,
+            "end_event_id": message_ids[-1]}
+    epoch_id = append_event(conn, "claude_code", "epoch", meta=meta)
+
+    monkeypatch.setattr(reconciler.subprocess, "run", _fake_done())
+    result = reconciler.reconcile(conn, epoch_id, meta)
+    assert "skipped" not in result
+    assert result["egress_id"]
+
+
+def test_citing_notes_mark_self_documented_even_after_the_epoch(monkeypatch):
+    """Notes whose kernel-stamped anchors cite into the window count — and a
+    crashed run's own post-epoch notes count too, so the retry does not
+    double-distill."""
+    conn = connect()
+    epoch_id, meta = _epoch(conn)
+    first_msg = meta["start_event_id"] + 1
+    for n in range(reconciler.LIVE_NOTE_SKIP):
+        append_event(conn, "note", "note",
+                     content=f"distilled claim {n} [{first_msg}]",
+                     meta={"actor": "reconciler",
+                           "derivation": {"source_egress": 1,
+                                          "anchors": [first_msg]}})
+    dispatched = []
+    monkeypatch.setattr(reconciler.subprocess, "run",
+                        lambda *a, **k: dispatched.append(1))
+    result = reconciler.reconcile(conn, epoch_id, meta)
+    assert result == {"skipped": "self_documented",
+                      "messages": reconciler.MIN_MESSAGES}
+    assert not dispatched
+
+
+def test_size_cap_discloses_only_included_messages(monkeypatch):
+    conn = connect()
+    epoch_id, meta = _epoch(conn)
+    all_ids = list(range(meta["start_event_id"] + 1,
+                         meta["end_event_id"] + 1))
+    monkeypatch.setattr(reconciler, "MAX_DIALOGUE_CHARS", 80)
+    observed = {}
+    monkeypatch.setattr(reconciler.subprocess, "run", _fake_done(observed))
+    result = reconciler.reconcile(conn, epoch_id, meta)
+
+    receipt = conn.execute(
+        "SELECT content, meta FROM events WHERE id = ?", (result["egress_id"],)
+    ).fetchone()
+    rmeta = json.loads(receipt["meta"])
+    items = rmeta["items"]
+    assert 0 < len(items) < len(all_ids)
+    assert rmeta["omitted_messages"] == len(all_ids) - len(items)
+    assert "omitted for size" in receipt["content"]
+    for kept in items:
+        assert f"[{kept}]" in receipt["content"]
+    for missing in set(all_ids) - set(items):
+        assert f"[{missing}]" not in receipt["content"]
+
+
+def test_message_count_cap_bounds_the_item_list(monkeypatch):
+    conn = connect()
+    epoch_id, meta = _epoch(conn)
+    monkeypatch.setattr(reconciler, "MAX_DIALOGUE_MESSAGES", 4)
+    monkeypatch.setattr(reconciler.subprocess, "run", _fake_done())
+    result = reconciler.reconcile(conn, epoch_id, meta)
+    rmeta = json.loads(conn.execute(
+        "SELECT meta FROM events WHERE id = ?", (result["egress_id"],)
+    ).fetchone()["meta"])
+    assert len(rmeta["items"]) == 4
+    assert rmeta["omitted_messages"] == reconciler.MIN_MESSAGES - 4

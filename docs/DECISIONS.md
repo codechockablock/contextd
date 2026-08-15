@@ -168,3 +168,18 @@ instrument's arms are not comparable and the contrast is void.
     ctx decision supersede OLD NEW [-m reason]   # operator act, appends edge
     ctx decision list                            # edges + anomalies
     ctx decision current <id>                    # follow chain, print terminal
+
+## Addendum 2026-08-15: grant-gated supersession (docs/GRANTS.md)
+
+The authority statement above ("there is deliberately no model-mediated
+path") is amended, not retracted, the same way OPEN_LOOPS.md amended its
+confirmation boundary on 2026-08-14. Nothing infers an edge from text,
+recency, or anything else — that refusal stands. What exists now is the
+explicit delegation mechanism: the operator may record a class-level,
+global-scoped, expiring, revocable grant (`ctx grant add decision.supersede
+--for 8h ...`), after which the MCP `decision_supersede` tool stops
+refusing — and every edge it records carries authority `model-granted` plus
+the grant's event id, permanently distinguishable from an operator act.
+Without an active covering grant the tool refuses exactly as before.
+Model-proposed *candidate* edges (proposal, not recording) remain a
+possible later mission and nothing here anticipates them.

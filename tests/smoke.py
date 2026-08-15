@@ -284,10 +284,16 @@ epmeta = json.loads(conn.execute(
     "SELECT meta FROM events WHERE kind='epoch'").fetchone()["meta"])
 assert epmeta["end_event_id"] > epmeta["start_event_id"]
 
-# 23. reconciler: too-small and self-documented epochs never reach a model
+# 23. reconciler: too-small epochs and epochs already CITED by live notes
+# never reach a model. Self-documentation counts citing notes only — a
+# co-located note that anchors nothing no longer suppresses distillation
+# (that path is pinned by tests/test_reconcile_gate.py; smoke stays
+# dispatch-free, and the dead binary below makes any regression fail
+# loudly instead of dispatching).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 import reconcile as rec
 
+rec.CLAUDE_BIN = "/nonexistent/contextd-smoke-claude"
 pending = rec.unreconciled_epochs(conn)
 assert len(pending) == 1
 out = rec.reconcile(conn, *pending[0])
@@ -298,9 +304,18 @@ with open(sess, "a") as f:
             "content": f"pelican planning point {i}"}, "uuid": f"p{i}000000",
             "timestamp": "2026-06-15T13:00:00Z"}) + "\n")
 assert scan_claude(conn, cfg)["message"] == 6
+from contextd.gate import disclose as _rec_disclose
+pel_first = conn.execute(
+    "SELECT id FROM events WHERE content = 'pelican planning point 0'"
+).fetchone()["id"]
+pel_eg = _rec_disclose(conn, cfg, f"[{pel_first}] pelican planning point 0",
+                       {"type": "reconcile_dialogue",
+                        "items": [pel_first]})["egress_id"]
 for i in range(3):
-    append_event(conn, "note", "note", content=f"live pelican note {i}",
-                 meta={"actor": "mcp"})
+    append_event(conn, "note", "note",
+                 content=f"live pelican note {i} [{pel_first}]",
+                 meta={"actor": "mcp", "derivation": {
+                     "source_egress": pel_eg, "anchors": [pel_first]}})
 assert scan_claude(conn, cfg)["epoch"] == 1
 out = rec.reconcile(conn, *rec.unreconciled_epochs(conn)[-1])
 assert out["skipped"] == "self_documented", out

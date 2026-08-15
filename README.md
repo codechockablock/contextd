@@ -10,7 +10,7 @@ The four kernel jobs, each in its smallest honest form:
 |---|---|
 | **Log** | Append-only `events` table (SQLite WAL); DB triggers enforce immutability; each event extends a hash chain whose external tip detects loss of the final row; oversized files use a content-addressed blob store |
 | **Index** | FTS5 over event content (embeddings are v0.1, only after lexical search fails you in a documented way) |
-| **Gate** | Every archive-derived outbound payload passes one disclosure primitive: never-leave rules, redaction, exact-byte token metering, and a pre-dispatch `egress` receipt committed atomically with the budget decision |
+| **Gate** | Every archive-derived outbound payload passes one disclosure primitive: never-leave rules, redaction, and a pre-dispatch `egress` receipt recording the exact disclosed bytes, committed atomically with the budget decision (the budget itself is denominated in estimated tokens, `len/4`) |
 | **Scheduler** | The budget counter, derived entirely from egress events in the log itself |
 
 Four ingesters, on purpose: watched text/markdown directories, deliberate
@@ -20,8 +20,11 @@ means ingestion is forever), and Claude Code dialogue — user and assistant
 text, delegation prompts, and subagent reports, with tool noise dropped,
 secrets redacted before storage, and every message role-tagged for provenance.
 
-**Zero network code.** Nothing in this package opens a socket except the MCP
-stdio server talking to a local client. Verify: `grep -rn "http\|socket\|urllib\|requests" contextd/`.
+**Zero network code.** Nothing in this package talks to the network — no TCP,
+no cloud. Two local-only IPC surfaces exist: the MCP stdio server, and the
+authority plane's unix-domain socket (`contextd/authd.py`, hardened mode).
+Every file allowed to mention network vocabulary is pinned in
+`tests/network_surface.txt`; `scripts/gates.sh` fails on any new match.
 
 ## Security
 
@@ -66,8 +69,11 @@ claude mcp add contextd -- __CONTEXTD_REPO__/.venv/bin/ctx serve
 ```
 
 Tools exposed: `recall(query, budget, purpose, since, until)`, `search(query)`,
-`note(text)`, `timeline(since, until, source)`. Recall's window filters by
-occurrence time (visit time for browser history), not ingest time.
+`note(text)`, `timeline(since, until, source)`, `loop_candidate`, `loop_list`,
+and the grant-gated `loop_confirm` / `loop_dismiss` / `decision_supersede`
+(these refuse without an active operator delegation; see Open loops below).
+Recall's window filters by occurrence time (visit time for browser history),
+not ingest time.
 
 An operator can restrict a server process at the registry itself:
 
@@ -92,11 +98,13 @@ evidence. When a session goes quiet for `claude.quiet_seconds` (20 min), the
 daemon marks an *epoch* — sessions mostly end by abandonment, so quiescence,
 not exit, is the episode boundary. A harness-side janitor
 (`hooks/reconcile.py`, launchd every 10 min) distills unreconciled epochs
-into notes via `claude -p --model haiku`, skipping episodes that already
-self-documented with live notes. The kernel never calls a model; the janitor
-is a client like any other, and its notes land with `actor=mcp` provenance.
-(`hooks/` shells out to your Claude subscription; the contextd package itself
-still opens no sockets.)
+into notes via `claude -p --model haiku`, skipping episodes whose dialogue is
+already cited by live anchored notes (id-window co-location is not enough:
+with parallel sessions an unrelated neighbor's note lands between another
+episode's events routinely). The kernel never calls a model; the janitor is a
+client like any other, and its notes carry its claimed client label
+(`reconciler`) plus kernel-stamped derivation. (`hooks/` shells out to your
+Claude subscription; the contextd package itself opens nothing network-facing.)
 
 The exact reconciler prompt is redacted, budgeted, and receipted before the
 subprocess starts. A separate linked `egress_outcome` event records success,
@@ -149,14 +157,17 @@ an owner-level process that rewrites both the database and witness can still
 forge a consistent history. Likewise, a server tool allowlist limits that
 process's MCP capabilities but does not prove who launched it.
 
-Models may write notes. Every note records its author in `meta.actor`
-(`human` from the CLI, `mcp` from model clients), so the archive always
-distinguishes what you said from what a model said. No approval workflow
-until a real incident earns one.
+Models may write notes. Every note records who claimed to write it
+(`claimed_client` / `actor`), and operator-authoritative acts additionally
+carry a verified signature — claimed attribution and proven authority are
+different fields on purpose, so the archive always distinguishes what you
+said from what a model said.
 
-Model-derived events additionally carry **derivation lineage**. The
-reconciler binds its notes to the exact disclosed dialogue
-(`CONTEXTD_DERIVATION_SOURCE`); the `note` tool kernel-verifies proposed
+Model-derived events additionally carry **derivation lineage**. A dispatch
+harness binds the model subprocess to the exact disclosed bytes with a
+single-use, expiring dispatch capability (`CONTEXTD_DISPATCH_CAPABILITY`,
+`contextd/capability.py`; the old integer `CONTEXTD_DERIVATION_SOURCE`
+binding is retired); the `note` tool kernel-verifies proposed
 anchors against that disclosure and refuses citations of undisclosed events.
 `ctx why <event_id>` walks the full derivation closure — claim → source
 disclosure → cited events → recursively → leaf evidence — and reports what
@@ -208,9 +219,11 @@ unexpected, missing, traversing, symlinked, or hash-mismatched payloads are
 refused; it stages and verifies SQLite, FTS, event chain, witness, and blobs
 before one final publish rename. It never merges into a non-empty destination.
 Retention removes complete `.ctxbackup` directories only, never legacy files.
-The live database is versioned too: init (or the first write-capable connect)
-stamps `PRAGMA user_version = 1` (`SCHEMA_VERSION`), complementing the
-`BUNDLE_VERSION` the bundle manifests already carry.
+The live database is versioned too: a brand-new archive is stamped
+`PRAGMA user_version = 2` (`SCHEMA_VERSION`), an older archive refuses every
+write until the explicit audited migration (`ctx security migrate`), and an
+archive from a **newer** contextd refuses before any filesystem change — an
+older build never silently writes rows whose invariants it does not know.
 
 A backup that has never been restored is a hope, not a backup. The weekly
 restore fire-drill (`hooks/restore_drill.py --once`, scheduled by
@@ -352,14 +365,20 @@ verbatim so carriage never depends on a model's choices.
 
 Models may *propose* (`loop_candidate` over MCP, or the gated
 `hooks/loop_scan.py` scanner): proposals are labeled, deduplicated,
-suppressed against dismissed/closed loops, and inert until the operator
-confirms **by CLI** — there is no model-facing add, close, reopen, confirm,
-or dismiss. (A model-relayed confirmation bound to ingested operator
-utterances was built and retired before field use: verifying that words
-were uttered cannot distinguish assent from rejection, so it could launder
-rejecting words into authority — the negative result is recorded in the
-contract.) No calendars, no recurrence, no notifications — this is durable
-operator state, not a planner. Contract, threat model, and measured limits:
+suppressed against dismissed/closed loops, and inert until confirmed. There
+is no model-facing add, close, or reopen. Confirmation and dismissal are
+operator CLI acts by default; under an explicit **delegation grant**
+(`ctx grant add loop.confirm --for 8h ...` — recorded, class-scoped,
+expiring, revocable, itself never grantable by a model) the MCP
+`loop_confirm` / `loop_dismiss` tools stop refusing, and every transition
+they record carries authority `model-granted` plus the grant's event id —
+permanently distinguishable from an operator act ([docs/GRANTS.md](docs/GRANTS.md)).
+(A model-relayed confirmation bound to ingested operator utterances was
+built and retired before field use: verifying that words were uttered
+cannot distinguish assent from rejection, so it could launder rejecting
+words into authority — the negative result is recorded in the contract.)
+No calendars, no recurrence, no notifications — this is durable operator
+state, not a planner. Contract, threat model, and measured limits:
 [docs/OPEN_LOOPS.md](docs/OPEN_LOOPS.md).
 
 ## Measuring whether context matters
