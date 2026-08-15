@@ -12,7 +12,13 @@ from pathlib import Path
 from . import __version__, home, load_config
 from . import liveness as liveness_module
 from .backup import BackupError, create_backup, restore_backup
-from .db import ChainStateError, append_event, connect, verify_chain
+from .db import (
+    ChainStateError,
+    SchemaMigrationRequired,
+    append_event,
+    connect,
+    verify_chain,
+)
 from .gate import GateError, assemble, spent_today
 from .ingest import run_all
 from .liveness import capture_liveness, describe, format_age, stale_line
@@ -933,11 +939,14 @@ def cmd_security_export(args):
     except (BackupError, ExportCryptoError) as exc:
         sys.exit(f"export refused: configured recipient is unusable: {exc}")
 
+    # Open the archive before announcing anything: on an unmigrated archive
+    # this refuses, and printing "sealing to <recipient>" first would describe
+    # an act that is not going to happen.
+    covered = _export_action_arguments(connect(), str(dest_dir), digest)
     # The operator approves the recipient, not just the act. Show the digest so
     # what they are signing is legible before the presence prompt appears.
     print(f"sealing to recipient {digest[:16]}… ({configured})")
     try:
-        covered = _export_action_arguments(connect(), str(dest_dir), digest)
         authorization = operator_authorization(
             None, "archive.export", "global", arguments=covered,
         )
@@ -1258,15 +1267,24 @@ def main():
     )
 
     args = p.parse_args()
-    {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest, "watch": cmd_watch,
-     "search": cmd_search, "recall": cmd_recall, "checkpoint": cmd_checkpoint,
-     "loop": cmd_loop, "decision": cmd_decision, "grant": cmd_grant,
-     "timeline": cmd_timeline,
-     "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
-     "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
-     "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,
-     "security": cmd_security,
-     "serve": cmd_serve}[args.cmd](args)
+    try:
+        {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest,
+         "watch": cmd_watch,
+         "search": cmd_search, "recall": cmd_recall, "checkpoint": cmd_checkpoint,
+         "loop": cmd_loop, "decision": cmd_decision, "grant": cmd_grant,
+         "timeline": cmd_timeline,
+         "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
+         "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
+         "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,
+         "security": cmd_security,
+         "serve": cmd_serve}[args.cmd](args)
+    except SchemaMigrationRequired as exc:
+        # A deliberate, fully-messaged refusal, not an unexpected failure: the
+        # archive predates the security migration and the build will not append
+        # to it. Every command that opens the archive can raise it, so it is
+        # caught once here. A traceback would bury an instruction the operator
+        # is meant to act on. Nothing else is caught — real errors still raise.
+        sys.exit(f"refused: {exc}")
 
 
 if __name__ == "__main__":
