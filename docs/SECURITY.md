@@ -248,10 +248,17 @@ parameters, including %-encoded), `openai_key` (sk-proj-…), `anthropic_key`
 ## 8. Recovery assumptions
 
 - **Rollback/truncation** is detectable only against a checkpoint the attacker
-  cannot rewrite. With no protected destination configured,
-  `ctx security doctor --strict` reports `rollback_resistance: incomplete` and
-  exits nonzero. The interface exists; **no destination is selected in this
-  tree**.
+  cannot rewrite. The destination is **selected**:
+  `/var/db/contextd/checkpoint.json`, owned by the service account at mode
+  0600 — the only location on this host the desktop UID cannot rewrite. It is
+  **not yet in force**, because the service account does not exist until the
+  operator runs the install, so `ctx security doctor --strict` still reports
+  `rollback_resistance: incomplete` and exits nonzero.
+
+  This layer is not redundant with the hash chain. A same-UID attacker owns
+  both the database and the witness file. Rehearsed: after truncating the
+  ledger *and* rewriting the witness to match, `verify_chain` returns OK and
+  the archive opens cleanly — and only the checkpoint reports the rollback.
 - **Backup/export** manifests are service-signed. In hardened mode, export is
   encrypted to an explicitly configured recovery recipient; with no recovery
   policy configured, export **refuses** rather than emitting plaintext.

@@ -150,22 +150,71 @@ tip, and adopts the legacy tip with a signed cutover checkpoint that
 
 ## 6. Configure a protected checkpoint — OPERATOR ACTION
 
-The interface is implemented. **No destination has been selected**, and until
-one is, `ctx security doctor` reports `rollback_resistance: incomplete`.
+**Destination selected: `/var/db/contextd/checkpoint.json`**, owned by the
+service account at mode 0600. It is the only candidate on this machine that
+the desktop UID genuinely cannot rewrite, which is the whole property — a
+checkpoint your own account can edit proves nothing, because the attacker in
+this threat model *is* your account.
+
+It becomes real when step 4 creates the service-owned directory. Until then
+`ctx security doctor` reports `rollback_resistance: incomplete`, correctly.
+
+Set it in the deployed archive's config (not `~/.contextd`):
 
 ```bash
-ctx security checkpoint                    # print the current record
-ctx security checkpoint --write            # write it to the configured path
-ctx security checkpoint                    # verify the written one (exit 1 on rollback)
+sudo -u _contextd tee -a /var/db/contextd/config.toml >/dev/null <<'TOML'
+[security]
+mode = "hardened"
+checkpoint_destination = "/var/db/contextd/checkpoint.json"
+TOML
 ```
 
-Set `[security] checkpoint_destination` to somewhere **this uid cannot
-rewrite** — another host, a service-owned path, append-only storage. The
-doctor explicitly fails the invariant if the checkpoint file is writable by the
-calling uid, because a checkpoint you can rewrite proves nothing.
+Write the first checkpoint, then verify it:
 
-The record contains only: archive UUID, tip id, chain hash, key id, signature.
-No archive content leaves with it.
+```bash
+sudo -u _contextd env CONTEXTD_HOME=/var/db/contextd \
+    /usr/local/libexec/contextd/ctx security checkpoint --write
+sudo -u _contextd env CONTEXTD_HOME=/var/db/contextd \
+    /usr/local/libexec/contextd/ctx security checkpoint     # exits 0 if it verifies
+```
+
+Confirm your own account cannot rewrite it — this is the check that matters,
+and it must FAIL:
+
+```bash
+touch /var/db/contextd/checkpoint.json && echo "BAD: writable by you" \
+    || echo "ok: not writable by this uid"
+```
+
+### What the checkpoint contains, and what it catches
+
+Five fields only — archive UUID, tip id, chain hash, key id, signature. No
+archive content leaves with it, deliberately: a checkpoint destination is by
+definition somewhere you do not fully control.
+
+The layering is worth being precise about, because it is easy to assume the
+hash chain already covers this. It does not. Verified by rehearsal:
+
+| Attack step | Detected by |
+|---|---|
+| Edit an event | hash chain (layer 1) |
+| Edit + recompute the chain | local witness (layer 2) |
+| Truncate the ledger | local witness |
+| Truncate **and rewrite the witness to match** | **checkpoint only** |
+
+That last row is the reason this step exists. A same-UID attacker owns both
+the database and the witness file, so both are rewritable; the checkpoint is
+the first record they cannot reach. In rehearsal, after truncating to tip #3
+and rewriting the witness, `verify_chain` returned OK and the archive opened
+without error — and the checkpoint still reported
+`ROLLBACK: the archive ends at #3 but a protected checkpoint recorded #6`.
+
+### Off-device survival is a separate problem
+
+This destination protects against rollback, not against device loss. If you
+want both, mirror the checkpoint to iCloud or another provider after writing
+it. Be honest about what the mirror buys: the local copy there is writable by
+your UID, so its value is the provider's version history, not permissions.
 
 ## 7. Configure export policy — DECISION REQUIRED
 

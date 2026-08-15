@@ -299,8 +299,19 @@ def test_hostile_process_cannot_obtain_raw_content_through_a_cli_fallback(
 
 
 def test_hostile_process_cannot_invoke_a_production_signer(hardened_mode):
-    """No signer helper is installed, so there is nothing to invoke — and the
-    code offers no non-hardware path to substitute for it."""
+    """A hostile process gets no signature, whether or not the helper exists.
+
+    Two distinct refusals are correct here and the test accepts both, because
+    which one fires depends on whether `native/build.sh` has been run:
+
+      - helper absent  -> "no production signer ... no software fallback"
+      - helper present -> the Secure Enclave refuses (no enrolled key, and no
+        user presence), so the helper exits nonzero and signs nothing
+
+    Asserting one exact string would make this test pass or fail on whether a
+    build artifact happens to be sitting in the tree, which is not the
+    property. The property is that no signature comes back.
+    """
     payload = _run_hostile("""
 import json
 from contextd import attest
@@ -313,9 +324,15 @@ except Exception as exc:
     out["error"] = str(exc)[:200]
 print(json.dumps(out))
 """)
-    assert payload["signed"] is False
-    assert "no software fallback" in payload["error"] or \
-        "no production signer" in payload["error"]
+    assert payload["signed"] is False, "a hostile process obtained a signature"
+    error = payload["error"]
+    assert (
+        "no production signer" in error          # helper not built
+        or "no software fallback" in error
+        or "refused or was cancelled" in error   # helper built, Enclave refused
+    ), error
+    # whichever branch fired, no software path was substituted
+    assert "INSECURE_TEST_SIGNER" not in error
 
 
 def test_hostile_process_cannot_enable_the_test_signer_on_a_real_archive():
