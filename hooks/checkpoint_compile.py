@@ -26,13 +26,13 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from contextd import load_config  # noqa: E402
 from contextd.db import connect  # noqa: E402
+from contextd.scratch import scratch_dir  # noqa: E402
 from contextd.gate import (GateError, disclose, record_dispatch_outcome,  # noqa: E402
                            verify_anchors)
 from contextd.handoff import (compile_checkpoint, render_package,  # noqa: E402
@@ -64,13 +64,15 @@ def distill(payload: str, model: str, timeout: int = 600):
     env = os.environ.copy()
     env["MCP_CONNECTION_NONBLOCKING"] = "false"
     env["ENABLE_TOOL_SEARCH"] = "off"
-    r = subprocess.run(
-        [CLAUDE_BIN, "-p", "--model", model, "--tools", "",
-         "--strict-mcp-config", "--no-session-persistence",
-         "--setting-sources", "", "--output-format", "json",
-         "--max-budget-usd", "0.50"],
-        input=payload, capture_output=True, text=True, timeout=timeout,
-        cwd=tempfile.mkdtemp(prefix="ctx-ckpt-"), env=env)
+    # working directory removed in `finally` on every exit path
+    with scratch_dir("checkpoint-distill") as workdir:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--model", model, "--tools", "",
+             "--strict-mcp-config", "--no-session-persistence",
+             "--setting-sources", "", "--output-format", "json",
+             "--max-budget-usd", "0.50"],
+            input=payload, capture_output=True, text=True, timeout=timeout,
+            cwd=workdir, env=env)
     if r.returncode != 0:
         raise RuntimeError(f"distiller failed (exit {r.returncode}): "
                            f"{r.stderr[-500:]}")
@@ -112,9 +114,10 @@ def compile_distilled(conn, cfg, raw_budget: int, task_hint: str = "",
         except subprocess.TimeoutExpired:
             record_dispatch_outcome(conn, src_egress, "timeout")
             raise
-        except BaseException as e:
-            record_dispatch_outcome(conn, src_egress, "failed",
-                                    error_type=type(e).__name__)
+        except BaseException:
+            # the exception's own text is deliberately not persisted: a
+            # failing subprocess must not be a channel into the archive
+            record_dispatch_outcome(conn, src_egress, "failed")
             raise
         record_dispatch_outcome(conn, src_egress, "succeeded", exit=0)
         anchors = verify_anchors(text, ids)

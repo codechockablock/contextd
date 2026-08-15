@@ -6,7 +6,7 @@
     <string>com.contextd.backup</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/joseph/contextd/.venv/bin/ctx</string>
+        <string>__CONTEXTD_REPO__/.venv/bin/ctx</string>
         <string>backup</string>
         <string>--keep</string>
         <string>8</string>
@@ -21,8 +21,8 @@
         <integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/joseph/.contextd/backup.log</string>
+    <string>__CONTEXTD_ARCHIVE__/backup.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/joseph/.contextd/backup.log</string>
+    <string>__CONTEXTD_ARCHIVE__/backup.log</string>
 </dict>
 </plist>

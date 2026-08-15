@@ -26,8 +26,20 @@ def test_legacy_archive_stamped_on_connect_without_chain_disturbance(
     assert verify_chain(conn)["ok"]
 
 
-def test_future_versions_are_never_downgraded(isolated_contextd_home):
+def test_future_versions_are_refused_not_silently_adopted(isolated_contextd_home):
+    """An archive from a newer contextd must not be opened by an older build.
+
+    The old behaviour accepted it, applied this version's schema over it, and
+    carried on — so the damage landed before anyone could notice.
+    """
+    import pytest
+
+    from contextd.db import SchemaVersionError
+
     conn = connect()
     conn.execute("PRAGMA user_version = 7")
     conn.close()
-    assert _user_version(connect()) == 7
+    with pytest.raises(SchemaVersionError) as exc:
+        connect()
+    assert "newer contextd" in str(exc.value)
+    assert "Refusing before any filesystem or database change" in str(exc.value)

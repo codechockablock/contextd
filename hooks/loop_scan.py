@@ -27,7 +27,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -35,7 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from contextd import load_config  # noqa: E402
 from contextd.db import connect  # noqa: E402
+from contextd.capability import issue as issue_capability  # noqa: E402
+from contextd.capability import token as capability_token  # noqa: E402
 from contextd.gate import disclose, record_dispatch_outcome  # noqa: E402
+from contextd.scratch import harden_file, scratch_dir  # noqa: E402
 
 CLAUDE_BIN = os.environ.get("LOOP_SCAN_CLAUDE_BIN", "claude")
 MODEL = os.environ.get("LOOP_SCAN_MODEL", "haiku")
@@ -134,35 +136,44 @@ def scan(conn, cfg, repo: str, session_id: str | None = None,
     before = conn.execute(
         "SELECT COUNT(*) FROM events WHERE kind='loop'").fetchone()[0]
     env = os.environ.copy()
-    env["CONTEXTD_DERIVATION_SOURCE"] = str(disclosure["egress_id"])
+    # a dispatch capability, not an event id: opaque, bound to this
+    # disclosure's exact bytes and this session, single-use, expiring
+    # (contextd/capability.py). The old integer binding is retired.
+    _cap = issue_capability(conn, disclosure["egress_id"], os.getuid(),
+                            "loop-scan")
+    env["CONTEXTD_DISPATCH_CAPABILITY"] = capability_token(_cap)
+    env["CONTEXTD_DISPATCH_SESSION"] = "loop-scan"
+    env.pop("CONTEXTD_DERIVATION_SOURCE", None)
     env["CONTEXTD_CLIENT"] = client
     env["CONTEXTD_LOOP_SCOPE"] = repo
     env["MCP_CONNECTION_NONBLOCKING"] = "false"
     env["ENABLE_TOOL_SEARCH"] = "off"
-    tmp = Path(tempfile.mkdtemp(prefix="ctx-loop-scan-"))
-    mcp_cfg = _mcp_config(tmp / "mcp.json", archive_home(), client)
     tool = "mcp__contextd__loop_candidate"
-    cmd = [CLAUDE_BIN, "-p", "--model", model,
-           "--setting-sources", "", "--output-format", "json",
-           "--max-budget-usd", "0.50", "--no-session-persistence",
-           "--strict-mcp-config", "--mcp-config", str(mcp_cfg),
-           "--tools", tool, "--allowedTools", tool,
-           "--max-turns", "16"]
     t0 = time.time()
-    try:
-        r = subprocess.run(cmd, input=disclosure["content"],
-                           capture_output=True, text=True, timeout=timeout,
-                           cwd=tmp, env=env)
-    except subprocess.TimeoutExpired:
-        record_dispatch_outcome(conn, disclosure["egress_id"], "timeout",
-                                timeout_seconds=timeout)
-        return {"dispatch_status": "timeout", "exit": None,
-                "duration_ms": int((time.time() - t0) * 1000),
-                "candidates": 0, "egress_id": disclosure["egress_id"]}
-    except BaseException as exc:
-        record_dispatch_outcome(conn, disclosure["egress_id"], "failed",
-                                error_type=type(exc).__name__)
-        raise
+    # the MCP config written here names the archive path; the working
+    # directory is removed in `finally` on success, timeout, and interrupt
+    with scratch_dir("loop-scan") as tmp:
+        mcp_cfg = _mcp_config(tmp / "mcp.json", archive_home(), client)
+        harden_file(mcp_cfg)
+        cmd = [CLAUDE_BIN, "-p", "--model", model,
+               "--setting-sources", "", "--output-format", "json",
+               "--max-budget-usd", "0.50", "--no-session-persistence",
+               "--strict-mcp-config", "--mcp-config", str(mcp_cfg),
+               "--tools", tool, "--allowedTools", tool,
+               "--max-turns", "16"]
+        try:
+            r = subprocess.run(cmd, input=disclosure["content"],
+                               capture_output=True, text=True, timeout=timeout,
+                               cwd=tmp, env=env)
+        except subprocess.TimeoutExpired:
+            record_dispatch_outcome(conn, disclosure["egress_id"], "timeout",
+                                    timeout_seconds=timeout)
+            return {"dispatch_status": "timeout", "exit": None,
+                    "duration_ms": int((time.time() - t0) * 1000),
+                    "candidates": 0, "egress_id": disclosure["egress_id"]}
+        except BaseException:
+            record_dispatch_outcome(conn, disclosure["egress_id"], "failed")
+            raise
     duration_ms = int((time.time() - t0) * 1000)
     status = "succeeded" if r.returncode == 0 else "failed"
     record_dispatch_outcome(conn, disclosure["egress_id"], status,

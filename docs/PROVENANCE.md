@@ -111,6 +111,20 @@ layers; matrix pinned in `tests/test_adversarial_matrix.py`:
 - **`observation` is not endorsement.** A hostile web page ingests as an
   observation *that this text appeared at this URI*. A grounded closure
   terminating in a page_visit proves the trail, not the content.
+
+> **Superseded trust model.** This section predates the hardening pass. The
+> "same-owner processes are trusted / attribution, not authentication" model it
+> describes is **no longer what contextd claims**: a hostile same-UID agent is
+> now in scope (`docs/SECURITY.md` §1), and the parts of this document that
+> rest on same-owner trust are historical. Read `docs/SECURITY.md` for what is
+> claimed today and `docs/SECURITY.md` "Implementation status" for what is
+> actually enforced.
+
+- **`CONTEXTD_DERIVATION_SOURCE` is retained as a convenience binding only.**
+  It never carried authority and still does not; the opaque, expiring dispatch
+  capability designed to replace it is **not implemented in this tree**
+  (`docs/SECURITY.md`, Implementation status).
+
 - **The binding is attribution, not authentication.** Same-owner processes
   remain trusted; an owner-level forger can still write a well-formed
   derivation record, exactly as the trust model has always said. The chain

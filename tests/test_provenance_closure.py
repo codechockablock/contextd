@@ -9,12 +9,16 @@ worse — both directions are pinned."""
 
 import json
 
+import pytest
+
 from contextd import load_config
 from contextd.db import append_event, connect
 from contextd.gate import assemble, disclose, record_dispatch_outcome
 from contextd.provenance import (closure, derivation_of, disclosure_segments,
                                  format_closure, parse_claims,
                                  verify_derivation)
+from contextd.schemas import SchemaError
+from tests.legacy_support import legacy_note
 
 
 def _setup():
@@ -93,7 +97,7 @@ def test_anchored_note_over_real_disclosure_is_grounded():
     tree = closure(conn, note)
     assert tree["verdict"] == "grounded"
     assert set(tree["children"]) == {a, b}
-    assert all(c["epistemic_type"] == "human_assertion"
+    assert all(c["epistemic_type"] == "claimed_human_assertion"
                for c in tree["children"].values())
 
 
@@ -174,8 +178,14 @@ def test_egress_without_item_list_cannot_bind_claims():
 def test_non_monotonic_derivation_is_rejected():
     conn, cfg = _setup()
     a = _human_note(conn, "cited event")
-    # the note is appended BEFORE the egress it claims derived it
-    note = _model_note(conn, f"Claim [{a}].",
+    # the note is appended BEFORE the egress it claims derived it. The closed
+    # schema now refuses this shape at the front door, so the fixture is
+    # written the way a legacy archive holds one — which is precisely the case
+    # the verifier exists for.
+    with pytest.raises(SchemaError):
+        _model_note(conn, f"Claim [{a}].",
+                    {"source_egress": None, "anchors": [a]})
+    note = legacy_note(conn, f"Claim [{a}].",
                        {"source_egress": None, "anchors": [a]})
     egress = _disclose_ids(conn, cfg, [a])
     forged = _model_note(conn, f"Claim [{a}].",
@@ -324,7 +334,7 @@ def test_two_generation_closure_resolves_to_leaves():
     tree = closure(conn, n2)
     assert tree["verdict"] == "grounded"
     assert tree["children"][n1]["children"][h1]["epistemic_type"] == \
-        "human_assertion"
+        "claimed_human_assertion"
 
 
 def test_mixed_grandchild_propagates_as_mixed_not_ungrounded():
@@ -355,7 +365,7 @@ def test_synthesis_egress_shape_walks_like_a_derivation():
                        "items": [h1]})["egress_id"]
     tree = closure(conn, served)
     assert tree["verdict"] == "grounded"
-    assert tree["children"][h1]["epistemic_type"] == "human_assertion"
+    assert tree["children"][h1]["epistemic_type"] == "claimed_human_assertion"
 
 
 def test_supersession_annotates_without_deleting():
@@ -382,11 +392,18 @@ def test_malformed_derivation_record_shapes_are_refused():
     conn, cfg = _setup()
     a = _human_note(conn, "evidence")
     egress = _disclose_ids(conn, cfg, [a])
-    bad_support = _model_note(conn, f"Claim [{a}].",
+    # both shapes are refused at append by the closed schema ...
+    for shape in ({"source_egress": egress, "anchors": [a],
+                   "support": [{"quote": ""}, "not-a-dict"]},
+                  {"source_egress": "seven", "anchors": [a]}):
+        with pytest.raises(SchemaError):
+            _model_note(conn, f"Claim [{a}].", shape)
+    # ... and still detected by the verifier when already present in the archive
+    bad_support = legacy_note(conn, f"Claim [{a}].",
                               {"source_egress": egress, "anchors": [a],
                                "support": [{"quote": ""}, "not-a-dict"]})
     assert "malformed_derivation" in verify_derivation(conn, bad_support)["errors"]
-    no_src = _model_note(conn, f"Claim [{a}].",
+    no_src = legacy_note(conn, f"Claim [{a}].",
                          {"source_egress": "seven", "anchors": [a]})
     assert verify_derivation(conn, no_src)["errors"] == ["malformed_derivation"]
 

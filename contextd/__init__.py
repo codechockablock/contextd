@@ -48,24 +48,34 @@ DEFAULTS = {
         "dir": "",
         "drill_stale_after_hours": 192,
     },
+    "security": {
+        # "development": the client plane opens the archive directly and the
+        # only assurance is attribution. "hardened": only the authority service
+        # (contextd/authd.py) opens the archive, every client goes through its
+        # closed RPC surface, and a missing service fails closed rather than
+        # falling back to SQLite. Switching this on without installing the
+        # service makes every archive call fail loudly, which is the intended
+        # behaviour — see docs/DEPLOYMENT.md.
+        "mode": "development",
+        "socket": "",                    # default: <home>/authd.sock
+        # An independently protected checkpoint destination the desktop uid
+        # cannot rewrite. Empty means rollback resistance is INCOMPLETE, and
+        # `ctx security doctor` says so rather than passing.
+        "checkpoint_destination": "",
+        # Hardened export encrypts to this recipient. Empty means export
+        # refuses rather than emitting plaintext.
+        "export_recipient": "",
+    },
     "gate": {
         "daily_token_budget": 200_000,
         "max_recall_budget": 32_000,
         "never_leave": ["*/.ssh/*", "*/.aws/*", "*.pem", "*/.env*"],
-        # Overriding [gate.redact] in config.toml replaces this whole set.
-        "redact": {
-            "api_key": r"\b(?:sk|pk)-[A-Za-z0-9_-]{16,}",
-            "aws_key": r"\bAKIA[0-9A-Z]{16}\b",
-            "github_token": r"\b(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{36}\b",
-            "slack_token": r"\bxox[bpars]-[A-Za-z0-9-]{10,}\b",
-            "jwt": r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
-            "private_key": r"-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\r\n]*(?:-----END [A-Z ]*PRIVATE KEY-----)?",
-            "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-            # auth-shaped query params in URLs (?code=, &access_token=, ...),
-            # including %-encoded ones nested in redirect values (%26state%3D...)
-            "url_param": r"(?i)(?:[?&#]|%26|%3f|%23)[a-z0-9_.-]*(?:code|token|auth|nonce|state|secret|passw|pwd|sig|session|key|otp|ticket|csrf|xsrf|sso|jwt|bearer)[a-z0-9_.-]*(?:=|%3d)[^&\s\"'<>]+",
-            "card": r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6011)[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,4}\b",
-        },
+        # EXTENSION ONLY. The built-in secret-redaction floor lives in
+        # contextd/redact.py and always runs; entries here are applied in
+        # addition to it. Configuration can add a pattern, never remove or
+        # weaken one — under the current threat model whoever can write
+        # config.toml is the attacker (docs/SECURITY.md §6).
+        "redact": {},
     },
 }
 

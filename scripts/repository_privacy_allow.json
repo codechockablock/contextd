@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "_doc": [
+    "Approved findings for scripts/audit_repository_privacy.py --tracked.",
+    "Every entry needs a `status` and a `reason`. Two statuses exist and they",
+    "mean different things:",
+    "  synthetic  - not a finding at all. The matched text is a planted test",
+    "               canary or a fixture value that was never real.",
+    "  awaiting_operator - a REAL finding in a file this hardening pass is not",
+    "               authorized to modify. It is approved only in the sense that",
+    "               it does not fail the gate; it is still outstanding, and the",
+    "               scanner prints it under OUTSTANDING on every run so it",
+    "               cannot quietly become the baseline.",
+    "Adding an entry to silence a finding you could have fixed is misuse."
+  ],
+  "tracked": {
+    "tests/smoke.py": {
+      "classes": [
+        "credential"
+      ],
+      "status": "synthetic",
+      "reason": "Planted redaction canaries (sk-qqqq\u2026, sk-wwww\u2026, AKIA-shaped, xox-shaped). They exist to prove the floor redacts them; each is a literal invented for the test and was never a valid credential."
+    },
+    "tests/test_gate_atomic.py": {
+      "classes": [
+        "credential"
+      ],
+      "status": "synthetic",
+      "reason": "Planted canary 'sk-abcdefghijklmnop1234' asserting disclose() redacts exact bytes before the egress row is written."
+    },
+    "tests/test_loop_scan_gate.py": {
+      "classes": [
+        "credential"
+      ],
+      "status": "synthetic",
+      "reason": "Planted canary proving the loop-scan payload is receipted post-redaction."
+    },
+    "tests/test_provenance_closure.py": {
+      "classes": [
+        "credential"
+      ],
+      "status": "synthetic",
+      "reason": "Planted canary proving the verifier grounds quotes against post-redaction disclosed bytes."
+    },
+    "tests/test_reconcile_gate.py": {
+      "classes": [
+        "credential"
+      ],
+      "status": "synthetic",
+      "reason": "Planted canary proving the reconciler dispatches only receipted, redacted payloads."
+    },
+    "tests/test_privacy_boundary.py": {
+      "classes": [
+        "credential",
+        "home_path",
+        "session_uuid"
+      ],
+      "status": "synthetic",
+      "reason": "The credential-canary suite itself. Every value here is invented for the test and is asserted to be absent from every persistence and output surface."
+    },
+    "tests/test_repository_privacy.py": {
+      "classes": [
+        "credential",
+        "home_path",
+        "session_uuid",
+        "archive_dialogue"
+      ],
+      "status": "synthetic",
+      "reason": "Planted-positive fixtures for this scanner: the file deliberately contains one example of each detected class so a detector that silently stops matching is caught."
+    },
+    "experiments/restore_scale/results.json": {
+      "classes": [
+        "session_uuid"
+      ],
+      "status": "awaiting_operator",
+      "reason": "Four occurrences of one real archive UUID inside a tracked benchmark result artifact. experiments/ is outside this pass's MAY-modify scope, and editing a recorded result is not path sanitization. Needs an explicit operator decision: rewrite the artifact, or accept it."
+    },
+    "runs/handoff-20260812/final-report.md": {
+      "classes": [
+        "session_uuid"
+      ],
+      "status": "awaiting_operator",
+      "reason": "One real session UUID in a tracked benchmark conclusion. Same constraint: run artifacts may only receive portable path sanitization, and a session id is not a path."
+    },
+    "tests/fixtures/legacy_archive.json": {
+      "classes": [
+        "session_uuid",
+        "archive_dialogue"
+      ],
+      "status": "synthetic",
+      "reason": "The frozen legacy-archive fixture. Its rows deliberately reproduce the SHAPES that mattered before hardening \u2014 including claude:// session URIs and role-tagged dialogue \u2014 because a migration test against a fixture that lacks them proves nothing. Every value is invented; tests/test_security_migration.py asserts the fixture still carries these shapes."
+    }
+  }
+}

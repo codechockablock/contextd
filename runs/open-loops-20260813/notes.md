@@ -1,6 +1,6 @@
 # Open loops / prospective state — mission run log (2026-08-13)
 
-Mission: `/Users/joseph/.codex/visualizations/2026/08/13/019ff978-670f-76d1-94d4-9dac3ba027b5/open-loops-claude-code-mission.md`
+Mission: `~/.codex/visualizations/2026/08/13/019ff978-670f-76d1-94d4-9dac3ba027b5/open-loops-claude-code-mission.md`
 Orchestrator: Claude Code (Fable 5), autonomous session.
 
 ## Phase 1 — audit (verified vs unavailable)

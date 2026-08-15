@@ -528,10 +528,10 @@ def test_loop_state_survives_backup_and_restore(tmp_path, monkeypatch):
     scope = make_scope("/synthetic/amberlight")
     kept = add_loop(conn, "re-run the drift correction", scope)["loop"]
     gone = add_loop(conn, "regenerate the fixture site", scope)["loop"]
-    transition(conn, gone["id"], "close", "operator", reason="done")
-    transition(conn, gone["id"], "reopen", "operator", reason="regressed")
+    transition(conn, gone["id"], "close", reason="done")
+    transition(conn, gone["id"], "reopen", reason="regressed")
     cand = add_candidate(conn, "learn per-feed cadence", scope)["loop"]
-    transition(conn, cand["id"], "dismiss", "operator", reason="noise")
+    transition(conn, cand["id"], "dismiss", reason="noise")
     before = json.dumps(reduce_loops(conn), sort_keys=True)
 
     result = create_backup(conn, archive, tmp_path / "backups")
@@ -544,8 +544,8 @@ def test_loop_state_survives_backup_and_restore(tmp_path, monkeypatch):
     assert json.dumps(reduce_loops(rconn), sort_keys=True) == before
     assert verify_chain(rconn)["ok"]
     with pytest.raises(LoopError):
-        transition(rconn, cand["id"], "reopen", "operator")
-    assert transition(rconn, kept["id"], "close", "operator",
+        transition(rconn, cand["id"], "reopen")
+    assert transition(rconn, kept["id"], "close",
                       reason="verified post-restore")["loop"]["state"] == \
         "closed"
     rconn.close()

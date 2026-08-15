@@ -7,7 +7,10 @@ import hashlib
 import json
 from pathlib import Path
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
+
 
 from experiments.grant_calibration import calibrate, judge, scoring, worlds
 from experiments.grant_calibration.field_tally import (FIELD_BARS,
@@ -17,6 +20,12 @@ from experiments.grant_calibration.fixtures import (ALL_FIXTURES, PROJECTS,
                                                     fixture_digest,
                                                     split_fixtures)
 from experiments.handoff.common import contextd_home
+
+
+def _soon(hours: int = 8) -> str:
+    """A finite, timezone-aware expiry. Grants without one are refused."""
+    return (datetime.now(timezone.utc)
+            + timedelta(hours=hours)).isoformat(timespec="seconds")
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -235,7 +244,8 @@ def _build_field_archive(home: Path) -> dict:
         from contextd.loops import add_candidate, make_scope, transition
         conn = connect()
         scope = make_scope("/synthetic/fieldrepo")
-        g = add_grant(conn, "loop.confirm", scope, reason="field window")
+        g = add_grant(conn, "loop.confirm", scope, expires=_soon(),
+                      reason="field window")
         gid = g["grant"]["id"]
         ids = {}
         for name, text in (("agree", "ship the parser fix"),
@@ -243,18 +253,18 @@ def _build_field_archive(home: Path) -> dict:
                            ("harmful", "rotate the staging keys"),
                            ("open", "profile the ingest path")):
             lp = add_candidate(conn, text, scope, client="scanner")["loop"]
-            transition(conn, lp["id"], "confirm", "model-granted",
+            transition(conn, lp["id"], "confirm",
                        client="mcp", grant=gid)
             ids[name] = lp["id"]
         # an operator-confirmed loop must NOT count toward the tally
         op = add_candidate(conn, "write the release notes", scope,
                            client="scanner")["loop"]
-        transition(conn, op["id"], "confirm", "operator")
-        transition(conn, ids["agree"], "close", "operator",
+        transition(conn, op["id"], "confirm")
+        transition(conn, ids["agree"], "close",
                    reason="done this morning")
-        transition(conn, ids["veto"], "close", "operator",
+        transition(conn, ids["veto"], "close",
                    reason=f"{VETO_PREFIX} enthusiasm was not commitment")
-        transition(conn, ids["harmful"], "close", "operator",
+        transition(conn, ids["harmful"], "close",
                    reason=f"{VETO_HARMFUL_PREFIX} keys rotated before "
                           "review, real cost")
         conn.close()

@@ -6,7 +6,7 @@
     <string>com.contextd.watch</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/joseph/contextd/.venv/bin/ctx</string>
+        <string>__CONTEXTD_REPO__/.venv/bin/ctx</string>
         <string>watch</string>
     </array>
     <key>EnvironmentVariables</key>
@@ -19,8 +19,8 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/joseph/.contextd/watch.log</string>
+    <string>__CONTEXTD_ARCHIVE__/watch.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/joseph/.contextd/watch.log</string>
+    <string>__CONTEXTD_ARCHIVE__/watch.log</string>
 </dict>
 </plist>

@@ -6,7 +6,10 @@ byte-identical-dialogue boundary (docs/OPEN_LOOPS.md is the contract)."""
 
 import json
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
+
 
 from contextd import load_config
 from contextd.db import InjectedCrash, append_event, append_event_checked, connect
@@ -16,6 +19,12 @@ from contextd.loops import (LoopError, add_candidate, add_loop, dedupe_key,
                             loops_for_scope, make_scope, reduce_loops,
                             transition)
 from experiments.open_loops.scoring import check_carriage
+
+
+def _soon(hours: int = 8) -> str:
+    """A finite, timezone-aware expiry. Grants without one are refused."""
+    return (datetime.now(timezone.utc)
+            + timedelta(hours=hours)).isoformat(timespec="seconds")
 
 REPO_A = make_scope("/synthetic/amberlight")
 REPO_B = make_scope("/synthetic/gaugepost")
@@ -43,13 +52,13 @@ def test_add_list_close_reopen_roundtrip(isolated_contextd_home):
     assert loops_for_scope(conn, REPO_B) == []
     assert loops_for_scope(conn, GLOBAL) == []
 
-    closed = transition(conn, lp["id"], "close", "operator",
+    closed = transition(conn, lp["id"], "close",
                         reason="ran clean")
     assert closed["loop"]["state"] == "closed"
     assert closed["loop"]["last_reason"] == "ran clean"
     assert loops_for_scope(conn, REPO_A) == []
 
-    reopened = transition(conn, lp["id"], "reopen", "operator",
+    reopened = transition(conn, lp["id"], "reopen",
                           reason="numbers drifted again")
     assert reopened["loop"]["state"] == "open"
     assert reopened["loop"]["reopen_count"] == 1
@@ -68,9 +77,9 @@ def test_duplicate_retry_and_repeated_wording_are_idempotent(
     assert n_events == 1, "idempotent retry must append nothing"
 
     # transitions retry as no-ops without new events
-    transition(conn, first["loop"]["id"], "close", "operator")
+    transition(conn, first["loop"]["id"], "close")
     before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    r = transition(conn, first["loop"]["id"], "close", "operator")
+    r = transition(conn, first["loop"]["id"], "close")
     assert r["result"] == "noop"
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before
 
@@ -85,18 +94,18 @@ def test_invalid_transitions_refuse_explicitly(isolated_contextd_home):
     lp = add_loop(conn, "rotate the SMTP app password", GLOBAL)["loop"]
     cand = add_candidate(conn, "audit the sitemap generator", REPO_A)["loop"]
     with pytest.raises(LoopError, match="closed, not dismissed|closed"):
-        transition(conn, lp["id"], "dismiss", "operator")
+        transition(conn, lp["id"], "dismiss")
     with pytest.raises(LoopError, match="confirmed or dismissed"):
-        transition(conn, cand["id"], "close", "operator")
+        transition(conn, cand["id"], "close")
     with pytest.raises(LoopError, match="confirmed or dismissed"):
-        transition(conn, cand["id"], "reopen", "operator")
-    transition(conn, lp["id"], "close", "operator")
+        transition(conn, cand["id"], "reopen")
+    transition(conn, lp["id"], "close")
     with pytest.raises(LoopError, match="reopen instead"):
-        transition(conn, lp["id"], "confirm", "operator")
+        transition(conn, lp["id"], "confirm")
     with pytest.raises(LoopError, match="no loop"):
-        transition(conn, 999999, "close", "operator")
+        transition(conn, 999999, "close")
     with pytest.raises(LoopError, match="unknown transition"):
-        transition(conn, lp["id"], "explode", "operator")
+        transition(conn, lp["id"], "explode")
 
 
 def test_candidate_lifecycle_and_dismissal_suppression(isolated_contextd_home):
@@ -111,7 +120,7 @@ def test_candidate_lifecycle_and_dismissal_suppression(isolated_contextd_home):
     dup = add_candidate(conn, "add a DEAD-LETTER shelf", REPO_B)
     assert dup["result"] == "suppressed_live"
 
-    d = transition(conn, lp["id"], "dismiss", "operator", reason="noise")
+    d = transition(conn, lp["id"], "dismiss", reason="noise")
     assert d["loop"]["state"] == "dismissed"
 
     resurrect = add_candidate(conn, "add a dead-letter shelf", REPO_B)
@@ -120,7 +129,7 @@ def test_candidate_lifecycle_and_dismissal_suppression(isolated_contextd_home):
 
     # a closed loop is likewise not re-proposed (stale resurrection)
     done = add_loop(conn, "regenerate the fixture site", REPO_B)["loop"]
-    transition(conn, done["id"], "close", "operator")
+    transition(conn, done["id"], "close")
     again = add_candidate(conn, "regenerate the fixture site", REPO_B)
     assert again["result"] == "suppressed_closed"
 
@@ -156,7 +165,7 @@ def test_reducer_replay_is_deterministic_and_anomaly_safe(
         isolated_contextd_home):
     conn = connect()
     lp = add_loop(conn, "verify the redirect map", REPO_A)["loop"]
-    transition(conn, lp["id"], "close", "operator")
+    transition(conn, lp["id"], "close")
     # a direct (same-owner) append of an invalid transition must not corrupt
     append_event(conn, "loop", "loop", content=None,
                  meta={"op": "reopen", "loop": lp["id"],
@@ -220,7 +229,7 @@ def test_loop_events_carry_epistemic_type_by_authority(isolated_contextd_home):
     from contextd.experiment import epistemic_type
     assert epistemic_type("loop", "loop",
                           {"op": "add", "authority": "operator"}) == \
-        "human_assertion"
+        "claimed_human_assertion"
     assert epistemic_type("loop", "loop",
                           {"op": "candidate", "authority": "model"}) == \
         "model_inference"
@@ -276,13 +285,13 @@ def test_no_ungated_promotion_path_exists(isolated_contextd_home):
     assert loop_confirm(cand["id"]).startswith("REFUSED")
     assert reduce_loops(conn)["loops"][cand["id"]]["state"] == "candidate"
 
-    r = transition(conn, cand["id"], "confirm", "operator", client="cli")
+    r = transition(conn, cand["id"], "confirm", client="cli")
     assert r["loop"]["state"] == "open"
     assert r["loop"]["promoted_authority"] == "operator"
 
     # under a grant, promotion works and is distinguishable from operator
     cand2 = add_candidate(conn, "shelve the retry respins", REPO_B)["loop"]
-    add_grant(conn, "loop.confirm", REPO_B)
+    add_grant(conn, "loop.confirm", REPO_B, expires=_soon())
     assert "model-granted" in loop_confirm(cand2["id"])
     assert reduce_loops(conn)["loops"][cand2["id"]][
         "promoted_authority"] == "model-granted"
@@ -331,9 +340,9 @@ def test_carriage_survives_crowd_out_and_excludes_by_state_and_scope(
     kept = add_loop(conn, "re-run the drift correction on the July batch",
                     REPO_A)["loop"]
     closed = add_loop(conn, "regenerate the fixture site", REPO_A)["loop"]
-    transition(conn, closed["id"], "close", "operator")
+    transition(conn, closed["id"], "close")
     dismissed = add_candidate(conn, "build a plugin registry", REPO_A)["loop"]
-    transition(conn, dismissed["id"], "dismiss", "operator")
+    transition(conn, dismissed["id"], "dismiss")
     cand = add_candidate(conn, "learn per-feed cadence", REPO_A)["loop"]
     other = add_loop(conn, "rotate the DKIM keys", REPO_B)["loop"]
     glob = add_loop(conn, "renew the archive backup medium", GLOBAL)["loop"]
@@ -361,7 +370,7 @@ def test_carriage_survives_crowd_out_and_excludes_by_state_and_scope(
         "carriage must be scorable from the ledger alone (trial.py)"
 
     # reopened loops return; re-closed ones leave again
-    transition(conn, closed["id"], "reopen", "operator")
+    transition(conn, closed["id"], "reopen")
     out2 = compile_checkpoint(conn, cfg, budget=4000,
                               repo={"path": "/synthetic/amberlight"})
     assert check_carriage(out2["package"],

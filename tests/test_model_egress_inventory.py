@@ -16,6 +16,15 @@ SUBPROCESS_METHODS = {"run", "call", "Popen", "check_call", "check_output"}
 # review of whether it can carry archive-derived bytes to a model.
 EXPECTED_SUBPROCESS_CALLS = {
     ("contextd/cli.py", "cmd_recall", "call"): "local harness delegation",
+    ("contextd/attest.py", "sign_with_secure_enclave", "run"):
+        "the macOS Secure Enclave signer helper; it receives only the exact "
+        "canonical bytes to be signed and no archive content, and it is not a "
+        "model",
+    ("scripts/audit_repository_privacy.py", "_git", "run"):
+        "local git read of this repository; no archive bytes and no model",
+    ("scripts/audit_repository_privacy.py", "scan_history", "Popen"):
+        "local `git cat-file --batch` over this repository's own blobs; "
+        "no archive bytes, no model, and matched values are never emitted",
     ("experiments/runner.py", "run_model", "run"): "model",
     ("experiments/runner.py", "cmd_run", "run"): "model CLI version only",
     ("hooks/reconcile.py", "reconcile", "run"): "model",

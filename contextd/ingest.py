@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import sqlite3
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +14,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .db import append_event, get_cursor, last_hash, set_cursor, store_blob
 from .domains import blocked, load_skip_domains
-from .gate import redact
+from .assurance import UNVERIFIED, refuse_forged_authority
+from .redact import redact
+from .scratch import harden_file, scratch_dir
 
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".obsidian", ".Trash"}
 
@@ -31,14 +32,41 @@ def _never(cfg, path: str) -> bool:
     )
 
 
-def ingest_note(conn, text: str, tags=None, actor: str = "human",
-                derivation: dict | None = None) -> int:
-    meta = {"actor": actor}
+def ingest_note(conn, text: str, tags=None, claimed_client: str = "",
+                derivation: dict | None = None, authorization=None,
+                actor: str | None = None, bind=None) -> int:
+    """Append a note.
+
+    The old signature took ``actor="human"`` as a free-form string, which is
+    how a caller minted human provenance for itself. It now takes an optional
+    verified ``authorization`` (contextd/attest.py) and records the resulting
+    assurance level; without one the note is ``unverified``, whatever label the
+    caller would have liked to write. See docs/SECURITY.md §3.
+    """
+    # `actor` is kept in the signature ONLY so the retired call shape fails
+    # loudly with a message that names the replacement, instead of silently
+    # being accepted or raising an opaque TypeError.
+    if actor is not None:
+        refuse_forged_authority(actor=actor)
+        claimed_client = claimed_client or actor
+    refuse_forged_authority(claimed_client=claimed_client)
+    meta = {"assurance": UNVERIFIED}
+    if claimed_client:
+        meta["claimed_client"] = claimed_client
     if tags:
         meta["tags"] = tags
     if derivation:
         # kernel-verified lineage (see mcp_server.note); never model-asserted
         meta["derivation"] = derivation
+    if authorization is not None:
+        meta["assurance"] = authorization.assurance
+        meta["attestation"] = authorization.stored_block()
+    if bind is not None:
+        # `bind` runs inside the append transaction; the dispatch capability
+        # is consumed there so the note and its authorization commit together
+        from .db import append_event_checked
+        return append_event_checked(conn, "note", "note", content=text,
+                                    meta=meta, bind=bind)
     return append_event(conn, "note", "note", content=text, meta=meta)
 
 
@@ -95,9 +123,17 @@ def scan_fs(conn, cfg) -> dict:
     return {"file_write": new, "file_delete": deleted, "watched": len(seen)}
 
 
-def _copy_locked_db(src: Path) -> Path:
-    tmp = Path(tempfile.mkdtemp()) / src.name
+def _copy_locked_db(src: Path, workdir: Path) -> Path:
+    """Copy a live browser history DB (plus WAL/SHM) into caller-owned scratch.
+
+    The copy is a full plaintext dump of the user's browsing history, so it is
+    written 0600 into a 0700 directory the caller removes in ``finally``. It
+    used to be left in the shared system temp directory with the source file's
+    own mode, and was only cleaned up when the read succeeded.
+    """
+    tmp = workdir / src.name
     shutil.copy(src, tmp)
+    harden_file(tmp)
     for suffix in ("-wal", "-shm"):
         side = src.with_name(src.name + suffix)
         if side.exists():
@@ -105,6 +141,8 @@ def _copy_locked_db(src: Path) -> Path:
                 shutil.copy(side, tmp.with_name(tmp.name + suffix))
             except OSError:
                 pass
+            else:
+                harden_file(tmp.with_name(tmp.name + suffix))
     return tmp
 
 
@@ -126,13 +164,19 @@ def _scan_browser(conn, cfg, name, src_path, query, to_unix) -> dict:
         return {"status": "not found"}
     cursor = get_cursor(conn, name)
     watermark = cursor.get("watermark", 0)
+    # scratch_dir removes the copy in `finally`, so a failed open, a failed
+    # query, a timeout, or a KeyboardInterrupt cannot leave a plaintext copy
+    # of browser history behind. A cleanup that does not succeed raises.
     try:
-        copy = _copy_locked_db(src)
-        bconn = sqlite3.connect(copy)
-        rows = bconn.execute(query, (watermark,)).fetchall()
-        bconn.close()
-        shutil.rmtree(copy.parent, ignore_errors=True)
+        with scratch_dir(f"{name}-history") as workdir:
+            bconn = sqlite3.connect(_copy_locked_db(src, workdir))
+            try:
+                rows = bconn.execute(query, (watermark,)).fetchall()
+            finally:
+                bconn.close()
     except (OSError, sqlite3.Error) as e:
+        # the exception text can name a path but never row content; it is not
+        # persisted, only returned as a status string to the caller
         return {"status": f"no access ({e})"}
     skip = load_skip_domains(cfg)
     new = skipped = 0

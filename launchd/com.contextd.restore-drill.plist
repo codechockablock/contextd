@@ -6,8 +6,8 @@
     <string>com.contextd.restore-drill</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/joseph/contextd/.venv/bin/python</string>
-        <string>/Users/joseph/contextd/hooks/restore_drill.py</string>
+        <string>__CONTEXTD_REPO__/.venv/bin/python</string>
+        <string>__CONTEXTD_REPO__/hooks/restore_drill.py</string>
         <string>--once</string>
     </array>
     <key>StartCalendarInterval</key>
@@ -20,8 +20,8 @@
         <integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/joseph/.contextd/restore-drill.log</string>
+    <string>__CONTEXTD_ARCHIVE__/restore-drill.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/joseph/.contextd/restore-drill.log</string>
+    <string>__CONTEXTD_ARCHIVE__/restore-drill.log</string>
 </dict>
 </plist>

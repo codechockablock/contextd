@@ -16,7 +16,7 @@ from .db import ChainStateError, append_event, connect, verify_chain
 from .gate import GateError, assemble, spent_today
 from .ingest import ingest_note, run_all
 from .liveness import capture_liveness, describe, format_age, stale_line
-from .search import search, timeline
+from .search import timeline
 
 CONFIG_TEMPLATE = '''# contextd config — merged over built-in defaults (see contextd/__init__.py)
 
@@ -65,7 +65,10 @@ def cmd_note(args):
     text = " ".join(args.text) if args.text else sys.stdin.read()
     if not text.strip():
         sys.exit("empty note")
-    eid = ingest_note(connect(), text.strip())
+    # A CLI note is `unverified`: invoking the CLI proves nothing about who
+    # invoked it (docs/SECURITY.md §3). `ctx note --authorize` in Mission 3
+    # is the path to an operator-authorized note.
+    eid = ingest_note(connect(), text.strip(), claimed_client="cli")
     print(f"noted as event #{eid}")
 
 
@@ -96,9 +99,23 @@ def cmd_watch(args):
 
 
 def cmd_search(args):
-    for h in search(connect(), " ".join(args.query), limit=args.limit):
-        print(f"[{h['id']}] {h['ts']} {h['source']}/{h['kind']} {h['uri'] or ''}")
-        print(f"    {h['snip']}")
+    """Search the archive through the gate.
+
+    This used to be a raw local FTS read that printed unredacted snippets and
+    logged nothing — an archive-returning path that bypassed the one choke
+    point every other read goes through. It now goes through the service (the
+    daemon in hardened mode, the same gated code path in development), so the
+    result is redacted, budgeted, and receipted like any other disclosure.
+    """
+    from . import service as authority
+    from .rpc import RpcError
+    try:
+        result = authority.search(" ".join(args.query), limit=args.limit,
+                                  client="cli")
+    except RpcError as e:
+        sys.exit(f"refused: {e}")
+    print(result["content"])
+    print(f"\n(disclosed as egress #{result['egress_id']})")
 
 
 def cmd_recall(args):
@@ -194,14 +211,65 @@ def _print_loop_row(lp):
           f"{_scope_label(lp['scope'])}\n    {lp['text']}")
 
 
+def operator_authorization(conn, action: str, scope: str = "global",
+                           arguments: dict | None = None,
+                           content: str | None = None,
+                           reason: str | None = None):
+    """Obtain a verified operator authorization for exactly this act.
+
+    The CLI does not *hold* authority — it asks the authority plane to mint the
+    exact bytes, shows the operator what they are about to approve, hands those
+    bytes to the presence-bound signer, and passes the verified result back.
+    If no production signer is enrolled this refuses: there is deliberately no
+    prompt-only, TTY, or parent-process fallback (docs/SECURITY.md §3).
+    """
+    from .attest import (AttestationError, prepare_action, registered_keys,
+                         sign_with_secure_enclave, verify_action,
+                         SIGNER_SECURE_ENCLAVE, test_mode_authorization)
+    keys = [k for k in registered_keys(conn)
+            if k["signer"] == SIGNER_SECURE_ENCLAVE and not k["revoked"]]
+    if not keys:
+        try:
+            return test_mode_authorization(conn, action, scope, arguments,
+                                           content, reason)
+        except AttestationError as exc:
+            sys.exit(
+                f"refused: {action} is an operator act and no production "
+                f"signer is enrolled.\n"
+                f"  build:    native/build.sh\n"
+                f"  enroll:   native/contextd-signer enroll --key-id default "
+                f"> operator-key.der\n"
+                f"  register: ctx security key register operator-key.der\n"
+                f"({exc})"
+            )
+    key_id = keys[-1]["key_id"]
+    prepared = prepare_action(key_id, action, scope=scope, arguments=arguments,
+                              content=content, reason=reason, conn=conn)
+    print(f"authorize: {prepared['human_summary']}")
+    print(f"  digest {prepared['digest'][:16]}…  (approve on your device)")
+    try:
+        signature = sign_with_secure_enclave(
+            bytes.fromhex(prepared["canonical"]), key_id,
+            summary=prepared["human_summary"],
+        )
+        return verify_action(prepared["action"], signature, conn=conn)
+    except AttestationError as exc:
+        sys.exit(f"refused: {exc}")
+
+
 def cmd_loop(args):
     from .loops import (LoopError, add_loop, loops_for_scope, reduce_loops,
                         transition)
     conn = connect()
     try:
         if args.action == "add":
-            r = add_loop(conn, " ".join(args.text), _loop_scope(args),
-                         client="cli", source_events=args.source_event)
+            from .loops import scope_str
+            text = " ".join(args.text)
+            scope = _loop_scope(args)
+            r = add_loop(conn, text, scope, client="cli",
+                         source_events=args.source_event,
+                         authorization=operator_authorization(
+                             conn, "loop.add", scope_str(scope), content=text))
             lp = r["loop"]
             msg = {"created": "opened",
                    "existing": "already open as",
@@ -227,10 +295,10 @@ def cmd_loop(args):
             if lp is None:
                 sys.exit(f"no loop {args.loop_id}")
             _print_loop_row(lp)
-            print(f"    authority: {lp['created_authority']} "
+            print(f"    assurance: {lp['created_assurance']} "
                   f"(client {lp['created_client'] or '?'})"
-                  + (f"; promoted by {lp['promoted_authority']}"
-                     if lp["promoted_authority"] else ""))
+                  + (f"; promoted with {lp['promoted_assurance']}"
+                     if lp["promoted_assurance"] else ""))
             if lp["source_events"]:
                 print(f"    source events: "
                       f"{', '.join(str(i) for i in lp['source_events'])}")
@@ -242,9 +310,16 @@ def cmd_loop(args):
             return
         op = {"close": "close", "reopen": "reopen",
               "confirm": "confirm", "dismiss": "dismiss"}[args.action]
-        r = transition(conn, _loop_id(args.loop_id), op,
-                       authority="operator", client="cli",
-                       reason=getattr(args, "reason", "") or "")
+        from .loops import scope_str
+        loop_id = _loop_id(args.loop_id)
+        target = reduce_loops(conn)["loops"].get(loop_id)
+        if target is None:
+            sys.exit(f"no loop {args.loop_id}")
+        reason = getattr(args, "reason", "") or ""
+        r = transition(conn, loop_id, op, client="cli", reason=reason,
+                       authorization=operator_authorization(
+                           conn, f"loop.{op}", scope_str(target["scope"]),
+                           arguments={"loop": loop_id}, reason=reason))
         lp = r["loop"]
         if r["result"] == "noop":
             print(f"loop#{lp['id']} already {lp['state']}")
@@ -252,6 +327,87 @@ def cmd_loop(args):
             print(f"loop#{lp['id']} -> {lp['state']}")
     except LoopError as e:
         sys.exit(f"refused: {e}")
+
+
+def cmd_security(args):
+    """Hardening state, key registry, and the authority service."""
+    if args.security_action == "doctor":
+        from .doctor import main as doctor_main
+        argv = []
+        if getattr(args, "strict", False):
+            argv.append("--strict")
+        if getattr(args, "json", False):
+            argv.append("--json")
+        sys.exit(doctor_main(argv))
+    if args.security_action == "serve":
+        from .authd import main as authd_main
+        sys.exit(authd_main(["--socket", args.socket] if args.socket else []))
+    if args.security_action == "migrate":
+        from .migrate import MigrationError, migrate as run_migration
+        conn = connect()
+        try:
+            result = run_migration(conn, dry_run=args.dry_run)
+        except MigrationError as e:
+            sys.exit(f"refused: {e}")
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        elif result["applied"]:
+            print(f"migrated: {result['events']} historical event(s) "
+                  f"unchanged (digest {result['history_digest'][:16]}…)")
+            print(f"cutover:  tip #{result['cutover']['tip_id']} signed — "
+                  f"this records that the service OBSERVED the tip; it does "
+                  f"not authenticate anything before it")
+        else:
+            print(f"dry run: would migrate from schema "
+                  f"{result['from_version']} to {result['to_version']}, "
+                  f"creating {len(result['tables_to_create'])} table(s)")
+            print(f"         {result['events']} historical event(s) would be "
+                  f"left byte-identical")
+        return
+    if args.security_action == "checkpoint":
+        from .ledger_sig import checkpoint_record, verify_checkpoint, write_checkpoint
+        conn = connect()
+        destination = (args.destination
+                       or (load_config().get("security") or {})
+                       .get("checkpoint_destination") or "").strip()
+        if args.write:
+            if not destination:
+                sys.exit("refused: no checkpoint destination configured. Set "
+                         "[security] checkpoint_destination to a path this "
+                         "uid cannot rewrite, or pass --destination.")
+            print(f"wrote {write_checkpoint(conn, destination)}")
+            return
+        if destination and Path(destination).expanduser().exists():
+            record = json.loads(Path(destination).expanduser().read_text())
+            result = verify_checkpoint(conn, record)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            sys.exit(0 if result["ok"] else 1)
+        print(json.dumps(checkpoint_record(conn), indent=2, sort_keys=True))
+        return
+    if args.security_action == "key":
+        from .attest import (SIGNER_SECURE_ENCLAVE, registered_keys,
+                             register_key, revoke_key)
+        conn = connect()
+        if args.key_action == "list":
+            for k in registered_keys(conn):
+                state = f"revoked {k['revoked']}" if k["revoked"] else "active"
+                print(f"{k['key_id'][:16]}…  {k['signer']:22s} {state}")
+            return
+        if args.key_action == "register":
+            data = (sys.stdin.buffer.read() if args.path == "-"
+                    else Path(args.path).read_bytes())
+            # registering a key is itself an operator act
+            operator_authorization(
+                conn, "security.key_register", "global",
+                arguments={"public_der": data.hex()})
+            print(f"registered {register_key(data, SIGNER_SECURE_ENCLAVE, conn=conn)}")
+            return
+        if args.key_action == "revoke":
+            operator_authorization(conn, "security.key_revoke", "global",
+                                   arguments={"key_id": args.key_id})
+            revoke_key(args.key_id, conn=conn)
+            print(f"revoked {args.key_id}")
+            return
 
 
 def cmd_grant(args):
@@ -381,10 +537,14 @@ def cmd_audit(args):
             (r["id"],),
         ).fetchone()
         dispatch = json.loads(outcome["meta"])["status"] if outcome else "attempted"
+        # claimed_client is an unverified self-report, and the raw query is
+        # no longer stored — only its keyed correlation id (docs/SECURITY.md §3)
+        client = meta.get("claimed_client", meta.get("client", "cli"))
+        qid = meta.get("query_id")
         print(f"[{r['id']}] {r['ts']} type={meta.get('type')} "
-              f"client={meta.get('client', 'cli')} "
+              f"claimed_client={client} "
               f"dispatch={dispatch} "
-              f"query={meta.get('query')!r} purpose={meta.get('purpose')!r} "
+              f"query_id={(qid or '-')[:12]} purpose={meta.get('purpose')!r} "
               f"~{meta.get('est_tokens')} tokens, items={meta.get('items')}")
 
 
@@ -756,6 +916,34 @@ def main():
     sp = sub.add_parser("restore", help="verify and restore a backup into an empty home")
     sp.add_argument("bundle", help="backup bundle directory")
     sp.add_argument("dest", help="new or empty destination directory")
+    sp = sub.add_parser("security",
+                        help="hardening state, operator keys, authority service")
+    ssub = sp.add_subparsers(dest="security_action", required=True)
+    sd = ssub.add_parser("doctor", help="report each hardening invariant")
+    sd.add_argument("--strict", action="store_true",
+                    help="exit nonzero unless every invariant holds")
+    sd.add_argument("--json", action="store_true")
+    sv = ssub.add_parser("serve", help="run the authority service (foreground)")
+    sv.add_argument("--socket", default=None)
+    sm = ssub.add_parser("migrate",
+                         help="migrate a pre-hardening archive (append-only)")
+    sm.add_argument("--dry-run", action="store_true",
+                    help="report what would change; change nothing")
+    sm.add_argument("--json", action="store_true")
+    sc = ssub.add_parser("checkpoint",
+                         help="protected rollback checkpoint: print, write, "
+                              "or verify")
+    sc.add_argument("--write", action="store_true",
+                    help="write the checkpoint to the configured destination")
+    sc.add_argument("--destination", default=None)
+    sk = ssub.add_parser("key", help="operator key registry")
+    ksub = sk.add_subparsers(dest="key_action", required=True)
+    ksub.add_parser("list", help="registered operator keys")
+    kr = ksub.add_parser("register", help="register a Secure Enclave public key")
+    kr.add_argument("path", help="DER file, or - for stdin")
+    kv = ksub.add_parser("revoke", help="revoke a registered key")
+    kv.add_argument("key_id")
+
     sub.add_parser("verify", help="recompute the event hash chain; detect rewrites")
     sp = sub.add_parser("why", help="reconstruct a derived event's provenance "
                                     "closure down to leaf evidence (local, unlogged)")
@@ -791,6 +979,7 @@ def main():
      "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
      "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
      "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,
+     "security": cmd_security,
      "serve": cmd_serve}[args.cmd](args)
 
 
