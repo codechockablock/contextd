@@ -53,8 +53,14 @@ ALLOWLIST_PATH = REPO_ROOT / "scripts" / "repository_privacy_allow.json"
 #   /Users/you, /home/user, $HOME, ~        documentation placeholders
 #   /home/sim/…                             the synthetic corpus generator
 #   /srv/demo/…                             synthetic fixture paths
+#   /Users/_name                            a macOS SERVICE account (the
+#                                           leading underscore is the platform
+#                                           convention for them); the daemon
+#                                           runs as one, and naming it in a
+#                                           deployment runbook identifies
+#                                           nobody
 HOME_PATH_RX = re.compile(
-    r"/(?:Users|home)/(?!you\b|USER\b|user\b|sim/)[A-Za-z0-9._-]{2,}"
+    r"/(?:Users|home)/(?!you\b|USER\b|user\b|sim/|_)[A-Za-z0-9._-]{2,}"
 )
 
 # A real session URI is `claude://` + the first 16 hex characters of the
