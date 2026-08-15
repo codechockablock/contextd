@@ -1,0 +1,68 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/ruff *)",
+      "Bash(.venv/bin/pytest*)",
+      "Bash(.venv/bin/python -m pytest*)",
+      "Bash(.venv/bin/python -m ruff *)",
+      "Bash(.venv/bin/python tests/smoke.py*)",
+      "Bash(.venv/bin/pip install -e *)",
+      "Bash(scripts/gates.sh*)",
+      "Bash(.venv/bin/ctx status*)",
+      "Bash(.venv/bin/ctx verify*)",
+      "Bash(.venv/bin/ctx search *)",
+      "Bash(.venv/bin/ctx recall *)",
+      "Bash(.venv/bin/ctx timeline*)",
+      "Bash(.venv/bin/ctx audit*)",
+      "Bash(.venv/bin/ctx why *)",
+      "Bash(.venv/bin/ctx lineage*)",
+      "Bash(.venv/bin/ctx exp *)",
+      "Bash(.venv/bin/ctx loop list*)",
+      "Bash(.venv/bin/ctx loop candidates*)",
+      "Bash(.venv/bin/ctx grant list*)",
+      "Bash(.venv/bin/ctx checkpoint*)",
+      "Bash(.venv/bin/ctx backup*)",
+      "Bash(.venv/bin/ctx ingest*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show *)",
+      "Bash(git branch*)",
+      "Bash(git worktree list*)",
+      "Bash(git remote -v)",
+      "Bash(git merge-base *)"
+    ],
+    "ask": [
+      "Bash(.venv/bin/ctx note*)",
+      "Bash(.venv/bin/ctx loop add*)",
+      "Bash(.venv/bin/ctx loop close*)",
+      "Bash(.venv/bin/ctx loop reopen*)",
+      "Bash(.venv/bin/ctx loop confirm*)",
+      "Bash(.venv/bin/ctx loop dismiss*)",
+      "Bash(.venv/bin/ctx grant add*)",
+      "Bash(.venv/bin/ctx grant revoke*)",
+      "Bash(.venv/bin/ctx decision *)",
+      "Bash(.venv/bin/ctx outcome*)",
+      "Bash(.venv/bin/ctx restore*)",
+      "Bash(.venv/bin/ctx init*)",
+      "Bash(.venv/bin/ctx security *)",
+      "Bash(.venv/bin/python hooks/*)",
+      "Bash(.venv/bin/python experiments/*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) out=$(.venv/bin/ruff check --no-cache \"$f\" 2>&1) || { printf '%s\\n' \"$out\" >&2; exit 2; } ;; esac; exit 0",
+            "timeout": 30,
+            "statusMessage": "ruff gate"
+          }
+        ]
+      }
+    ]
+  }
+}

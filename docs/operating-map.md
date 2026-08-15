@@ -21,6 +21,21 @@ handoff, done), not as a journal.
   (only once watch_dirs configured), safari and note deliberately
   unthresholded — thresholds flag pipeline death, not operator behavior.
 
+- 2026-08-15 — Live archive migrated to schema 2 (cutover tip #44150, 44150
+  events byte-identical). Reconciler revived: hardening had closed the meta
+  registry without declaring `("claude_code","reconcile")` — every run
+  dispatched, then crashed appending its marker (fix + regression test on
+  master). Dev harness automated: repo `.claude/settings.json` (gate
+  allowlist; operator speech acts kept behind `ask` — see
+  docs/GRANTS-r2-proposal.md R2.5; live-verified ruff PostToolUse hook),
+  `scripts/gates.sh` (CI-mirroring battery, network surface pinned by
+  `tests/network_surface.txt`), restore-drill + lineage-audit launchd agents
+  instantiated and loaded (calibration read AUDIT EARNED), first `.ctxbackup`
+  bundle created and drill-verified PASS (#44177). Known operator-only items:
+  Secure Enclave signer not enrolled (all operator CLI acts refuse since
+  hardening — enrollment steps in GRANTS-r2-proposal.md), Safari FDA missing,
+  grant-calibration field window not started (tally at 0/20, 0/10).
+
 ## Lanes
 
 ### operator-trial
@@ -28,10 +43,11 @@ handoff, done), not as a journal.
   ~5 real working sessions, honest window-end confession list, verdict earned
   or not by the frozen bars.
 - **Owning session:** the operator (manual; no agent lane)
-- **State:** handoff — protocol frozen, awaiting operator start
-- **Blockers:** — (instruments merge recommended first so staleness can't be
-  misread as compilation failure)
-- **Last update:** 2026-08-13 — pending
+- **State:** RUNNING — window open since 2026-08-13 (archive marker #42453);
+  this entry previously said "awaiting operator start" and was stale, caught
+  by loop candidate #42915
+- **Blockers:** —
+- **Last update:** 2026-08-15 — map reconciled to the archive marker
 
 ## Done
 
