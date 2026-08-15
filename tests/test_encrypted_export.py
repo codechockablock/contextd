@@ -391,6 +391,56 @@ def test_export_succeeds_when_the_configured_recipient_is_the_signed_one(
     assert recovered.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 4
 
 
+def test_a_passphrase_wrapped_identity_opens_an_export(tmp_path, monkeypatch):
+    """Recovery keys are meant to be stored wrapped, so the tool must read one.
+
+    The storage advice in docs/DEPLOYMENT.md §7 is to keep the private key
+    passphrase-wrapped, which is what makes it safe to hold somewhere
+    convenient. If `export-open` only accepted bare keys, following that advice
+    would produce an export nothing could open -- discovered during a recovery,
+    which is the worst possible time.
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    from contextd.cli import _load_identity
+
+    private = X25519PrivateKey.generate()
+    public = private.public_key().public_bytes(_ENC.PEM, _PF.SubjectPublicKeyInfo)
+    wrapped = private.private_bytes(
+        _ENC.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(b"correct horse"),
+    )
+    path = tmp_path / "wrapped.key"
+    path.write_bytes(wrapped)
+
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: "correct horse")
+    identity = _load_identity(path)
+
+    result = create_sealed_export(_archive_with(2), home(), tmp_path / "out",
+                                  recipient_key=public)
+    opened = open_sealed_export(Path(result["export"]).read_bytes(), identity,
+                                tmp_path / "rec")
+    assert opened["manifest_sha256"] == result["manifest_sha256"]
+
+
+def test_a_wrong_passphrase_is_a_clean_refusal(tmp_path, monkeypatch):
+    from cryptography.hazmat.primitives import serialization
+
+    from contextd.cli import _load_identity
+
+    private = X25519PrivateKey.generate()
+    path = tmp_path / "wrapped.key"
+    path.write_bytes(private.private_bytes(
+        _ENC.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(b"correct horse"),
+    ))
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: "wrong horse")
+    with pytest.raises(SystemExit) as caught:
+        _load_identity(path)
+    assert "wrong passphrase" in str(caught.value)
+
+
 def test_export_refuses_a_group_readable_recipient_file(
     short_dir, tmp_path, monkeypatch
 ):
