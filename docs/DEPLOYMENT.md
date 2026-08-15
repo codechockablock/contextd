@@ -24,11 +24,16 @@ cd /path/to/contextd
 .venv/bin/python tests/smoke.py
 ```
 
-All three must exit 0. Then confirm the tracked tree is clean:
+All three must exit 0. Then confirm the working tree is clean:
 
 ```bash
-.venv/bin/python scripts/audit_repository_privacy.py --tracked --fail-on-findings --redact-output
+.venv/bin/python scripts/audit_repository_privacy.py --worktree --fail-on-findings --redact-output
 ```
+
+`--worktree` covers tracked files *and* untracked files that are not ignored,
+so a file you wrote but have not `git add`ed yet is still scanned. Its verdict
+prints the file count it covered. (`--tracked` is the former spelling of this
+flag and does the same thing; it no longer means "tracked files only".)
 
 ## 1. Render local deployment files
 

@@ -42,7 +42,7 @@ tested (`tests/test_repository_privacy.py::test_scanner_output_contains_no_match
 
 ```
 .venv/bin/python scripts/audit_repository_privacy.py \
-  --tracked --fail-on-findings --redact-output
+  --worktree --fail-on-findings --redact-output
 ```
 
 Exits **0**. Current approvals are synthetic fixtures only. An approval is not

@@ -1,7 +1,8 @@
 {
   "version": 2,
   "_doc": [
-    "Exact synthetic approvals: class, one-way fingerprint, line, and count. Any changed, relocated, added, or missing match fails."
+    "Exact synthetic approvals: class, one-way fingerprint, line, and count. Any changed, relocated, added, or missing match fails.",
+    "The 'tracked' section key is the on-disk format name and predates the coverage fix; it keys every path the --worktree gate scans, which includes untracked files that are not ignored."
   ],
   "tracked": {
     "tests/smoke.py": {
@@ -302,31 +303,31 @@
         },
         {
           "class": "credential",
-          "line": 318,
+          "line": 421,
           "sha256": "3ef5662dbee92e137cc189f86b2ae3b193e62be84bd9f8f7d2731cb1e5df2313",
           "count": 1
         },
         {
           "class": "credential",
-          "line": 319,
+          "line": 422,
           "sha256": "eca3ccad47b041274d4b2ca951a6b13120705fb755d42ba8633175140edf2ab4",
           "count": 1
         },
         {
           "class": "credential",
-          "line": 320,
+          "line": 423,
           "sha256": "01a54629efb952287e554eb23ef69c52097a75aecc0e3a93ca0855ab6d7a31a0",
           "count": 1
         },
         {
           "class": "credential",
-          "line": 320,
+          "line": 423,
           "sha256": "6a7e0e79b018d08c9d1bb20be79999a7778399f7ee17258b3a0d36d4b4a7bec5",
           "count": 1
         },
         {
           "class": "credential",
-          "line": 322,
+          "line": 425,
           "sha256": "9a3618bf7623c13744b6aabccbe0ac2b820aa0d017b820ffde489ddc123dfabc",
           "count": 1
         },

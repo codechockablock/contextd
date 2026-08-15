@@ -53,7 +53,7 @@ Do not proceed until every line is true.
 
 - [ ] Credential triage complete, nothing requiring rotation — **done**, see
       `scripts/triage_history_credentials.py` (exit 0).
-- [ ] Tracked tree clean — **done**, `--tracked --fail-on-findings` exits 0.
+- [ ] Working tree clean — **done**, `--worktree --fail-on-findings` exits 0.
 - [ ] You accept that **removal does not un-publish.** These blobs have been on
       the remote for some time. Any existing clone, fork, or mirror keeps them,
       and GitHub may retain unreachable objects until it garbage-collects.
@@ -200,7 +200,7 @@ check that the blob ids still exist (Step 0's list may be stale).
 .venv/bin/ruff check .
 .venv/bin/python -m pytest -q
 .venv/bin/python tests/smoke.py
-.venv/bin/python scripts/audit_repository_privacy.py --tracked --fail-on-findings --redact-output
+.venv/bin/python scripts/audit_repository_privacy.py --worktree --fail-on-findings --redact-output
 
 # 4. HEAD content is byte-identical to before — a substitution rewrite must not
 #    change the current tree at all

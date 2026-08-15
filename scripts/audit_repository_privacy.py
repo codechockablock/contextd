@@ -3,8 +3,14 @@
 
 Two surfaces, deliberately separate:
 
-    --tracked   the current working tree, as tracked by git. This is the gate
-                that must stay clean: it is what a `git push` publishes today.
+    --worktree  every file this repository is about to publish: tracked
+                content *plus* untracked content that is not ignored. This is
+                the gate that must stay clean. It deliberately covers files
+                that have never been `git add`ed, because a scan limited to
+                the tracked set reports "clean" for a file the author wrote
+                thirty seconds ago — which is how two unscanned files reached
+                commits here. Ignored paths stay out; git will not publish
+                them. `--tracked` is the former spelling and still works.
     --history   every blob reachable from any ref. Findings here cannot be
                 fixed without rewriting published history, which is a separate,
                 operator-authorized decision (docs/REPOSITORY_HISTORY_REMEDIATION.md).
@@ -349,14 +355,54 @@ def _approved_counts(occurrences, entry: dict) -> tuple[dict[str, int], int]:
     return counts, missing
 
 
-def scan_tracked(owners: set[str], outstanding: list | None = None) -> list[dict]:
+def _worktree_entries() -> tuple[list[str], list[str], list[str]]:
+    """Every path that is, or is about to be, part of this repository.
+
+    Returns (tracked, untracked_not_ignored, undescended_directories).
+
+    Two listings, because either alone leaves a hole:
+
+        ls-files                    what a push publishes today.
+        ls-files --others           what the next `git add` sweeps in. A file
+                --exclude-standard  written but not yet staged is absent from
+                                    the first listing, so a scan built on it
+                                    alone reports "clean" over unread bytes.
+
+    Ignored paths are excluded — they are the one category git will not
+    publish. git will not descend into an untracked *nested repository*; it
+    emits a single directory entry for it instead. Those are returned
+    separately so the caller can report them rather than skip them.
+    """
+    tracked, untracked, directories = [], [], []
+    for args, sink in (
+        (("ls-files", "-z"), tracked),
+        (("ls-files", "--others", "--exclude-standard", "-z"), untracked),
+    ):
+        for name in _git(*args).split("\0"):
+            if not name:
+                continue
+            (directories if name.endswith("/") else sink).append(name)
+    return sorted(tracked), sorted(untracked), sorted(set(directories))
+
+
+def scan_worktree(
+    owners: set[str],
+    outstanding: list | None = None,
+    coverage: dict | None = None,
+) -> list[dict]:
     findings = []
     outstanding = outstanding if outstanding is not None else []
     allow = _load_allowlist().get("tracked", {})
+    tracked, untracked, directories = _worktree_entries()
+    if coverage is not None:
+        # A clean result is only worth reading next to what it covered.
+        coverage.update(
+            tracked=len(tracked),
+            untracked_not_ignored=len(untracked),
+            undescended_directories=len(directories),
+        )
     scanned = set()
-    for name in _git("ls-files", "-z").split("\0"):
-        if not name:
-            continue
+    for name in sorted(set(tracked) | set(untracked)):
         scanned.add(name)
         location = _safe_location(name, owners)
         path = REPO_ROOT / name
@@ -407,6 +453,16 @@ def scan_tracked(owners: set[str], outstanding: list | None = None) -> list[dict
                         "count": n,
                     }
                 )
+    for name in directories:
+        # An untracked nested repository. Its contents are unreachable from
+        # here, so the honest report is "not scanned" — never a silent skip.
+        findings.append(
+            {
+                "class": "unscanned_directory",
+                "location": _safe_location(name, owners),
+                "count": 1,
+            }
+        )
     for name in sorted(set(allow) - scanned):
         findings.append(
             {
@@ -575,8 +631,10 @@ def _summarize(findings: list[dict]) -> dict[str, int]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tracked", action="store_true",
-                    help="scan the tracked working tree (the publish gate)")
+    ap.add_argument("--worktree", "--tracked", action="store_true",
+                    dest="worktree",
+                    help="scan every publishable file — tracked, plus "
+                         "untracked and not ignored (the publish gate)")
     ap.add_argument("--history", action="store_true",
                     help="scan every blob reachable from any ref")
     ap.add_argument("--fail-on-findings", action="store_true",
@@ -600,29 +658,43 @@ def main() -> int:
         ):
             print(cls)
         return 0
-    if not (args.tracked or args.history):
-        ap.error("choose --tracked and/or --history")
+    if not (args.worktree or args.history):
+        ap.error("choose --worktree and/or --history")
 
     try:
         owners = private_owners()
         outstanding: list = []
-        result = {"tracked_findings": [], "legacy_findings": [],
+        coverage: dict = {}
+        result = {"worktree_findings": [], "legacy_findings": [],
                   "outstanding_approved": outstanding,
+                  "worktree_coverage": coverage,
                   "owners_checked": len(owners)}
-        if args.tracked:
-            result["tracked_findings"] = scan_tracked(owners, outstanding)
+        if args.worktree:
+            result["worktree_findings"] = scan_worktree(
+                owners, outstanding, coverage
+            )
         if args.history:
             result["legacy_findings"] = scan_history(owners)
     except (RuntimeError, OSError, ValueError, json.JSONDecodeError):
         print("repository scan failed", file=sys.stderr)
         return 2
-    result["tracked_summary"] = _summarize(result["tracked_findings"])
+    result["worktree_summary"] = _summarize(result["worktree_findings"])
     result["legacy_summary"] = _summarize(result["legacy_findings"])
 
-    for label, key in (("tracked", "tracked_findings"), ("legacy_history", "legacy_findings")):
+    # Every worktree verdict — clean or not — states what it covered, so
+    # "clean" can never again mean "clean over the files I happened to read".
+    scope = (
+        f" [{coverage.get('tracked', 0)} tracked + "
+        f"{coverage.get('untracked_not_ignored', 0)} untracked-not-ignored "
+        f"file(s) scanned]"
+    )
+    for label, key, selected, note in (
+        ("worktree", "worktree_findings", args.worktree, scope),
+        ("legacy_history", "legacy_findings", args.history, ""),
+    ):
         findings = result[key]
-        if not findings and (args.tracked if label == "tracked" else args.history):
-            print(f"{label}: clean (0 findings)")
+        if not findings and selected:
+            print(f"{label}: clean (0 findings){note}")
             continue
         for f in findings:
             where = f["location"] + (f" @{f['object']}" if "object" in f else "")
@@ -632,7 +704,7 @@ def main() -> int:
             summary = ", ".join(
                 f"{c}={n}" for c, n in sorted(_summarize(findings).items())
             )
-            print(f"{label}: {len(findings)} finding(s) — {summary}")
+            print(f"{label}: {len(findings)} finding(s) — {summary}{note}")
 
     if outstanding:
         print()
@@ -649,7 +721,7 @@ def main() -> int:
             return 2
         print("report written")
 
-    if args.fail_on_findings and result["tracked_findings"]:
+    if args.fail_on_findings and result["worktree_findings"]:
         return 1
     return 0
 

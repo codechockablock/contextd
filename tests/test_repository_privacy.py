@@ -168,8 +168,111 @@ def test_report_refuses_symlink_destination(tmp_path):
 
 def test_tracked_tree_passes_the_gate():
     """The publish gate: exit 0 with no unapproved findings."""
-    result = _run("--tracked", "--fail-on-findings", "--redact-output")
+    result = _run("--worktree", "--fail-on-findings", "--redact-output")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _throwaway_repo(tmp_path, monkeypatch):
+    """A git repo the scanner treats as its own root, with no allowlist.
+
+    Pointing ALLOWLIST_PATH at a file that does not exist is load-bearing:
+    otherwise this repository's own approvals would be consulted for the
+    planted findings below, and an approval is the one thing these tests must
+    not have. The baseline content is staged but not committed, which is the
+    state an author is actually in when they run the gate.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "clean.txt").write_text("nothing private here")
+    subprocess.run(["git", "add", "clean.txt"], cwd=repo, check=True)
+    monkeypatch.setattr(privacy_scanner, "REPO_ROOT", repo)
+    monkeypatch.setattr(privacy_scanner, "ALLOWLIST_PATH", tmp_path / "absent.json")
+    return repo
+
+
+def test_untracked_file_is_scanned_and_fails_the_gate(
+    tmp_path, monkeypatch, capsys
+):
+    """The blind spot that put two unscanned files into this repository.
+
+    An author writes a file, runs the gate, is told "clean", and ships — the
+    scan enumerated what git already tracked, and a file written thirty
+    seconds ago is not that. The gate has to fail on it BEFORE it is staged,
+    because that is when the author asks.
+    """
+    repo = _throwaway_repo(tmp_path, monkeypatch)
+
+    # Baseline: the same repo without the new file is clean, so the failure
+    # below is attributable to that file and not to ambient noise.
+    assert privacy_scanner.scan_worktree(set()) == []
+
+    planted = repo / "tests" / "test_new_thing.py"
+    planted.parent.mkdir()
+    planted.write_text(POSITIVES["credential"] + "\n")
+    listed = subprocess.run(
+        ["git", "ls-files"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert "test_new_thing.py" not in listed, "fixture is staged; gap not exercised"
+
+    findings = privacy_scanner.scan_worktree(set())
+    assert [
+        f for f in findings
+        if f["class"] == "credential" and f["location"] == "tests/test_new_thing.py"
+    ], findings
+
+    for flag in ("--worktree", "--tracked"):
+        # the former spelling must not keep the old coverage
+        monkeypatch.setattr(
+            sys, "argv", ["audit", flag, "--fail-on-findings", "--redact-output"]
+        )
+        assert privacy_scanner.main() == 1, flag
+        printed = capsys.readouterr().out
+        assert "tests/test_new_thing.py" in printed
+        assert POSITIVES["credential"] not in printed
+
+
+def test_ignored_paths_stay_out_of_the_gate(tmp_path, monkeypatch):
+    """Coverage grows to everything git will publish and stops there. An
+    ignored tree is not publishable, and pulling it in would bury the gate
+    under a virtualenv."""
+    repo = _throwaway_repo(tmp_path, monkeypatch)
+    (repo / ".gitignore").write_text("junk/\n")
+    (repo / "junk").mkdir()
+    (repo / "junk" / "local.txt").write_text(POSITIVES["credential"] + "\n")
+
+    assert privacy_scanner.scan_worktree(set()) == []
+
+
+def test_undescended_directory_is_reported_not_skipped(tmp_path, monkeypatch):
+    """git refuses to descend into an untracked nested repository and lists the
+    directory instead. Reading nothing from it and reporting nothing is the
+    same failure in a different shape, so the gate names it."""
+    repo = _throwaway_repo(tmp_path, monkeypatch)
+    nested = repo / "vendored"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=nested, check=True)
+    (nested / "inner.txt").write_text(POSITIVES["credential"] + "\n")
+
+    findings = privacy_scanner.scan_worktree(set())
+    assert {
+        "class": "unscanned_directory", "location": "vendored/", "count": 1
+    } in findings
+
+
+def test_clean_verdict_states_what_it_covered(tmp_path, monkeypatch, capsys):
+    """A bare "clean" is what made the blind spot survivable. Every verdict
+    carries its own coverage count now."""
+    repo = _throwaway_repo(tmp_path, monkeypatch)
+    (repo / "note.md").write_text("untracked and harmless")
+
+    coverage: dict = {}
+    assert privacy_scanner.scan_worktree(set(), None, coverage) == []
+    assert coverage["tracked"] == 1 and coverage["untracked_not_ignored"] == 1
+
+    monkeypatch.setattr(sys, "argv", ["audit", "--worktree", "--redact-output"])
+    assert privacy_scanner.main() == 0
+    assert "1 tracked + 1 untracked-not-ignored" in capsys.readouterr().out
 
 
 def test_outstanding_findings_stay_visible():
