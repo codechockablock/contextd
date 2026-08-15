@@ -11,18 +11,31 @@
 //
 // Properties this file is responsible for, per docs/adr/0001:
 //
-//   * The key is generated with kSecAttrTokenIDSecureEnclave, so the private
-//     key material never exists outside the Enclave and cannot be exported —
-//     not by this process, not by anything running as the same UID.
+//   * The key is generated inside the Secure Enclave via CryptoKit
+//     (SecureEnclave.P256). The private key material never exists outside the
+//     Enclave and cannot be exported — not by this process, not by anything
+//     running as the same UID. What this process holds is the key's
+//     dataRepresentation: an Enclave-wrapped handle, ciphertext that only
+//     THIS device's Enclave can use, stored 0600 under the operator's
+//     Application Support. (The keychain-item storage this file first
+//     shipped with requires keychain entitlements an ad-hoc binary cannot
+//     carry — SecKeyCreateRandomKey fails with errSecMissingEntitlement
+//     -34018 — and an entitlement-less keychain item would have been
+//     same-UID readable anyway, so the handle file gives up nothing the
+//     keychain route actually provided. The gate that matters is presence,
+//     enforced by the Enclave itself, below.)
 //   * The access control is .biometryCurrentSet OR .devicePasscode with
 //     .privateKeyUsage, so EVERY signature needs an allowed presence gesture.
 //     `LAContext` is created per invocation with reuse duration zero, which is
 //     what makes "fresh" true rather than "once per session".
-//   * Cancelling the prompt returns errSecUserCanceled; this helper exits
+//   * Cancelling the prompt makes the signature throw; this helper exits
 //     nonzero and writes nothing to stdout, so the caller appends nothing.
 //   * It signs the bytes it is handed. It does not parse, interpret, or
 //     reformat them — the payload is opaque here on purpose, because the
 //     authority plane already decided exactly what would be signed.
+//   * enroll refuses to overwrite an existing key id: replacing an enrolled
+//     identity is `security key revoke` plus a fresh enrollment, never a
+//     silent file clobber.
 //
 // Build:  native/build.sh          (requires Xcode command line tools)
 // This helper is NOT installed or enrolled by the build; both are operator
@@ -34,6 +47,7 @@ import LocalAuthentication
 import Security
 
 let keyLabelPrefix = "com.contextd.operator."
+let keyFileSuffix = ".sekey"
 let actionDomain = Data("contextd.OperatorActionV1\n".utf8)
 let signerRequestDomain = Data("contextd.SignerRequestV1\n".utf8)
 
@@ -67,54 +81,87 @@ func freshContext(_ reason: String) -> LAContext {
     return context
 }
 
+/// The Enclave-wrapped key handles live here, one file per key id, in a
+/// directory only this user can enter. The handles are device-bound
+/// ciphertext; the directory modes are hygiene, not the security boundary.
+func keyDirectory() -> URL {
+    let base = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+    ).first!
+    let dir = base.appendingPathComponent("contextd-signer", isDirectory: true)
+    do {
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // idempotent tighten: createDirectory attributes only apply on create
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: dir.path
+        )
+    } catch {
+        fail("cannot prepare key directory \(dir.path): \(error)")
+    }
+    return dir
+}
+
+func keyFile(tag: String) -> URL {
+    keyDirectory().appendingPathComponent(keyLabelPrefix + tag + keyFileSuffix)
+}
+
 func enroll(tag: String) {
-    let attributes: [String: Any] = [
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrKeySizeInBits as String: 256,
-        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecPrivateKeyAttrs as String: [
-            kSecAttrIsPermanent as String: true,
-            kSecAttrApplicationTag as String: Data((keyLabelPrefix + tag).utf8),
-            kSecAttrAccessControl as String: accessControl(),
-        ],
-    ]
-    var error: Unmanaged<CFError>?
-    guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
-        fail("key generation failed: \(error!.takeRetainedValue())")
+    guard SecureEnclave.isAvailable else {
+        fail("this device has no Secure Enclave; there is no software fallback")
     }
-    guard let publicKey = SecKeyCopyPublicKey(privateKey),
-          let external = SecKeyCopyExternalRepresentation(publicKey, &error) as Data?
-    else {
-        fail("cannot export public key: \(error?.takeRetainedValue().localizedDescription ?? "unknown")")
+    let file = keyFile(tag: tag)
+    if FileManager.default.fileExists(atPath: file.path) {
+        fail(
+            "a Secure Enclave key for tag \(tag) already exists; revoke and "
+            + "remove it deliberately before enrolling a replacement",
+            code: 5
+        )
     }
-    // SecKeyCopyExternalRepresentation returns the raw X9.63 point (0x04 || X || Y).
-    // Wrap it in a SubjectPublicKeyInfo so the registry stores a standard DER
-    // key: the prefix below is the fixed ecPublicKey/prime256v1 header.
+    let key: SecureEnclave.P256.Signing.PrivateKey
+    do {
+        key = try SecureEnclave.P256.Signing.PrivateKey(
+            accessControl: accessControl()
+        )
+    } catch {
+        fail("key generation failed: \(error)")
+    }
+    do {
+        try key.dataRepresentation.write(to: file, options: [.atomic])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: file.path
+        )
+    } catch {
+        try? FileManager.default.removeItem(at: file)
+        fail("cannot store the wrapped key handle at \(file.path): \(error)")
+    }
+    // CryptoKit exposes the raw X9.63 point (0x04 || X || Y). Wrap it in a
+    // SubjectPublicKeyInfo so the registry stores a standard DER key: the
+    // prefix below is the fixed ecPublicKey/prime256v1 header.
     let spkiHeader: [UInt8] = [
         0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d,
         0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01,
         0x07, 0x03, 0x42, 0x00,
     ]
     var der = Data(spkiHeader)
-    der.append(external)
+    der.append(key.publicKey.x963Representation)
     FileHandle.standardOutput.write(der)
 }
 
-func findKey(tag: String, context: LAContext) -> SecKey {
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassKey,
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrApplicationTag as String: Data((keyLabelPrefix + tag).utf8),
-        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecReturnRef as String: true,
-        kSecUseAuthenticationContext as String: context,
-    ]
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    guard status == errSecSuccess, let key = item else {
-        fail("no Secure Enclave key for tag \(tag) (OSStatus \(status))", code: 3)
+func loadKey(tag: String, context: LAContext) -> SecureEnclave.P256.Signing.PrivateKey {
+    let file = keyFile(tag: tag)
+    guard let blob = try? Data(contentsOf: file) else {
+        fail("no Secure Enclave key for tag \(tag) (expected \(file.path))", code: 3)
     }
-    return (key as! SecKey)
+    do {
+        return try SecureEnclave.P256.Signing.PrivateKey(
+            dataRepresentation: blob, authenticationContext: context
+        )
+    } catch {
+        fail("cannot load Secure Enclave key for tag \(tag): \(error)", code: 3)
+    }
 }
 
 enum CanonicalValue {
@@ -317,42 +364,38 @@ func sign(tag: String) {
 
     let reason = trustedSummary(message, content: content, reason: displayReason)
     let context = freshContext(reason)
-    let key = findKey(tag: tag, context: context)
+    let key = loadKey(tag: tag, context: context)
 
-    var error: Unmanaged<CFError>?
-    guard let signature = SecKeyCreateSignature(
-        key,
-        .ecdsaSignatureMessageX962SHA256,   // hashes the message itself
-        message as CFData,
-        &error
-    ) as Data? else {
-        let err = error!.takeRetainedValue()
-        // errSecUserCanceled (-128) is the ordinary "operator said no" path.
-        fail("signature refused or cancelled: \(err)", code: 4)
+    // SHA-256 of the message, signed inside the Enclave: byte-identical to
+    // the SecKey .ecdsaSignatureMessageX962SHA256 signatures this helper
+    // produced before, and verified the same way by the registry.
+    let signature: P256.Signing.ECDSASignature
+    do {
+        signature = try key.signature(for: SHA256.hash(data: message))
+    } catch {
+        // The operator cancelling the presence prompt lands here; that is the
+        // ordinary "operator said no" path.
+        fail("signature refused or cancelled: \(error)", code: 4)
     }
-    FileHandle.standardOutput.write(signature)
+    FileHandle.standardOutput.write(signature.derRepresentation)
 }
 
 func list() {
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassKey,
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecReturnAttributes as String: true,
-        kSecMatchLimit as String: kSecMatchLimitAll,
-    ]
-    var item: CFTypeRef?
-    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-          let entries = item as? [[String: Any]] else {
+    let contents = (try? FileManager.default.contentsOfDirectory(
+        at: keyDirectory(), includingPropertiesForKeys: nil
+    )) ?? []
+    let tags = contents.compactMap { url -> String? in
+        let name = url.lastPathComponent
+        guard name.hasPrefix(keyLabelPrefix), name.hasSuffix(keyFileSuffix)
+        else { return nil }
+        return String(name.dropFirst(keyLabelPrefix.count)
+                          .dropLast(keyFileSuffix.count))
+    }.sorted()
+    if tags.isEmpty {
         print("(no Secure Enclave keys)")
         return
     }
-    for entry in entries {
-        guard let tagData = entry[kSecAttrApplicationTag as String] as? Data,
-              let tag = String(data: tagData, encoding: .utf8),
-              tag.hasPrefix(keyLabelPrefix) else { continue }
-        print(String(tag.dropFirst(keyLabelPrefix.count)))
-    }
+    for tag in tags { print(tag) }
 }
 
 // --- argument handling ------------------------------------------------------

@@ -480,15 +480,28 @@ def cmd_security(args):
             data = (sys.stdin.buffer.read() if args.path == "-"
                     else Path(args.path).read_bytes())
             try:
-                with service_context():
+                if args.development:
+                    # the development boundary must not claim authority-plane
+                    # status; it runs as the plain desktop operator
                     conn = connect()
                     try:
                         key_id = bootstrap_key(
                             data, args.signer_tag, conn=conn,
                             acknowledge_first_key=args.acknowledge_first_key_bootstrap,
+                            development=True,
                         )
                     finally:
                         conn.close()
+                else:
+                    with service_context():
+                        conn = connect()
+                        try:
+                            key_id = bootstrap_key(
+                                data, args.signer_tag, conn=conn,
+                                acknowledge_first_key=args.acknowledge_first_key_bootstrap,
+                            )
+                        finally:
+                            conn.close()
             except Exception as exc:  # boundary failures are operator-facing
                 sys.exit(f"refused: {exc}")
             print(f"bootstrapped {key_id}")
@@ -1263,13 +1276,17 @@ def main():
     ksub.add_parser("list", help="registered operator keys")
     kb = ksub.add_parser(
         "bootstrap",
-        help="out-of-band first key enrollment (must run as _contextd)",
+        help="out-of-band first key enrollment (as _contextd; or "
+             "--development on a development archive)",
     )
     kb.add_argument("path", help="DER file, or - for stdin")
     kb.add_argument("--signer-tag", required=True,
                     help="Secure Enclave application tag used at enrollment")
     kb.add_argument("--acknowledge-first-key-bootstrap", action="store_true",
                     help="acknowledge this one-time service-admin ceremony")
+    kb.add_argument("--development", action="store_true",
+                    help="development-mode first key: operator's own uid "
+                         "boundary; refused on a hardened archive")
     kr = ksub.add_parser("register", help="register a Secure Enclave public key")
     kr.add_argument("path", help="DER file, or - for stdin")
     kr.add_argument("--signer-tag", required=True,

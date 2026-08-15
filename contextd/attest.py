@@ -318,13 +318,62 @@ def _assert_bootstrap_boundary(conn: sqlite3.Connection) -> None:
             )
 
 
+def _assert_development_bootstrap_boundary(conn: sqlite3.Connection) -> None:
+    """The development-mode first-key boundary: the operator's own uid.
+
+    Development mode has no ``_contextd`` service account, so the hardened
+    out-of-band ceremony cannot run — and without a first key every operator
+    act refuses, which would leave a development archive permanently keyless.
+    This boundary accepts the strongest claim development mode can actually
+    check: the archive belongs to the invoking uid, its modes are private,
+    and no key has ever existed (enforced by the caller's registry-empty
+    check). It deliberately does not mark the thread as the authority plane,
+    and it refuses outright under hardened mode, where the ``_contextd``
+    ceremony remains the only path. What a development bootstrap cannot rule
+    out — same-uid code enrolling the first key before the operator does —
+    is development mode's documented trust model (attribution, not
+    authentication); enrolling promptly closes the window forever.
+    """
+    from .authd import hardened
+
+    if hardened():
+        raise AttestationError(
+            "this archive is configured hardened: bootstrap its first key as "
+            "the _contextd service account, never with --development"
+        )
+    uid = os.geteuid()
+    root = home().resolve()
+    db_path = root / "contextd.db"
+    for path, allow_group_read in ((root, True), (db_path, False)):
+        try:
+            info = path.stat()
+        except OSError as exc:
+            raise AttestationError(
+                f"development bootstrap boundary is missing {path.name}"
+            ) from exc
+        if info.st_uid != uid:
+            raise AttestationError(
+                f"{path.name} is not owned by the invoking user"
+            )
+        forbidden = 0o022 if allow_group_read else 0o077
+        if info.st_mode & forbidden:
+            raise AttestationError(
+                f"{path.name} permissions are too broad for first-key bootstrap"
+            )
+
+
 def bootstrap_key(public_der: bytes, signer_tag: str, conn=None, *,
-                  acknowledge_first_key: bool = False) -> str:
+                  acknowledge_first_key: bool = False,
+                  development: bool = False) -> str:
     """Enroll the first key only across the service-admin filesystem boundary.
 
     This function is deliberately not an RPC handler. The ceremony is:
     enroll the Secure Enclave key as the desktop operator, transfer only its
     public DER, then run ``ctx security key bootstrap`` as ``_contextd``.
+    In development mode (no service account exists) the ``development`` flag
+    substitutes the operator's-own-uid boundary — see
+    ``_assert_development_bootstrap_boundary`` for exactly what that does and
+    does not promise.
     """
     if not acknowledge_first_key:
         raise AttestationError(
@@ -333,7 +382,10 @@ def bootstrap_key(public_der: bytes, signer_tag: str, conn=None, *,
     own = conn is None
     conn = conn or state()
     try:
-        _assert_bootstrap_boundary(conn)
+        if development:
+            _assert_development_bootstrap_boundary(conn)
+        else:
+            _assert_bootstrap_boundary(conn)
         if conn.in_transaction:
             conn.commit()
         conn.execute("BEGIN IMMEDIATE")
