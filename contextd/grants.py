@@ -31,7 +31,11 @@ and assurance ``model_granted`` — it never becomes operator-signed.
 import json
 from datetime import datetime, timedelta, timezone
 
-from .assurance import MODEL_GRANTED, assurance_of, refuse_forged_authority
+from .assurance import (
+    MODEL_GRANTED,
+    assurance_for_event,
+    refuse_forged_authority,
+)
 from .attest import AttestationError, authorized_append, test_mode_authorization
 from .canonical import canonical_digest
 from .db import append_event_checked, now_iso
@@ -172,10 +176,10 @@ def add_grant(conn, cls: str, scope: dict, expires: str | None = None,
     # is prepared with the same content the append passes
     body = reason.strip() or None
     authorization = _authorize(conn, authorization, "grant.add", canonical,
-                               arguments=arguments, content=body, reason=reason)
+                               arguments=arguments, content=body, reason=body)
     eid = authorized_append(
         conn, "grant", "grant", authorization, "grant.add", canonical,
-        arguments=arguments, content=body, reason=reason,
+        arguments=arguments, content=body, reason=body,
         meta={"op": "grant", "class": cls, "scope": scope,
               "expires": normalized, "claimed_client": client},
     )
@@ -196,10 +200,10 @@ def revoke_grant(conn, grant_id: int, reason: str = "",
     arguments = {"grant": int(grant_id)}
     body = reason.strip() or None
     authorization = _authorize(conn, authorization, "grant.revoke", canonical,
-                               arguments=arguments, content=body, reason=reason)
+                               arguments=arguments, content=body, reason=body)
     eid = authorized_append(
         conn, "grant", "grant", authorization, "grant.revoke", canonical,
-        arguments=arguments, content=body, reason=reason,
+        arguments=arguments, content=body, reason=body,
         meta={"op": "revoke", "grant": grant_id, "claimed_client": client},
     )
     grant = next(g for g in reduce_grants(conn)["grants"]
@@ -207,7 +211,7 @@ def revoke_grant(conn, grant_id: int, reason: str = "",
     return {"result": "revoked", "grant": grant, "event": eid}
 
 
-def reduce_grants(conn) -> dict:
+def reduce_grants(conn, up_to_event: int | None = None) -> dict:
     """{"grants": [...], "anomalies": [...]}, id order.
 
     A grant event whose assurance is not operator-authorized, an unknown
@@ -217,39 +221,70 @@ def reduce_grants(conn) -> dict:
     """
     grants: dict[int, dict] = {}
     anomalies: list = []
-    rows = conn.execute(
-        "SELECT id, ts, content, meta FROM events WHERE kind='grant' "
-        "ORDER BY id").fetchall()
+    query = "SELECT id, ts, content, meta FROM events WHERE kind='grant'"
+    parameters: tuple = ()
+    if up_to_event is not None:
+        query += " AND id <= ?"
+        parameters = (int(up_to_event),)
+    rows = conn.execute(query + " ORDER BY id", parameters).fetchall()
     for r in rows:
         meta = json.loads(r["meta"] or "{}")
         op = meta.get("op")
-        level = assurance_of(meta)
-        if level not in OPERATOR_LEVELS:
-            anomalies.append({"event": r["id"],
-                              "why": f"grant event with assurance {level!r}; "
-                                     f"only a verified operator authorization "
-                                     f"grants, so the model cannot grant to "
-                                     f"itself"})
+        if not isinstance(meta.get("attestation"), dict):
+            anomalies.append({
+                "event": r["id"],
+                "why": "grant event lacks a verified operator authorization; "
+                "the model cannot grant to itself",
+            })
             continue
         if op == "grant":
             if meta.get("class") not in CLASSES:
                 anomalies.append({"event": r["id"],
-                                  "why": f"unknown class "
-                                         f"{meta.get('class')!r}"})
+                                  "why": "unknown grant class"})
                 continue
             expires = meta.get("expires")
             if not expires:
                 anomalies.append({"event": r["id"],
                                   "why": "grant without a finite expiry"})
                 continue
+            scope = meta.get("scope")
+            if not isinstance(scope, dict) or _scope_kind(scope) not in \
+                    CLASSES[meta["class"]]:
+                anomalies.append({"event": r["id"],
+                                  "why": "grant has an invalid scope"})
+                continue
             try:
-                _utc_instant(expires)
+                expiry = _utc_instant(expires)
+                granted_at = _utc_instant(r["ts"], "event timestamp")
             except GrantError as exc:
                 anomalies.append({"event": r["id"], "why": str(exc)})
                 continue
+            if expiry <= granted_at or expiry - granted_at > MAX_GRANT_DURATION:
+                anomalies.append({
+                    "event": r["id"],
+                    "why": "grant expiry is outside the bounded delegation window",
+                })
+                continue
+            body = r["content"] or None
+            level = assurance_for_event(
+                conn,
+                r,
+                action="grant.add",
+                scope=scope_str(scope),
+                arguments={"class": meta["class"], "expires": expires},
+                content=body,
+                reason=body,
+            )
+            if level not in OPERATOR_LEVELS:
+                anomalies.append({
+                    "event": r["id"],
+                    "why": "grant event lacks a verified operator authorization; "
+                    "the model cannot grant to itself",
+                })
+                continue
             grants[r["id"]] = {
                 "id": r["id"], "class": meta["class"],
-                "scope": meta.get("scope") or {"global": True},
+                "scope": scope,
                 "expires": expires, "granted_ts": r["ts"],
                 "reason": (r["content"] or "").strip(),
                 "client": meta.get("claimed_client", meta.get("client", "")),
@@ -262,11 +297,27 @@ def reduce_grants(conn) -> dict:
                                   "why": f"revoke targets unknown grant "
                                          f"{meta.get('grant')!r}"})
                 continue
+            body = r["content"] or None
+            level = assurance_for_event(
+                conn,
+                r,
+                action="grant.revoke",
+                scope=scope_str(target["scope"]),
+                arguments={"grant": int(target["id"])},
+                content=body,
+                reason=body,
+            )
+            if level not in OPERATOR_LEVELS:
+                anomalies.append({
+                    "event": r["id"],
+                    "why": "revoke event lacks a verified operator authorization",
+                })
+                continue
             if target["revoked_by"] is None:
                 target["revoked_by"] = r["id"]
                 target["revoke_reason"] = (r["content"] or "").strip()
         else:
-            anomalies.append({"event": r["id"], "why": f"unknown op {op!r}"})
+            anomalies.append({"event": r["id"], "why": "unknown grant operation"})
     return {"grants": list(grants.values()), "anomalies": anomalies}
 
 
@@ -302,6 +353,38 @@ def active_grant_for(conn, cls: str, scope: dict | None = None,
         if g["class"] == cls and _covers(g, scope):
             return g
     return None
+
+
+def covering_grant_for_event(conn, event_row, cls: str,
+                             scope: dict | None) -> dict | None:
+    """Verify the exact delegation that covered a historical event.
+
+    Reduction is bounded immediately before the event, so a later revoke does
+    not retroactively erase an act that was valid when appended.  Conversely,
+    a grant created later can never authorize an earlier forged row.
+    """
+    try:
+        meta = json.loads(event_row["meta"] or "{}")
+        grant_id = meta.get("grant")
+        recorded_digest = meta.get("grant_digest")
+        if isinstance(grant_id, bool) or not isinstance(grant_id, int):
+            return None
+        grants = reduce_grants(conn, up_to_event=int(event_row["id"]) - 1)[
+            "grants"
+        ]
+        grant = next((item for item in grants if item["id"] == grant_id), None)
+        if (
+            grant is None
+            or grant["revoked_by"] is not None
+            or grant["class"] != cls
+            or not _covers(grant, scope)
+            or _expired(grant, event_row["ts"])
+            or recorded_digest != grant_digest(grant)
+        ):
+            return None
+        return grant
+    except (GrantError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def require_grant(conn, cls: str, scope: dict | None = None,

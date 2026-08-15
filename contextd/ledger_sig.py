@@ -30,7 +30,9 @@ verify while it can no longer make new ones.
 
 import json
 import os
+import stat
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
@@ -76,11 +78,58 @@ class LedgerSignatureError(RuntimeError):
 
 
 def _ensure(conn) -> None:
-    conn.executescript(SCHEMA)
+    """Require the signature schema without mutating the archive.
+
+    Verification must never create the evidence it is checking.  Fresh archives
+    receive these tables from ``contextd.db.SCHEMA`` and legacy archives receive
+    them only through the explicit security migration.
+    """
+    required = {"service_keys", "service_signatures", "service_tips"}
+    present = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    missing = required - present
+    if missing:
+        raise LedgerSignatureError("service-signature schema is not installed")
 
 
 def key_path() -> Path:
     return home() / KEY_NAME
+
+
+def _read_private_key(path: Path):
+    """Open the service key without following an attacker-planted symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise LedgerSignatureError("service signing key cannot be opened safely") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise LedgerSignatureError("service signing key is not a regular file")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise LedgerSignatureError("service signing key must have mode 0600")
+        if info.st_uid != os.geteuid():
+            raise LedgerSignatureError("service signing key is owned by another uid")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            raise LedgerSignatureError("service signing key is unexpectedly large")
+    finally:
+        os.close(fd)
+    try:
+        private = serialization.load_pem_private_key(raw, None)
+    except (TypeError, ValueError) as exc:
+        raise LedgerSignatureError("service signing key is malformed") from exc
+    if not isinstance(private, ec.EllipticCurvePrivateKey) or not isinstance(
+        private.curve, ec.SECP256R1
+    ):
+        raise LedgerSignatureError("service signing key must be P-256")
+    return private
 
 
 def _load_or_create_key(conn):
@@ -93,10 +142,20 @@ def _load_or_create_key(conn):
     _ensure(conn)
     path = key_path()
     if path.exists():
-        private = serialization.load_pem_private_key(path.read_bytes(), None)
+        if path.is_symlink():
+            raise LedgerSignatureError("service signing key may not be a symlink")
+        private = _read_private_key(path)
     else:
         private = ec.generate_private_key(ec.SECP256R1())
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
         with os.fdopen(fd, "wb") as stream:
             stream.write(private.private_bytes(
                 serialization.Encoding.PEM,
@@ -110,13 +169,46 @@ def _load_or_create_key(conn):
         serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode()
     key_id = canonical_digest("contextd.ServiceKeyV1", {"pem": public_pem})[:32]
-    if not conn.execute("SELECT 1 FROM service_keys WHERE key_id = ?",
-                        (key_id,)).fetchone():
+    existing = conn.execute(
+        "SELECT public_pem FROM service_keys WHERE key_id = ?", (key_id,)
+    ).fetchone()
+    if existing is not None and existing["public_pem"] != public_pem:
+        raise LedgerSignatureError("service key id collides with different key bytes")
+    if existing is None:
         conn.execute(
             "INSERT INTO service_keys (key_id, public_pem, created, retired) "
             "VALUES (?,?,?, NULL)", (key_id, public_pem, int(time.time())))
         conn.commit()
     return private, key_id
+
+
+@dataclass(frozen=True)
+class SigningContext:
+    """A key loaded before the append transaction and used only inside it."""
+
+    private: ec.EllipticCurvePrivateKey
+    key_id: str
+
+
+def cutover_tip_id(conn) -> int | None:
+    """Return the sole signed cutover tip, or ``None`` before migration."""
+    _ensure(conn)
+    rows = conn.execute(
+        "SELECT tip_id FROM service_tips WHERE cutover = 1 ORDER BY tip_id"
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise LedgerSignatureError("archive has multiple service-signature cutovers")
+    return int(rows[0]["tip_id"])
+
+
+def prepare_append_signing(conn) -> SigningContext | None:
+    """Load the service key iff this archive has crossed the signed cutover."""
+    if cutover_tip_id(conn) is None:
+        return None
+    private, key_id = _load_or_create_key(conn)
+    return SigningContext(private=private, key_id=key_id)
 
 
 def rotate_key(conn) -> str:
@@ -151,7 +243,20 @@ def _public(conn, key_id: str):
                        (key_id,)).fetchone()
     if row is None:
         raise LedgerSignatureError(f"unknown service key {key_id!r}")
-    return serialization.load_pem_public_key(row["public_pem"].encode())
+    expected = canonical_digest(
+        "contextd.ServiceKeyV1", {"pem": row["public_pem"]}
+    )[:32]
+    if expected != key_id:
+        raise LedgerSignatureError("service key registry id does not match key bytes")
+    try:
+        public = serialization.load_pem_public_key(row["public_pem"].encode())
+    except (TypeError, ValueError) as exc:
+        raise LedgerSignatureError("service public key is malformed") from exc
+    if not isinstance(public, ec.EllipticCurvePublicKey) or not isinstance(
+        public.curve, ec.SECP256R1
+    ):
+        raise LedgerSignatureError("service public key must be P-256")
+    return public
 
 
 # --- event envelopes --------------------------------------------------------
@@ -175,25 +280,107 @@ def envelope(row) -> dict:
     }
 
 
+def _insert_event_signature(conn, row, signing: SigningContext) -> dict:
+    """Insert an event signature without committing the caller's transaction."""
+    if not conn.in_transaction:
+        raise LedgerSignatureError("event signing must run inside a transaction")
+    payload = envelope(row)
+    message = canonical_bytes(ENVELOPE_DOMAIN, payload)
+    signature = signing.private.sign(message, ec.ECDSA(hashes.SHA256()))
+    digest = canonical_digest(ENVELOPE_DOMAIN, payload)
+    conn.execute(
+        "INSERT INTO service_signatures "
+        "(event_id, key_id, digest, signature, signed_at) VALUES (?,?,?,?,?)",
+        (int(row["id"]), signing.key_id, digest, signature.hex(), int(time.time())),
+    )
+    return {
+        "event": int(row["id"]),
+        "key_id": signing.key_id,
+        "signature": signature.hex(),
+    }
+
+
+def _archive_uuid_existing(conn) -> str:
+    row = conn.execute(
+        "SELECT uuid FROM archive_identity WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        raise LedgerSignatureError("archive identity is missing after cutover")
+    return row["uuid"]
+
+
+def _insert_tip_signature(
+    conn,
+    tip_id: int,
+    chain_hash: str,
+    signing: SigningContext,
+    *,
+    cutover: bool = False,
+) -> dict:
+    """Insert a chain-tip signature without committing the transaction."""
+    if not conn.in_transaction:
+        raise LedgerSignatureError("tip signing must run inside a transaction")
+    payload = tip_payload(_archive_uuid_existing(conn), tip_id, chain_hash)
+    signature = signing.private.sign(
+        canonical_bytes(TIP_DOMAIN, payload), ec.ECDSA(hashes.SHA256())
+    )
+    conn.execute(
+        "INSERT INTO service_tips "
+        "(tip_id, chain_hash, key_id, signature, signed_at, cutover) "
+        "VALUES (?,?,?,?,?,?)",
+        (
+            int(tip_id),
+            chain_hash,
+            signing.key_id,
+            signature.hex(),
+            int(time.time()),
+            1 if cutover else 0,
+        ),
+    )
+    return {
+        "tip_id": int(tip_id),
+        "chain_hash": chain_hash,
+        "key_id": signing.key_id,
+        "signature": signature.hex(),
+        "cutover": bool(cutover),
+    }
+
+
+def sign_accepted_append(
+    conn, row: dict, chain_hash: str, signing: SigningContext
+) -> dict:
+    """Sign an accepted event and its resulting tip in the append transaction."""
+    event = _insert_event_signature(conn, row, signing)
+    tip = _insert_tip_signature(
+        conn, int(row["id"]), chain_hash, signing, cutover=False
+    )
+    return {"event": event, "tip": tip}
+
+
 def sign_event(conn, event_id: int) -> dict:
     """Sign one accepted authoritative event. Called by the authority plane."""
     _ensure(conn)
     private, key_id = _load_or_create_key(conn)
+    cutover = cutover_tip_id(conn)
+    if cutover is not None and event_id <= cutover:
+        raise LedgerSignatureError(
+            "refusing to retroactively sign an event at or before the cutover"
+        )
     row = conn.execute(
         "SELECT id, ts, source, kind, uri, content_hash, meta FROM events "
         "WHERE id = ?", (event_id,)).fetchone()
     if row is None:
         raise LedgerSignatureError(f"no event #{event_id}")
-    payload = envelope(row)
-    message = canonical_bytes(ENVELOPE_DOMAIN, payload)
-    signature = private.sign(message, ec.ECDSA(hashes.SHA256()))
-    conn.execute(
-        "INSERT OR REPLACE INTO service_signatures "
-        "(event_id, key_id, digest, signature, signed_at) VALUES (?,?,?,?,?)",
-        (event_id, key_id, canonical_digest(ENVELOPE_DOMAIN, payload),
-         signature.hex(), int(time.time())))
-    conn.commit()
-    return {"event": event_id, "key_id": key_id, "signature": signature.hex()}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        result = _insert_event_signature(
+            conn, row, SigningContext(private=private, key_id=key_id)
+        )
+        conn.commit()
+        return result
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def verify_event(conn, event_id: int) -> dict:
@@ -210,7 +397,17 @@ def verify_event(conn, event_id: int) -> dict:
     if row is None:
         return {"event": event_id, "signed": True, "ok": False,
                 "why": "signed event no longer exists"}
-    message = canonical_bytes(ENVELOPE_DOMAIN, envelope(row))
+    payload = envelope(row)
+    digest = canonical_digest(ENVELOPE_DOMAIN, payload)
+    if stored["digest"] != digest:
+        return {
+            "event": event_id,
+            "signed": True,
+            "ok": False,
+            "why": "signature does not verify: stored digest does not match "
+            "the event envelope",
+        }
+    message = canonical_bytes(ENVELOPE_DOMAIN, payload)
     try:
         _public(conn, stored["key_id"]).verify(
             bytes.fromhex(stored["signature"]), message,
@@ -241,33 +438,59 @@ def sign_tip(conn, cutover: bool = False) -> dict:
     from .attest import archive_uuid
     from .db import _db_tip
     private, key_id = _load_or_create_key(conn)
+    # Manual pre-cutover signing is still supported for diagnostics/tests.  Mint
+    # the archive identity before opening the signature transaction; post-cutover
+    # appends require it to exist already and never create it implicitly.
+    archive_uuid(conn)
     tip = _db_tip(conn)
-    payload = tip_payload(archive_uuid(conn), tip["id"], tip["chain_hash"])
-    signature = private.sign(canonical_bytes(TIP_DOMAIN, payload),
-                             ec.ECDSA(hashes.SHA256()))
-    conn.execute(
-        "INSERT OR REPLACE INTO service_tips "
-        "(tip_id, chain_hash, key_id, signature, signed_at, cutover) "
-        "VALUES (?,?,?,?,?,?)",
-        (tip["id"], tip["chain_hash"], key_id, signature.hex(),
-         int(time.time()), 1 if cutover else 0))
-    conn.commit()
-    return {"tip_id": tip["id"], "chain_hash": tip["chain_hash"],
-            "key_id": key_id, "signature": signature.hex(),
-            "cutover": bool(cutover)}
+    existing = conn.execute(
+        "SELECT * FROM service_tips WHERE tip_id = ?", (tip["id"],)
+    ).fetchone()
+    if existing is not None:
+        verified = verify_tip(conn, tip["id"])
+        if not verified["ok"] or bool(existing["cutover"]) != bool(cutover):
+            raise LedgerSignatureError(
+                "the current tip already has a conflicting service signature"
+            )
+        return {
+            "tip_id": int(existing["tip_id"]),
+            "chain_hash": existing["chain_hash"],
+            "key_id": existing["key_id"],
+            "signature": existing["signature"],
+            "cutover": bool(existing["cutover"]),
+        }
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        result = _insert_tip_signature(
+            conn,
+            int(tip["id"]),
+            tip["chain_hash"],
+            SigningContext(private=private, key_id=key_id),
+            cutover=cutover,
+        )
+        conn.commit()
+        return result
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def verify_tip(conn, tip_id: int) -> dict:
     _ensure(conn)
-    from .attest import archive_uuid
     stored = conn.execute("SELECT * FROM service_tips WHERE tip_id = ?",
                           (tip_id,)).fetchone()
     if stored is None:
         return {"tip_id": tip_id, "ok": False, "why": "no signed tip"}
-    row = conn.execute("SELECT chain_hash FROM events WHERE id = ?",
-                       (tip_id,)).fetchone()
-    current = row["chain_hash"] if row else None
-    payload = tip_payload(archive_uuid(conn), tip_id, stored["chain_hash"])
+    if tip_id == 0:
+        current = ""
+    else:
+        row = conn.execute(
+            "SELECT chain_hash FROM events WHERE id = ?", (tip_id,)
+        ).fetchone()
+        current = row["chain_hash"] if row else None
+    payload = tip_payload(
+        _archive_uuid_existing(conn), tip_id, stored["chain_hash"]
+    )
     try:
         _public(conn, stored["key_id"]).verify(
             bytes.fromhex(stored["signature"]),
@@ -288,19 +511,67 @@ def verify_tip(conn, tip_id: int) -> dict:
 
 
 def verify_ledger(conn) -> dict:
-    """Verify every service signature. This is the check a chain recomputation
-    does not survive."""
+    """Verify signatures *and complete post-cutover coverage*.
+
+    Looking only at rows already present in ``service_signatures`` turns absence
+    into a pass.  The cutover defines the required set: every event after it must
+    have a valid signature and the current chain tip must be signed.
+    """
     _ensure(conn)
-    events = [verify_event(conn, r["event_id"]) for r in conn.execute(
-        "SELECT event_id FROM service_signatures ORDER BY event_id")]
+    cutover_rows = conn.execute(
+        "SELECT tip_id FROM service_tips WHERE cutover = 1 ORDER BY tip_id"
+    ).fetchall()
+    cutover_anomalies = []
+    cutover = None
+    if len(cutover_rows) == 1:
+        cutover = int(cutover_rows[0]["tip_id"])
+    elif not cutover_rows:
+        cutover_anomalies.append("no signed coverage cutover")
+    else:
+        cutover_anomalies.append("multiple signed coverage cutovers")
+
+    required_ids = []
+    if cutover is not None:
+        required_ids = [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM events WHERE id > ? ORDER BY id", (cutover,)
+            )
+        ]
+    signed_ids = {
+        int(r["event_id"])
+        for r in conn.execute("SELECT event_id FROM service_signatures")
+    }
+    missing_events = [event_id for event_id in required_ids if event_id not in signed_ids]
+    checked_ids = sorted(signed_ids | set(required_ids))
+    events = [verify_event(conn, event_id) for event_id in checked_ids]
     tips = [verify_tip(conn, r["tip_id"]) for r in conn.execute(
         "SELECT tip_id FROM service_tips ORDER BY tip_id")]
     bad_events = [e for e in events if not e["ok"]]
     bad_tips = [t for t in tips if not t["ok"]]
+    from .db import _db_tip
+    current_tip = int(_db_tip(conn)["id"])
+    current_tip_result = verify_tip(conn, current_tip)
+    if not current_tip_result["ok"] and not any(
+        t.get("tip_id") == current_tip for t in bad_tips
+    ):
+        bad_tips.append(current_tip_result)
+    coverage_ok = (
+        not cutover_anomalies
+        and not missing_events
+        and current_tip_result["ok"]
+    )
     return {
-        "signed_events": len(events), "signed_tips": len(tips),
+        "signed_events": len(signed_ids), "checked_events": len(events),
+        "signed_tips": len(tips),
         "bad_events": bad_events, "bad_tips": bad_tips,
-        "ok": not bad_events and not bad_tips,
+        "cutover_tip": cutover,
+        "cutover_anomalies": cutover_anomalies,
+        "required_events": len(required_ids),
+        "missing_events": missing_events,
+        "current_tip": current_tip,
+        "coverage_ok": coverage_ok,
+        "ok": coverage_ok and not bad_events and not bad_tips,
     }
 
 

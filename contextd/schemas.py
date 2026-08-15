@@ -33,6 +33,7 @@ from .redact import (
     MAX_LABEL,
     MAX_TEXT,
     SanitizationError,
+    sanitize_content,
     sanitize_label,
     sanitize_text,
 )
@@ -412,11 +413,10 @@ def _check_digest(name, value):
     return value
 
 
-def _check_scope(name, value):
+def _check_scope(cfg, name, value):
     """Canonical scope strings only, floor-redacted. A repo path is a private
     name and an arbitrary-content channel; it is bounded and redacted like any
     other declared free-text field."""
-    from .redact import redact
     if isinstance(value, dict):
         value = "global" if value.get("global") else f"repo:{value.get('repo', '')}"
     if not isinstance(value, str):
@@ -424,21 +424,18 @@ def _check_scope(name, value):
     if len(value) > 4096:
         raise SchemaError(f"field {name!r} exceeds the scope length bound")
     if value == "global" or value.startswith("repo:") or value.startswith("/"):
-        return redact(None, value)
+        return sanitize_content(cfg, value, max_len=4096)
     raise SchemaError(f"field {name!r} must be 'global' or a repo path")
 
 
 def _check_scope_obj(cfg, name, value):
     """The reducer-facing scope mapping. Closed: exactly one of `global` or
     `repo`, with the path bounded and floor-redacted."""
-    from .redact import redact
     if not isinstance(value, dict):
         raise SchemaError(f"field {name!r} must be a scope mapping")
     unknown = set(value) - {"global", "repo"}
     if unknown:
-        raise SchemaError(
-            f"field {name!r} has unknown key(s): {', '.join(sorted(unknown))}"
-        )
+        raise SchemaError(f"field {name!r} has undeclared nested fields")
     if value.get("global"):
         if not isinstance(value["global"], bool):
             raise SchemaError(f"field {name!r}.global must be a boolean")
@@ -446,7 +443,7 @@ def _check_scope_obj(cfg, name, value):
     repo = value.get("repo")
     if not isinstance(repo, str) or not repo or len(repo) > 4096:
         raise SchemaError(f"field {name!r} needs a bounded repo path or global=true")
-    return {"repo": redact(cfg, repo)}
+    return {"repo": sanitize_content(cfg, repo, max_len=4096)}
 
 
 def _check_instant(name, value):
@@ -458,7 +455,7 @@ def _check_instant(name, value):
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
-        raise SchemaError(f"field {name!r} is not a valid instant: {exc}") from exc
+        raise SchemaError(f"field {name!r} is not a valid instant") from exc
     if parsed.tzinfo is None:
         raise SchemaError(
             f"field {name!r} is a naive timestamp; a timezone-aware UTC "
@@ -497,9 +494,7 @@ def _check_json(cfg, name, value, depth=0, budget=None):
                 cfg, name, v, depth + 1, budget
             )
         return out
-    raise SchemaError(
-        f"field {name!r} contains an unsupported type {type(value).__name__}"
-    )
+    raise SchemaError(f"field {name!r} contains an unsupported value")
 
 
 def _check_derivation(cfg, name, value):
@@ -510,9 +505,7 @@ def _check_derivation(cfg, name, value):
     allowed = {"source_egress", "anchors", "support", "capability_id"}
     unknown = set(value) - allowed
     if unknown:
-        raise SchemaError(
-            f"field {name!r} has unknown key(s): {', '.join(sorted(unknown))}"
-        )
+        raise SchemaError(f"field {name!r} has undeclared nested fields")
     out = {}
     if "source_egress" in value:
         out["source_egress"] = _check_int(
@@ -543,9 +536,13 @@ def _check_derivation(cfg, name, value):
                 raise SchemaError(
                     f"field {name!r}.support.quote must be bounded text"
                 )
-            # the quote must match disclosed bytes verbatim, so it is bounded
-            # but not rewritten; the disclosure it is checked against was
-            # itself floor-redacted before it was ever served
+            # Quotes are evidence and must remain verbatim.  Rewriting one
+            # would make the provenance claim false, so refuse if the privacy
+            # floor or terminal-control boundary would change it.
+            if sanitize_text(cfg, quote, MAX_TEXT) != quote:
+                raise SchemaError(
+                    f"field {name!r}.support.quote is rejected by the privacy floor"
+                )
             item["quote"] = quote
             if "relation" in entry:
                 if entry["relation"] not in ("supports", "contradicts"):
@@ -558,7 +555,7 @@ def _check_derivation(cfg, name, value):
     return out
 
 
-def _check_attestation(name, value):
+def _check_attestation(cfg, name, value):
     """The stored operator-authorization block. Written only by the authority
     plane; its exact shape lives in contextd/attest.py."""
     if not isinstance(value, dict):
@@ -566,9 +563,16 @@ def _check_attestation(name, value):
     allowed = {"action", "signature", "key_id", "signer", "verified_at"}
     unknown = set(value) - allowed
     if unknown:
-        raise SchemaError(
-            f"field {name!r} has unknown key(s): {', '.join(sorted(unknown))}"
-        )
+        raise SchemaError(f"field {name!r} has undeclared nested fields")
+    if set(value) != allowed or not isinstance(value.get("action"), dict):
+        raise SchemaError(f"field {name!r} has a malformed attestation record")
+    if any(not isinstance(value.get(k), str) for k in allowed - {"action"}):
+        raise SchemaError(f"field {name!r} has a malformed attestation record")
+    # These bytes describe a verified signature.  They cannot be rewritten
+    # after verification, but they also cannot bypass the archive privacy
+    # floor.  Refuse the whole block if any nested key or string would change.
+    if _check_json(cfg, name, value) != value:
+        raise SchemaError(f"field {name!r} is rejected by the privacy floor")
     return value
 
 
@@ -587,7 +591,7 @@ def _coerce(cfg, name: str, spec: Field, value):
     if kind == "digest":
         return _check_digest(name, value)
     if kind == "scope":
-        return _check_scope(name, value)
+        return _check_scope(cfg, name, value)
     if kind == "scope_obj":
         return _check_scope_obj(cfg, name, value)
     if kind == "instant":
@@ -597,7 +601,7 @@ def _coerce(cfg, name: str, spec: Field, value):
     if kind == "derivation":
         return _check_derivation(cfg, name, value)
     if kind == "attestation":
-        return _check_attestation(name, value)
+        return _check_attestation(cfg, name, value)
     if kind == "enum":
         if value not in spec.choices:
             raise SchemaError(
@@ -638,9 +642,8 @@ def _validate(cfg, label: str, schema: dict, meta) -> dict:
     unknown = [k for k in meta if k not in schema]
     if unknown:
         raise SchemaError(
-            f"{label} metadata has undeclared field(s): "
-            f"{', '.join(sorted(map(str, unknown)))}. Closed schemas refuse "
-            f"unknown fields; declare it in contextd/schemas.py or drop it."
+            f"{label} metadata has undeclared fields. Closed schemas refuse "
+            f"unknown fields."
         )
     out = {}
     for name, spec in schema.items():
@@ -666,10 +669,7 @@ def validate_egress_meta(cfg, meta) -> dict:
         raise SchemaError("disclosure metadata must be a mapping")
     kind = meta.get("type")
     if kind not in EGRESS_TYPES:
-        raise SchemaError(
-            f"unknown disclosure type {kind!r}; registered types: "
-            f"{', '.join(sorted(str(t) for t in EGRESS_TYPES))}"
-        )
+        raise SchemaError("unknown disclosure type")
     return _validate(cfg, f"disclosure {kind!r}", EGRESS_TYPES[kind], meta)
 
 
@@ -689,10 +689,6 @@ def validate_event_meta(cfg, source: str, kind: str, meta) -> dict:
     schema = schema_for(source, kind)
     if schema is None:
         if meta:
-            raise SchemaError(
-                f"event type {source}/{kind} has no registered metadata "
-                f"schema; register one in contextd/schemas.py before writing "
-                f"metadata"
-            )
+            raise SchemaError("event type has no registered metadata schema")
         return {}
     return _validate(cfg, f"event {source}/{kind}", schema, meta)

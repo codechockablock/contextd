@@ -22,7 +22,8 @@ import stat
 from pathlib import Path
 
 from . import home, load_config
-from .attest import SIGNER_SECURE_ENCLAVE, SIGNER_HELPER, registered_keys
+from .attest import (DEVELOPMENT_SIGNER_HELPER, INSTALLED_SIGNER_HELPER,
+                     SIGNER_SECURE_ENCLAVE, registered_keys)
 from .authd import hardened, inspect_deployment, socket_path
 
 INVARIANTS = (
@@ -81,17 +82,26 @@ def _protected_daemon(deployment: dict) -> dict:
 def _production_signer(conn) -> dict:
     keys = [k for k in registered_keys(conn)
             if k["signer"] == SIGNER_SECURE_ENCLAVE and not k["revoked"]]
-    if not SIGNER_HELPER.exists():
-        return _check(False, f"no signer helper at {SIGNER_HELPER}",
-                      "native/build.sh, then enroll a key "
-                      "(docs/DEPLOYMENT.md §3)")
+    helper = INSTALLED_SIGNER_HELPER if hardened() else DEVELOPMENT_SIGNER_HELPER
+    try:
+        helper_info = helper.lstat()
+    except OSError:
+        return _check(False, f"no signer helper at {helper}",
+                      "native/build.sh && sudo native/install.sh, then follow "
+                      "docs/OPERATOR_CEREMONY.md")
+    if (helper.is_symlink() or not stat.S_ISREG(helper_info.st_mode)
+            or (hardened() and (helper_info.st_uid != 0
+                                or helper_info.st_mode & 0o022))):
+        return _check(
+            False, f"signer helper at {helper} is not a protected regular file",
+            "reinstall it root-owned and non-writable with sudo native/install.sh",
+        )
     if not keys:
         return _check(
             False,
             "no unrevoked Secure Enclave key is registered, so no event can "
             "be operator_authorized",
-            "native/contextd-signer enroll --key-id default | "
-            "ctx security key register -",
+            "follow docs/OPERATOR_CEREMONY.md for bootstrap or rotation",
         )
     test_keys = [k for k in registered_keys(conn)
                  if k["signer"] != SIGNER_SECURE_ENCLAVE and not k["revoked"]]
@@ -134,8 +144,32 @@ def _service_signatures(conn) -> dict:
     code but nothing has been signed yet — so integrity still rests on the
     chain and witness, which a same-uid attacker recomputes.
     """
-    from .ledger_sig import key_path, verify_ledger
-    report = verify_ledger(conn)
+    from .ledger_sig import LedgerSignatureError, key_path, verify_ledger
+    try:
+        report = verify_ledger(conn)
+    except LedgerSignatureError as exc:
+        return _check(
+            False,
+            f"service-signature verification is unavailable: {exc}",
+            "run the explicit security migration from the authority plane",
+        )
+    if report["cutover_anomalies"]:
+        return _check(
+            False,
+            "; ".join(report["cutover_anomalies"]),
+            "do not append; establish or repair the signed cutover from a "
+            "known-good authority service",
+        )
+    if report["missing_events"]:
+        sample = ", ".join(f"#{n}" for n in report["missing_events"][:8])
+        suffix = "…" if len(report["missing_events"]) > 8 else ""
+        return _check(
+            False,
+            f"{len(report['missing_events'])} post-cutover event(s) lack a "
+            f"required service signature: {sample}{suffix}",
+            "treat the unsigned tail as unaccepted and investigate the "
+            "authority append path before any further write",
+        )
     if report["bad_events"] or report["bad_tips"]:
         return _check(
             False,
@@ -157,10 +191,17 @@ def _service_signatures(conn) -> dict:
     if not key_path().exists():
         return _check(False, "the service signing key is missing",
                       "the authority plane cannot sign; investigate before use")
+    if not report["coverage_ok"]:
+        return _check(
+            False,
+            f"signature coverage does not reach current tip "
+            f"#{report['current_tip']}",
+            "stop the service and investigate the lagging or missing signed tip",
+        )
     return _check(
         True,
-        f"{report['signed_events']} signed event(s) and "
-        f"{report['signed_tips']} signed tip(s) all verify",
+        f"all {report['required_events']} post-cutover event(s) and current "
+        f"tip #{report['current_tip']} are service-signed and verify",
     )
 
 

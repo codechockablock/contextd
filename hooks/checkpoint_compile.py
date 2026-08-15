@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from contextd import load_config  # noqa: E402
 from contextd.db import connect  # noqa: E402
 from contextd.scratch import scratch_dir  # noqa: E402
+from contextd.redact import sanitize_content  # noqa: E402
 from contextd.gate import (GateError, disclose, record_dispatch_outcome,  # noqa: E402
                            verify_anchors)
 from contextd.handoff import (compile_checkpoint, render_package,  # noqa: E402
@@ -60,7 +61,7 @@ into a fact. Reply with only the checkpoint.
 {package}"""
 
 
-def distill(payload: str, model: str, timeout: int = 600):
+def distill(payload: str, model: str, timeout: int = 600, cfg=None):
     env = os.environ.copy()
     env["MCP_CONNECTION_NONBLOCKING"] = "false"
     env["ENABLE_TOOL_SEARCH"] = "off"
@@ -75,12 +76,13 @@ def distill(payload: str, model: str, timeout: int = 600):
             cwd=workdir, env=env)
     if r.returncode != 0:
         raise RuntimeError(f"distiller failed (exit {r.returncode}): "
-                           f"{r.stderr[-500:]}")
+                           f"{sanitize_content(cfg, r.stderr, max_len=500)}")
     try:
         out = json.loads(r.stdout)
     except json.JSONDecodeError:
         raise RuntimeError("distiller returned unparseable output")
-    return (out.get("result") or "").strip(), out.get("total_cost_usd")
+    result = sanitize_content(cfg, out.get("result") or "", max_len=20_000)
+    return result.strip(), out.get("total_cost_usd")
 
 
 def compile_distilled(conn, cfg, raw_budget: int, task_hint: str = "",
@@ -110,7 +112,7 @@ def compile_distilled(conn, cfg, raw_budget: int, task_hint: str = "",
             "distiller": model, "attempt": attempt, "client": client})
         src_egress = source["egress_id"]
         try:
-            text, cost = distill(source["content"], model)
+            text, cost = distill(source["content"], model, cfg=cfg)
         except subprocess.TimeoutExpired:
             record_dispatch_outcome(conn, src_egress, "timeout")
             raise

@@ -20,6 +20,10 @@ EXPECTED_SUBPROCESS_CALLS = {
         "the macOS Secure Enclave signer helper; it receives only the exact "
         "canonical bytes to be signed and no archive content, and it is not a "
         "model",
+    ("scripts/triage_history_credentials.py", "triage", "run"):
+        "local `git rev-list` over this repository's own history to enumerate "
+        "blobs for classification; no archive bytes, no model, and no matched "
+        "value leaves the process",
     ("scripts/triage_history_credentials.py", "triage", "Popen"):
         "local `git cat-file --batch` over this repository's own blobs to "
         "classify credential-shaped findings; no archive bytes, no model, and "
@@ -29,6 +33,9 @@ EXPECTED_SUBPROCESS_CALLS = {
     ("scripts/audit_repository_privacy.py", "scan_history", "Popen"):
         "local `git cat-file --batch` over this repository's own blobs; "
         "no archive bytes, no model, and matched values are never emitted",
+    ("scripts/audit_repository_privacy.py", "scan_history", "run"):
+        "local `git cat-file -p` for commit and tag metadata; no archive "
+        "bytes, no model, and matched values are never emitted",
     ("experiments/runner.py", "run_model", "run"): "model",
     ("experiments/runner.py", "cmd_run", "run"): "model CLI version only",
     ("hooks/reconcile.py", "reconcile", "run"): "model",

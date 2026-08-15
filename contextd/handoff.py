@@ -48,7 +48,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from .db import SCHEMA, _atomic_json, _db_tip, chain_state_paths, now_iso
+from .db import SCHEMA_VERSION, SCHEMA, _atomic_json, _db_tip, chain_state_paths, now_iso
 from .gate import disclose, est_tokens, redact, select_items
 from .liveness import capture_liveness, stale_line
 
@@ -122,6 +122,11 @@ def freeze_view(src_db: Path, dest_home: Path, until_id: int) -> dict:
     dst = sqlite3.connect(dest_home / "contextd.db")
     dst.row_factory = sqlite3.Row
     dst.executescript(SCHEMA)
+    # A frozen view is built from the current schema by construction, so it is
+    # current-version by definition. Without this stamp it reads as version 0
+    # and the migration guard refuses to open it — a fresh database would be
+    # mistaken for a pre-hardening archive awaiting migration.
+    dst.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     rows = src.execute(
         "SELECT id, ts, source, kind, uri, content, content_hash, meta, "
         "prev_hash, chain_hash FROM events WHERE id <= ? ORDER BY id",

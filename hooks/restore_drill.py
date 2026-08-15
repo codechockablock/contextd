@@ -52,6 +52,7 @@ from contextd.loops import reduce_loops  # noqa: E402
 from contextd.scratch import (  # noqa: E402
     ScratchCleanupError, remove_scratch, scratch_root,
 )
+from contextd.redact import sanitize_content  # noqa: E402
 from contextd.search import search, timeline  # noqa: E402
 
 # Measured in experiments/restore_scale (results.json, 2026-08-13): peak
@@ -290,7 +291,7 @@ def run_drill(backup_dir: Path | None = None,
     except (DrillFailure, BackupError, OSError, sqlite3.Error) as exc:
         stages[stage] = round(time.monotonic() - mark, 3)
         meta["failed_stage"] = stage
-        meta["reason"] = str(exc)[:500]
+        meta["reason"] = sanitize_content(cfg, str(exc), max_len=500)
     finally:
         if sampler is not None:
             meta["peak_temp_bytes"] = sampler.stop()
@@ -302,7 +303,7 @@ def run_drill(backup_dir: Path | None = None,
                 # still on disk" into a silent no-op. It is a drill FAILURE.
                 meta["verdict"] = "FAIL"
                 meta["failed_stage"] = "cleanup"
-                meta["reason"] = str(exc)[:500]
+                meta["reason"] = sanitize_content(cfg, str(exc), max_len=500)
     meta["total_seconds"] = round(time.monotonic() - started, 3)
 
     conn = connect()

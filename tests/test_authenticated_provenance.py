@@ -9,6 +9,7 @@ therefore the attacker asserting it was the operator.
 Each test below fails against the pre-hardening tree.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -95,10 +96,11 @@ def test_epistemic_type_separates_claimed_from_attested():
     assert epistemic_type("note", "note", claimed) == "claimed_human_assertion"
     assert epistemic_type("claude_code", "message", {"role": "user"}) \
         == "claimed_human_assertion"
-    # only a verified production attestation reaches the attested level
+    # Self-describing stored metadata is never enough to reach an attested
+    # level; reducers must call verify_stored_authorization against the row.
     attested = {"actor": "human",
                 "attestation": {"signer": attest.SIGNER_SECURE_ENCLAVE}}
-    assert epistemic_type("note", "note", attested) == "attested_human_assertion"
+    assert epistemic_type("note", "note", attested) == "claimed_human_assertion"
     # ... and the test signer never does
     testish = {"actor": "human", "attestation": {"signer": INSECURE_TEST_SIGNER}}
     assert epistemic_type("note", "note", testish) == "claimed_human_assertion"
@@ -243,6 +245,33 @@ def test_authorization_for_one_act_is_not_redeemable_against_another():
     assert _events(conn) == before
 
 
+def test_verified_authorization_is_deeply_immutable():
+    conn = connect()
+    auth = operator(conn).authorize(
+        "archive.raw_read", "global", arguments={"event_id": 1}
+    )
+    with pytest.raises(TypeError):
+        auth.action["action"] = "archive.backup"
+    with pytest.raises(TypeError):
+        auth.action["arguments"]["event_id"] = 2
+
+
+def test_revocation_between_preflight_and_append_is_rechecked_atomically():
+    conn = connect()
+    op = operator(conn)
+    auth = op.authorize("note.deliberate", "global", content="stale")
+    attest.revoke_key(op.key_id, conn=conn)
+    with pytest.raises(attest.AttestationError):
+        attest.authorized_append(
+            conn, "note", "note", auth, "note.deliberate", "global",
+            content="stale",
+        )
+    assert conn.execute(
+        "SELECT consumed_event FROM operator_nonces WHERE nonce = ?",
+        (auth.nonce,),
+    ).fetchone()["consumed_event"] is None
+
+
 def test_replay_of_one_authorization_appends_once():
     conn = connect()
     op = operator(conn)
@@ -328,6 +357,55 @@ def test_test_signed_events_are_never_operator_authorized():
     assert meta["assurance"] == INSECURE_TEST_SIGNER
     assert not is_authenticated_human(meta)
     assert meta["attestation"]["signer"] == INSECURE_TEST_SIGNER
+
+
+def test_stored_authorization_requires_crypto_nonce_binding_and_exact_semantics():
+    conn = connect()
+    op = operator(conn)
+    auth = op.authorize("note.deliberate", "global", content="bound")
+    event_id = attest.authorized_append(
+        conn, "note", "note", auth, "note.deliberate", "global",
+        content="bound",
+    )
+    row = conn.execute(
+        "SELECT id, ts, content, meta FROM events WHERE id = ?", (event_id,)
+    ).fetchone()
+    assert attest.verify_stored_authorization(
+        conn, row, action="note.deliberate", scope="global", content="bound"
+    ) is not None
+    assert attest.verify_stored_authorization(
+        conn, row, action="note.deliberate", scope="global", content="changed"
+    ) is None
+
+    forged_meta = json.loads(row["meta"])
+    forged_meta["attestation"]["signature"] = "00"
+    forged = {"id": row["id"], "ts": row["ts"], "content": row["content"],
+              "meta": json.dumps(forged_meta)}
+    assert attest.verify_stored_authorization(
+        conn, forged, action="note.deliberate", content="bound"
+    ) is None
+
+
+def test_control_sequences_bind_to_exact_sanitized_persisted_content():
+    conn = connect()
+    raw = "approve \x1b[31mred\x1b[0m\x07 text"
+    stored = "approve red text"
+    auth = operator(conn).authorize(
+        "note.deliberate", "global", content=raw
+    )
+    assert auth.action["content_digest"] == hashlib.sha256(
+        stored.encode()
+    ).hexdigest()
+    event_id = attest.authorized_append(
+        conn, "note", "note", auth, "note.deliberate", "global", content=raw
+    )
+    row = conn.execute(
+        "SELECT id, ts, content, meta FROM events WHERE id = ?", (event_id,)
+    ).fetchone()
+    assert row["content"] == stored
+    assert attest.verify_stored_authorization(
+        conn, row, action="note.deliberate", content=stored
+    ) is not None
 
 
 def test_software_keys_cannot_be_registered_in_production_mode(monkeypatch):

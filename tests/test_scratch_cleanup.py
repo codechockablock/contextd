@@ -13,6 +13,7 @@ import os
 import sqlite3
 import stat
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,49 @@ def test_browser_scan_open_failure_leaves_no_copy(tmp_path):
     assert _scratch_entries() == []
 
 
+def test_browser_scan_rejects_symlink_source_without_copy(tmp_path):
+    conn = connect()
+    real = tmp_path / "RealHistory"
+    _fake_history(real)
+    alias = tmp_path / "History"
+    alias.symlink_to(real)
+    out = _scan_browser(
+        conn,
+        {"browser": {"skip_domains": [], "skip_domain_files": []}},
+        "chrome",
+        str(alias),
+        QUERY,
+        lambda t: float(t),
+    )
+    assert out["status"] == "no access (OSError)"
+    assert _scratch_entries() == []
+
+
+def test_browser_scan_skips_malformed_rows_without_leaking_errors(tmp_path):
+    conn = connect()
+    conn.execute(
+        "INSERT INTO cursors(source, state) VALUES ('chrome', 'not-json')"
+    )
+    conn.commit()
+    src = tmp_path / "History"
+    db = sqlite3.connect(src)
+    db.execute("CREATE TABLE urls (url, title, last_visit_time)")
+    db.execute("INSERT INTO urls VALUES (NULL, 'bad', 1001)")
+    db.execute("INSERT INTO urls VALUES ('https://example.invalid/ok', 7, 1002)")
+    db.commit()
+    db.close()
+    out = _scan_browser(
+        conn,
+        {"browser": {"skip_domains": [], "skip_domain_files": []}},
+        "chrome",
+        str(src),
+        QUERY,
+        lambda t: float(t),
+    )
+    assert out["page_visit"] == 1
+    assert _scratch_entries() == []
+
+
 def test_browser_scan_interrupt_leaves_no_copy(tmp_path, monkeypatch):
     conn = connect()
     src = tmp_path / "History"
@@ -198,6 +242,28 @@ def test_copied_history_is_0600_while_in_use(tmp_path):
     with scratch_dir("probe") as workdir:
         copy = _copy_locked_db(src, workdir)
         assert _mode(copy) == 0o600, oct(_mode(copy))
+
+
+def test_distiller_stderr_and_result_are_display_sanitized(monkeypatch):
+    import hooks.synthesis_recall as synthesis
+
+    secret = "sk-" + "q" * 20
+    failed = SimpleNamespace(
+        returncode=1, stderr=f"\x1b[31m{secret}\x1b[0m", stdout=""
+    )
+    monkeypatch.setattr(synthesis.subprocess, "run", lambda *_a, **_k: failed)
+    with pytest.raises(synthesis.DistillError) as exc:
+        synthesis.distill("payload", "model", cfg={})
+    assert secret not in str(exc.value) and "\x1b" not in str(exc.value)
+
+    succeeded = SimpleNamespace(
+        returncode=0,
+        stderr="",
+        stdout='{"result":"\\u001b[31m' + secret + '\\u001b[0m"}',
+    )
+    monkeypatch.setattr(synthesis.subprocess, "run", lambda *_a, **_k: succeeded)
+    result, _cost = synthesis.distill("payload", "model", cfg={})
+    assert secret not in result and "\x1b" not in result
 
 
 # --- stale recovery ---------------------------------------------------------

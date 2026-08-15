@@ -14,7 +14,7 @@ from . import liveness as liveness_module
 from .backup import BackupError, create_backup, restore_backup
 from .db import ChainStateError, append_event, connect, verify_chain
 from .gate import GateError, assemble, spent_today
-from .ingest import ingest_note, run_all
+from .ingest import run_all
 from .liveness import capture_liveness, describe, format_age, stale_line
 from .search import timeline
 
@@ -65,10 +65,15 @@ def cmd_note(args):
     text = " ".join(args.text) if args.text else sys.stdin.read()
     if not text.strip():
         sys.exit("empty note")
-    # A CLI note is `unverified`: invoking the CLI proves nothing about who
-    # invoked it (docs/SECURITY.md §3). `ctx note --authorize` in Mission 3
-    # is the path to an operator-authorized note.
-    eid = ingest_note(connect(), text.strip(), claimed_client="cli")
+    from . import service
+    text = text.strip()
+    if getattr(args, "authorize", False):
+        authorization = operator_authorization(
+            None, "note.deliberate", "global", content=text
+        )
+        eid = service.note_deliberate(text, authorization)["event"]
+    else:
+        eid = service.note(text, client="cli")["event"]
     print(f"noted as event #{eid}")
 
 
@@ -223,9 +228,31 @@ def operator_authorization(conn, action: str, scope: str = "global",
     If no production signer is enrolled this refuses: there is deliberately no
     prompt-only, TTY, or parent-process fallback (docs/SECURITY.md §3).
     """
-    from .attest import (AttestationError, prepare_action, registered_keys,
-                         sign_with_secure_enclave, verify_action,
-                         SIGNER_SECURE_ENCLAVE, test_mode_authorization)
+    from . import service
+    from .attest import (AttestationError, SignedAction, prepare_action,
+                         registered_keys, sign_with_secure_enclave,
+                         verify_action, SIGNER_SECURE_ENCLAVE,
+                         test_mode_authorization)
+    if service.hardened():
+        try:
+            prepared = service.prepare_action(
+                action, scope, arguments, content, reason
+            )
+            if prepared["signer"] != SIGNER_SECURE_ENCLAVE:
+                raise AttestationError(
+                    "hardened mode refuses a non-hardware operator signer"
+                )
+            print(f"authorize: {prepared['human_summary']}")
+            print(f"  digest {prepared['digest'][:16]}…  (approve on your device)")
+            signature = sign_with_secure_enclave(
+                bytes.fromhex(prepared["canonical"]), prepared["signer_tag"],
+                display_content=prepared["display_content"],
+                display_reason=prepared["display_reason"],
+            )
+            return SignedAction(prepared["action"], signature)
+        except (AttestationError, service.RpcError) as exc:
+            sys.exit(f"refused: {exc}")
+
     keys = [k for k in registered_keys(conn)
             if k["signer"] == SIGNER_SECURE_ENCLAVE and not k["revoked"]]
     if not keys:
@@ -249,8 +276,9 @@ def operator_authorization(conn, action: str, scope: str = "global",
     print(f"  digest {prepared['digest'][:16]}…  (approve on your device)")
     try:
         signature = sign_with_secure_enclave(
-            bytes.fromhex(prepared["canonical"]), key_id,
-            summary=prepared["human_summary"],
+            bytes.fromhex(prepared["canonical"]), keys[-1]["signer_tag"],
+            display_content=prepared["display_content"],
+            display_reason=prepared["display_reason"],
         )
         return verify_action(prepared["action"], signature, conn=conn)
     except AttestationError as exc:
@@ -258,6 +286,45 @@ def operator_authorization(conn, action: str, scope: str = "global",
 
 
 def cmd_loop(args):
+    from . import service
+    if service.hardened():
+        from .loops import scope_str
+        if args.action == "add":
+            if args.source_event:
+                sys.exit(
+                    "refused: hardened loop add does not accept unsigned "
+                    "--source-event metadata"
+                )
+            text = " ".join(args.text)
+            scope = _loop_scope(args)
+            authorization = operator_authorization(
+                None, "loop.add", scope_str(scope), content=text
+            )
+            result = service.loop_add_operator(
+                text, scope.get("repo", ""), authorization
+            )
+            print(f"{result['result']} loop#{result['loop']['id']}")
+            return
+        if args.action in ("list", "candidates"):
+            scope = _loop_scope(args)
+            result = service.loop_list(
+                scope.get("repo", ""), include_candidates=True
+            )
+            print(result["content"])
+            return
+        if args.action == "show":
+            sys.exit("refused: hardened loop show requires a gated daemon view")
+        loop_id = _loop_id(args.loop_id)
+        reason = getattr(args, "reason", "") or ""
+        authorization = operator_authorization(
+            None, f"loop.{args.action}", "global",
+            arguments={"loop": loop_id}, reason=reason,
+        )
+        result = service.loop_transition_operator(
+            loop_id, args.action, reason, authorization
+        )
+        print(f"loop#{loop_id} -> {result['loop']['state']}")
+        return
     from .loops import (LoopError, add_loop, loops_for_scope, reduce_loops,
                         transition)
     conn = connect()
@@ -344,11 +411,14 @@ def cmd_security(args):
         sys.exit(authd_main(["--socket", args.socket] if args.socket else []))
     if args.security_action == "migrate":
         from .migrate import MigrationError, migrate as run_migration
-        conn = connect()
+        from .db import (SchemaVersionError, open_archive_for_migration)
+        conn = open_archive_for_migration(read_only=bool(args.dry_run))
         try:
             result = run_migration(conn, dry_run=args.dry_run)
-        except MigrationError as e:
+        except (MigrationError, SchemaVersionError) as e:
             sys.exit(f"refused: {e}")
+        finally:
+            conn.close()
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True, default=str))
         elif result["applied"]:
@@ -385,27 +455,50 @@ def cmd_security(args):
         print(json.dumps(checkpoint_record(conn), indent=2, sort_keys=True))
         return
     if args.security_action == "key":
-        from .attest import (SIGNER_SECURE_ENCLAVE, registered_keys,
-                             register_key, revoke_key)
-        conn = connect()
+        from . import service
         if args.key_action == "list":
-            for k in registered_keys(conn):
+            for k in service.operator_keys():
                 state = f"revoked {k['revoked']}" if k["revoked"] else "active"
-                print(f"{k['key_id'][:16]}…  {k['signer']:22s} {state}")
+                tag = f" tag={k['signer_tag']}" if k["signer_tag"] else ""
+                print(f"{k['key_id'][:16]}…  {k['signer']:22s} {state}{tag}")
+            return
+        if args.key_action == "bootstrap":
+            from .attest import bootstrap_key
+            from .authd import service_context
+            data = (sys.stdin.buffer.read() if args.path == "-"
+                    else Path(args.path).read_bytes())
+            try:
+                with service_context():
+                    conn = connect()
+                    try:
+                        key_id = bootstrap_key(
+                            data, args.signer_tag, conn=conn,
+                            acknowledge_first_key=args.acknowledge_first_key_bootstrap,
+                        )
+                    finally:
+                        conn.close()
+            except Exception as exc:  # boundary failures are operator-facing
+                sys.exit(f"refused: {exc}")
+            print(f"bootstrapped {key_id}")
             return
         if args.key_action == "register":
             data = (sys.stdin.buffer.read() if args.path == "-"
                     else Path(args.path).read_bytes())
-            # registering a key is itself an operator act
-            operator_authorization(
-                conn, "security.key_register", "global",
-                arguments={"public_der": data.hex()})
-            print(f"registered {register_key(data, SIGNER_SECURE_ENCLAVE, conn=conn)}")
+            covered = {"public_der": data.hex(), "signer_tag": args.signer_tag}
+            authorization = operator_authorization(
+                None if service.hardened() else connect(),
+                "security.key_register", "global", arguments=covered,
+            )
+            result = service.key_register(data, args.signer_tag, authorization)
+            print(f"registered {result['key_id']}")
             return
         if args.key_action == "revoke":
-            operator_authorization(conn, "security.key_revoke", "global",
-                                   arguments={"key_id": args.key_id})
-            revoke_key(args.key_id, conn=conn)
+            authorization = operator_authorization(
+                None if service.hardened() else connect(),
+                "security.key_revoke", "global",
+                arguments={"key_id": args.key_id},
+            )
+            service.key_revoke(args.key_id, authorization)
             print(f"revoked {args.key_id}")
             return
 
@@ -416,10 +509,11 @@ def cmd_grant(args):
     operator."""
     from datetime import datetime, timezone
 
-    from .grants import (GrantError, add_grant, grant_line, parse_duration,
-                         reduce_grants, revoke_grant)
+    from .grants import (GrantError, _utc_instant, add_grant, grant_line,
+                         parse_duration, reduce_grants, revoke_grant)
     from .loops import make_scope, scope_str
-    conn = connect()
+    from . import service
+    conn = None if service.hardened() else connect()
     try:
         if args.action == "add":
             expires = args.until
@@ -427,16 +521,60 @@ def cmd_grant(args):
                 delta = parse_duration(args.for_)
                 expires = (datetime.now(timezone.utc) + delta).isoformat(
                     timespec="seconds")
+            if not expires:
+                raise GrantError("a grant requires --for or --until")
             scope = (make_scope(None) if args.global_scope
                      else make_scope(args.repo) if args.repo
                      else make_scope(None))
-            r = add_grant(conn, args.cls, scope, expires=expires,
-                          reason=args.reason or "", client="cli")
+            normalized = _utc_instant(expires).isoformat(timespec="seconds")
+            reason = args.reason or ""
+            authorization = operator_authorization(
+                conn, "grant.add", scope_str(scope),
+                arguments={"class": args.cls, "expires": normalized},
+                content=reason or None, reason=reason,
+            )
+            if service.hardened():
+                result = service.grant_add(
+                    args.cls, scope.get("repo", ""), normalized, reason,
+                    authorization,
+                )
+                print(f"{result['result']}: grant ev {result['grant']}")
+                return
+            r = add_grant(
+                conn, args.cls, scope, expires=normalized, reason=reason,
+                client="cli", authorization=authorization,
+            )
             word = {"created": "granted", "existing": "already granted"}
             print(f"{word[r['result']]}: {grant_line(r['grant'])}")
         elif args.action == "revoke":
+            reason = args.reason or ""
+            if service.hardened():
+                authorization = operator_authorization(
+                    None, "grant.revoke", "global",
+                    arguments={"grant": args.grant_id},
+                    content=reason or None, reason=reason,
+                )
+                result = service.grant_revoke(
+                    args.grant_id, reason, authorization
+                )
+                print(f"{result['result']} grant ev {args.grant_id}")
+                return
+            reduced = reduce_grants(conn)
+            grant = next(
+                (item for item in reduced["grants"]
+                 if item["id"] == args.grant_id),
+                None,
+            )
+            if grant is None:
+                raise GrantError(f"no grant ev {args.grant_id}")
+            authorization = operator_authorization(
+                conn, "grant.revoke", scope_str(grant["scope"]),
+                arguments={"grant": args.grant_id}, content=reason or None,
+                reason=reason,
+            )
             r = revoke_grant(conn, args.grant_id,
-                             reason=args.reason or "", client="cli")
+                             reason=reason, client="cli",
+                             authorization=authorization)
             if r["result"] == "already_revoked":
                 print(f"grant ev {args.grant_id} was already revoked "
                       f"(ev {r['grant']['revoked_by']})")
@@ -444,6 +582,11 @@ def cmd_grant(args):
                 print(f"revoked grant ev {args.grant_id} "
                       f"(revocation ev {r['event']})")
         else:  # list
+            if conn is None:
+                sys.exit(
+                    "refused: hardened grant listing requires a gated daemon "
+                    "read; add/revoke ceremonies remain available"
+                )
             from .db import now_iso
             red = reduce_grants(conn)
             now = now_iso()
@@ -479,6 +622,25 @@ def cmd_grant(args):
 def cmd_decision(args):
     """Supersession edges (docs/DECISIONS.md): a human CLI act, like loop
     confirmation — there is no model-mediated path to an edge."""
+    from . import service
+    if service.hardened():
+        if args.action != "supersede":
+            sys.exit(
+                "refused: hardened decision views require a gated daemon read"
+            )
+        reason = args.reason or ""
+        authorization = operator_authorization(
+            None, "decision.supersede", "global",
+            arguments={"old": args.old, "new": args.new},
+            content=reason or None, reason=reason,
+        )
+        result = service.decision_supersede_operator(
+            args.old, args.new, reason, authorization
+        )
+        edge = result["edge"]
+        print(f"{result['result']}: ev {edge['old']} superseded by "
+              f"ev {edge['new']} (edge ev {edge['edge']})")
+        return
     from .decisions import (DecisionError, current_version,
                             record_supersession, reduce_supersessions)
     conn = connect()
@@ -715,9 +877,15 @@ def cmd_exp(args):
 def cmd_backup(args):
     dest_dir = Path(args.dest).expanduser() if args.dest else home() / "backups"
     try:
-        result = create_backup(
-            connect(), home(), dest_dir, keep=args.keep
-        )
+        from . import service
+        if service.hardened():
+            authorization = operator_authorization(
+                None, "archive.backup", "global",
+                arguments={"destination": str(dest_dir), "keep": args.keep},
+            )
+            result = service.backup(str(dest_dir), authorization, keep=args.keep)
+        else:
+            result = create_backup(connect(), home(), dest_dir, keep=args.keep)
     except BackupError as exc:
         sys.exit(f"backup refused: {exc}")
     print(
@@ -733,9 +901,20 @@ def cmd_backup(args):
 
 def cmd_restore(args):
     try:
-        result = restore_backup(
-            Path(args.bundle).expanduser(), Path(args.dest).expanduser()
-        )
+        from . import service
+        bundle = Path(args.bundle).expanduser()
+        destination = Path(args.dest).expanduser()
+        if service.hardened():
+            authorization = operator_authorization(
+                None, "archive.restore", "global",
+                arguments={"bundle": str(bundle),
+                           "destination": str(destination)},
+            )
+            result = service.restore(
+                str(bundle), str(destination), authorization
+            )
+        else:
+            result = restore_backup(bundle, destination)
     except BackupError as exc:
         sys.exit(f"restore refused: {exc}")
     print(
@@ -787,6 +966,8 @@ def main():
     sub.add_parser("init", help="create ~/.contextd (db, config, blob store)")
     sp = sub.add_parser("note", help="append a note event")
     sp.add_argument("text", nargs="*")
+    sp.add_argument("--authorize", action="store_true",
+                    help="require a fresh hardware-signed operator action")
     sub.add_parser("ingest", help="run all ingesters once")
     sub.add_parser("watch", help="run ingesters on a loop (the daemon)")
     sp = sub.add_parser("search", help="local FTS search (not logged)")
@@ -939,8 +1120,19 @@ def main():
     sk = ssub.add_parser("key", help="operator key registry")
     ksub = sk.add_subparsers(dest="key_action", required=True)
     ksub.add_parser("list", help="registered operator keys")
+    kb = ksub.add_parser(
+        "bootstrap",
+        help="out-of-band first key enrollment (must run as _contextd)",
+    )
+    kb.add_argument("path", help="DER file, or - for stdin")
+    kb.add_argument("--signer-tag", required=True,
+                    help="Secure Enclave application tag used at enrollment")
+    kb.add_argument("--acknowledge-first-key-bootstrap", action="store_true",
+                    help="acknowledge this one-time service-admin ceremony")
     kr = ksub.add_parser("register", help="register a Secure Enclave public key")
     kr.add_argument("path", help="DER file, or - for stdin")
+    kr.add_argument("--signer-tag", required=True,
+                    help="Secure Enclave application tag used at enrollment")
     kv = ksub.add_parser("revoke", help="revoke a registered key")
     kv.add_argument("key_id")
 

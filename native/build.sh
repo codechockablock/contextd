@@ -7,15 +7,11 @@
 #
 #   native/build.sh                 -> native/contextd-signer
 #
-# Signing with the Secure Enclave requires the binary to be code-signed with a
-# keychain-access entitlement. For local operator use, ad-hoc signing is
-# enough; for an installed deployment, sign with a Developer ID identity:
-#
-#   codesign --force --sign - --entitlements native/signer.entitlements \
-#            native/contextd-signer
-#
-# The build below applies the ad-hoc form. Verify what you got with:
-#   codesign -d --entitlements - native/contextd-signer
+# The local build is ad-hoc signed without restricted entitlements. Adding a
+# keychain-access-group entitlement to an ad-hoc binary makes macOS kill it at
+# launch because no provisioning profile grants that group. A release build
+# may use a stable Developer ID/provisioned identifier, but must remain able to
+# execute after signing. Verify the local artifact with `codesign --verify`.
 set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -41,10 +37,9 @@ swiftc -O \
     -o "$out" \
     "$here/contextd-signer.swift"
 
-echo "code-signing (ad-hoc) with the keychain-access entitlement"
-codesign --force --sign - \
-    --entitlements "$here/signer.entitlements" \
-    "$out"
+echo "code-signing (ad-hoc, no restricted entitlements)"
+codesign --force --sign - "$out"
+codesign --verify --strict "$out"
 
 chmod 0755 "$out"
 echo
@@ -52,5 +47,7 @@ echo "built: $out"
 echo
 echo "NOT DONE AUTOMATICALLY (each is an operator action):"
 echo "  1. enroll a key:   $out enroll --key-id default > operator-key.der"
-echo "  2. register it:    ctx security key register operator-key.der"
-echo "  3. verify:         ctx security doctor --strict --json"
+echo "  2. install helper: sudo native/install.sh"
+echo "  3. first archive:  follow docs/OPERATOR_CEREMONY.md bootstrap steps"
+echo "     later key:      ctx security key register operator-key.der --signer-tag default"
+echo "  4. verify:         ctx security doctor --strict --json"

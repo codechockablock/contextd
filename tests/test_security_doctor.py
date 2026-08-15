@@ -99,17 +99,15 @@ def test_service_signatures_fails_while_nothing_is_signed():
     conn = connect()
     result = run(conn)["invariants"]["service_signatures"]
     assert result["ok"] is False
-    assert "nothing has been service-signed" in result["detail"]
-    assert "recompute" in result["detail"]      # says WHY the chain is not enough
+    assert "no signed coverage cutover" in result["detail"]
 
 
 def test_service_signatures_passes_once_the_ledger_is_signed():
     from contextd.ingest import ingest_note
-    from contextd.ledger_sig import sign_event, sign_tip
+    from contextd.ledger_sig import sign_tip
     conn = connect()
-    eid = ingest_note(conn, "an event worth signing")
-    sign_event(conn, eid)
-    sign_tip(conn)
+    sign_tip(conn, cutover=True)
+    ingest_note(conn, "an event worth signing")
     result = run(conn)["invariants"]["service_signatures"]
     assert result["ok"] is True
     assert "verify" in result["detail"]
@@ -117,16 +115,30 @@ def test_service_signatures_passes_once_the_ledger_is_signed():
 
 def test_service_signatures_fails_loudly_on_a_bad_signature():
     from contextd.ingest import ingest_note
-    from contextd.ledger_sig import sign_event
+    from contextd.ledger_sig import sign_tip
     from tests.test_service_attestation import _rewrite_event
     conn = connect()
+    sign_tip(conn, cutover=True)
     eid = ingest_note(conn, "original")
-    sign_event(conn, eid)
     _rewrite_event(conn, eid, "tampered")
     result = run(conn)["invariants"]["service_signatures"]
     assert result["ok"] is False
     assert "altered after acceptance" in result["detail"]
     assert "compromised" in result["remedy"]
+
+
+def test_service_signatures_fails_on_a_missing_post_cutover_signature():
+    from contextd.ingest import ingest_note
+    from contextd.ledger_sig import sign_tip
+
+    conn = connect()
+    sign_tip(conn, cutover=True)
+    eid = ingest_note(conn, "accepted")
+    conn.execute("DELETE FROM service_signatures WHERE event_id = ?", (eid,))
+    conn.commit()
+    result = run(conn)["invariants"]["service_signatures"]
+    assert result["ok"] is False
+    assert "lack a required service signature" in result["detail"]
 
 
 def test_protected_checkpoint_fails_when_the_checkpoint_is_writable(tmp_path):

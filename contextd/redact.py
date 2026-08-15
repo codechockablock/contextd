@@ -69,14 +69,22 @@ def _extras(cfg) -> tuple:
     """Config-supplied patterns, applied *after* the floor and never instead
     of it. A config key colliding with a floor name is kept under a distinct
     display name so the floor class stays legible in output."""
-    table = ((cfg or {}).get("gate") or {}).get("redact") or {}
+    try:
+        gate = (cfg or {}).get("gate") or {}
+        table = gate.get("redact") or {}
+        entries = table.items()
+    except AttributeError as exc:
+        raise RedactionError("invalid configured redaction table") from exc
     out = []
-    for name, pattern in table.items():
-        label = f"config.{name}" if name in FLOOR else str(name)
+    for index, (_name, pattern) in enumerate(entries):
+        # Config keys are attacker-controlled too.  Never copy one into a
+        # redaction marker or refusal message; a secret-shaped key would turn
+        # the marker itself into a persistence/display leak.
+        label = f"config.{index}"
         try:
             out.append((label, re.compile(pattern)))
         except (re.error, TypeError) as exc:
-            raise RedactionError(f"invalid [gate.redact] pattern {name!r}: {exc}") from exc
+            raise RedactionError("invalid configured redaction pattern") from exc
     return tuple(out)
 
 
@@ -91,30 +99,56 @@ def redact(cfg, text: str) -> str:
     return text
 
 
-_CONTROL_RX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Preserve ordinary layout (TAB/LF/CR), but remove every other C0 control and
+# the full DEL/C1 range.  ESC, BEL, OSC/CSI introducers and their 8-bit forms
+# must not survive into a terminal, log, JSONL capture, or the archive.
+_CONTROL_RX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_TERMINAL_SEQUENCE_RX = re.compile(
+    r"(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))"
+    r"|(?:\x9d[^\x07\x9c]*(?:\x07|\x9c))"
+    r"|(?:(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~])"
+)
 
 
 class SanitizationError(ValueError):
     """A declared field carried a value the schema cannot sanitize."""
 
 
-def sanitize_text(cfg, text, max_len: int = MAX_TEXT) -> str:
-    """Field-specific sanitization for a *declared* free-text field.
+def sanitize_content(cfg, text, max_len: int | None = None) -> str:
+    """Sanitize ordinary persisted/displayed text at the privacy boundary.
 
-    Redaction floor, then control-character removal (control bytes smuggle
-    terminal escapes into `ctx audit` output and split patterns across a
-    match boundary), then NFC normalization, then a hard length bound.
+    This helper is deliberately separate from schema validation so archive
+    content, URIs, subprocess diagnostics, and cursor strings can all use the
+    same floor.  Signed/verbatim structures must compare this result with the
+    original and refuse on any difference; silently rewriting those bytes
+    would invalidate their provenance.
     """
     if text is None:
         return ""
     if not isinstance(text, str):
-        raise SanitizationError(f"expected text, got {type(text).__name__}")
+        raise SanitizationError("expected text")
     value = unicodedata.normalize("NFC", text)
+    value = _TERMINAL_SEQUENCE_RX.sub("", value)
     value = _CONTROL_RX.sub("", value)
+    value = "".join(
+        ch
+        for ch in value
+        if ch in "\t\n\r" or unicodedata.category(ch) not in {"Cc", "Cf"}
+    )
     value = redact(cfg, value)
-    if len(value) > max_len:
+    if max_len is not None and len(value) > max_len:
         value = value[:max_len] + "…[truncated]"
     return value
+
+
+def sanitize_text(cfg, text, max_len: int = MAX_TEXT) -> str:
+    """Field-specific sanitization for a *declared* free-text field.
+
+    NFC normalization, terminal/control removal (control bytes smuggle
+    terminal escapes into `ctx audit` output and split patterns across a
+    match boundary), the redaction floor, then a hard length bound.
+    """
+    return sanitize_content(cfg, text, max_len=max_len)
 
 
 _LABEL_RX = re.compile(r"[^A-Za-z0-9._:-]+")
@@ -133,9 +167,15 @@ def sanitize_label(cfg, text, max_len: int = MAX_LABEL) -> str:
     if not text:
         return ""
     if not isinstance(text, str):
-        raise SanitizationError(f"expected label, got {type(text).__name__}")
+        raise SanitizationError("expected label")
     value = unicodedata.normalize("NFC", text)
+    value = _TERMINAL_SEQUENCE_RX.sub("", value)
     value = _CONTROL_RX.sub("", value)
+    value = "".join(
+        ch
+        for ch in value
+        if ch in "\t\n\r" or unicodedata.category(ch) not in {"Cc", "Cf"}
+    )
     value = redact(cfg, value)
     value = _LABEL_RX.sub("-", value).strip("-")
     return value[:max_len]

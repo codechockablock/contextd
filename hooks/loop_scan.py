@@ -38,6 +38,7 @@ from contextd.capability import issue as issue_capability  # noqa: E402
 from contextd.capability import token as capability_token  # noqa: E402
 from contextd.gate import disclose, record_dispatch_outcome  # noqa: E402
 from contextd.scratch import harden_file, scratch_dir  # noqa: E402
+from contextd.redact import sanitize_content  # noqa: E402
 
 CLAUDE_BIN = os.environ.get("LOOP_SCAN_CLAUDE_BIN", "claude")
 MODEL = os.environ.get("LOOP_SCAN_MODEL", "haiku")
@@ -183,14 +184,18 @@ def scan(conn, cfg, repo: str, session_id: str | None = None,
     text = ""
     if r.stdout.strip():
         try:
-            text = json.loads(r.stdout).get("result") or ""
+            parsed = json.loads(r.stdout)
+            text = parsed.get("result") or "" if isinstance(parsed, dict) else ""
         except json.JSONDecodeError:
             text = r.stdout
+    if not isinstance(text, str):
+        text = ""
     return {"dispatch_status": status, "exit": r.returncode,
             "duration_ms": duration_ms, "candidates": after - before,
             "egress_id": disclosure["egress_id"],
-            "stderr": r.stderr[-2000:] if r.returncode else "",
-            "text": text[:5000]}
+            "stderr": sanitize_content(cfg, r.stderr, max_len=2000)
+            if r.returncode else "",
+            "text": sanitize_content(cfg, text, max_len=5000)}
 
 
 def main():

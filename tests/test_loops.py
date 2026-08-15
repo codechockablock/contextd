@@ -17,7 +17,7 @@ from contextd.gate import verify_anchors
 from contextd.handoff import compile_checkpoint, select_checkpoint_context
 from contextd.loops import (LoopError, add_candidate, add_loop, dedupe_key,
                             loops_for_scope, make_scope, reduce_loops,
-                            transition)
+                            scope_str, transition)
 from experiments.open_loops.scoring import check_carriage
 
 
@@ -178,9 +178,11 @@ def test_reducer_replay_is_deterministic_and_anomaly_safe(
                        "authority": "operator"})
     out = reduce_loops(conn)
     got = out["loops"][lp["id"]]
-    assert got["state"] == "open" and got["reopen_count"] == 1
-    assert [a["why"] for a in got["anomalies"]] == \
-        ["dismiss recorded while open"]
+    assert got["state"] == "closed" and got["reopen_count"] == 0
+    assert [a["why"] for a in got["anomalies"]] == [
+        "reopen lacks a verified authorization",
+        "dismiss lacks a verified authorization",
+    ]
     assert out["orphans"][0]["why"].startswith("close targets unknown")
     # replay twice: byte-identical result (pure reduction)
     assert json.dumps(reduce_loops(conn), sort_keys=True) == \
@@ -192,16 +194,53 @@ def test_crash_mid_add_then_blind_retry_yields_one_loop(
     conn = connect()
     scope = REPO_A
     text = "audit the naive datetime handling"
-    meta = {"op": "add", "scope": scope, "authority": "operator",
-            "client": "cli", "dedupe": dedupe_key(scope, text)}
+
+    def signed_crash_append(value, fault):
+        from contextd.attest import (
+            consume_nonce,
+            reverify_for_use,
+            test_mode_authorization,
+        )
+
+        authorization = test_mode_authorization(
+            conn, "loop.add", scope_str(scope), content=value
+        )
+        meta = {
+            "op": "add",
+            "scope": scope,
+            "authority": "operator",
+            "assurance": authorization.assurance,
+            "attestation": authorization.stored_block(),
+            "client": "cli",
+            "dedupe": dedupe_key(scope, value),
+        }
+
+        def bind(locked_conn, _ts, event_id):
+            verified = reverify_for_use(
+                locked_conn,
+                authorization,
+                action="loop.add",
+                scope=scope_str(scope),
+                content=value,
+            )
+            consume_nonce(locked_conn, verified, event_id)
+
+        return append_event_checked(
+            conn,
+            "loop",
+            "loop",
+            content=value,
+            meta=meta,
+            bind=bind,
+            fault=fault,
+        )
 
     def boom(phase):
         if phase == "before_db_commit":
             raise InjectedCrash(phase)
 
     with pytest.raises(InjectedCrash):
-        append_event_checked(conn, "loop", "loop", content=text, meta=meta,
-                             fault=boom)
+        signed_crash_append(text, boom)
     conn.close()  # abrupt death: uncommitted row rolls back
 
     conn = connect()  # recovery runs on connect
@@ -215,9 +254,7 @@ def test_crash_mid_add_then_blind_retry_yields_one_loop(
             raise InjectedCrash(phase)
     text2 = "re-validate the February archive"
     with pytest.raises(InjectedCrash):
-        append_event_checked(conn, "loop", "loop", content=text2,
-                             meta={**meta, "dedupe": dedupe_key(scope, text2)},
-                             fault=late_boom)
+        signed_crash_append(text2, late_boom)
     conn.close()
     conn = connect()
     r2 = add_loop(conn, text2, scope)
@@ -427,7 +464,7 @@ def test_distilled_checkpoint_reattaches_section_verbatim(
                            meta={"actor": "human"})
     monkeypatch.setattr(
         ckpt, "distill",
-        lambda payload, model, timeout=600:
+        lambda payload, model, timeout=600, cfg=None:
         (f"OBJECTIVE: continue [{note_id}]\nNEXT: finish the cutover, then "
          f"the replay [{lp['id']}]", 0.0))
     out = ckpt.compile_distilled(conn, cfg, raw_budget=4000,

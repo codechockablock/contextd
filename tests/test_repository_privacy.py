@@ -23,7 +23,8 @@ GENERATOR = REPO_ROOT / "scripts" / "generate_retrieval_fixtures.py"
 TASKS = REPO_ROOT / "experiments" / "tasks"
 
 sys.path.insert(0, str(REPO_ROOT))
-from scripts.audit_repository_privacy import scan_text  # noqa: E402
+import scripts.audit_repository_privacy as privacy_scanner  # noqa: E402
+from scripts.audit_repository_privacy import scan_bytes, scan_text  # noqa: E402
 
 OWNERS = {"exampleowner"}
 
@@ -37,6 +38,7 @@ POSITIVES = {
     ),
     "private_repo": "cloned from github.com/exampleowner/private-thing",
     "credential": "export KEY=sk-planted00000000000000",
+    "email": "private.person@example.invalid",
 }
 
 # --- negatives: near misses that must NOT fire ------------------------------
@@ -49,6 +51,7 @@ NEGATIVES = {
     ),
     "private_repo": "cloned from github.com/python/cpython",
     "credential": "sk- is the prefix; commit 7a94e637b337; card game at 4pm",
+    "email": "use person-at-example dot invalid in prose",
 }
 
 
@@ -71,6 +74,60 @@ def test_scan_returns_counts_only_never_values():
     for value in POSITIVES.values():
         assert value not in blob
     assert all(isinstance(n, int) for n in counts.values())
+
+
+def test_binary_and_large_files_are_scanned_without_skip_cliffs():
+    canary = POSITIVES["credential"]
+    binary = b"\x00\xffprefix " + canary.encode() + b" suffix\x00"
+    assert scan_bytes(binary, OWNERS).get("credential", 0) >= 1
+    large = b"x" * (8 * 1024 * 1024 + 1) + canary.encode()
+    assert scan_bytes(large, OWNERS).get("credential", 0) >= 1
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    ["utf-16-le", "utf-16-be", "utf-16", "utf-32-le", "utf-32-be", "utf-32"],
+)
+def test_multibyte_encoded_credentials_are_scanned(encoding):
+    raw = POSITIVES["credential"].encode(encoding)
+    assert scan_bytes(raw, OWNERS).get("credential", 0) >= 1
+
+
+def test_exact_approval_does_not_cover_second_or_relocated_match():
+    first = privacy_scanner._occurrences(POSITIVES["credential"], OWNERS)[0]
+    entry = {
+        "matches": [
+            {
+                "class": first[0],
+                "line": first[1],
+                "sha256": first[2],
+                "count": 1,
+            }
+        ]
+    }
+    counts, missing = privacy_scanner._approved_counts([first, first], entry)
+    assert missing == 0 and counts == {"credential": 1}
+    relocated = (first[0], first[1] + 1, first[2])
+    counts, missing = privacy_scanner._approved_counts([relocated], entry)
+    assert missing == 1 and counts == {"credential": 1}
+
+
+def test_sensitive_or_control_bearing_location_is_not_emitted():
+    secret = "sk-" + "z" * 20
+    location = privacy_scanner._safe_location(f"bad\x1b[31m/{secret}", OWNERS)
+    assert secret not in location and "\x1b" not in location
+    assert location.startswith("<sensitive-path:")
+
+
+def test_tracked_symlink_reader_scans_link_text_not_target_bytes(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.write_bytes(b"private target bytes")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    monkeypatch.setattr(privacy_scanner, "REPO_ROOT", tmp_path)
+    raw = privacy_scanner._read_tracked_path(link)
+    assert raw == str(target).encode()
+    assert b"private target bytes" not in raw
 
 
 def _run(*args, cwd=None):
@@ -96,6 +153,17 @@ def test_report_is_owner_only_readable(tmp_path):
     report = tmp_path / "report.json"
     _run("--tracked", "--redact-output", "--report", str(report))
     assert (os.stat(report).st_mode & 0o777) == 0o600
+
+
+def test_report_refuses_symlink_destination(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text("keep")
+    report = tmp_path / "report.json"
+    report.symlink_to(target)
+    result = _run("--tracked", "--report", str(report))
+    assert result.returncode == 2
+    assert result.stderr == "report write failed\n"
+    assert target.read_text() == "keep"
 
 
 def test_tracked_tree_passes_the_gate():
@@ -126,9 +194,35 @@ def test_every_allowlist_entry_documents_itself():
         (REPO_ROOT / "scripts" / "repository_privacy_allow.json").read_text()
     )
     for name, entry in allow["tracked"].items():
-        assert entry.get("classes"), f"{name}: no classes listed"
+        assert entry.get("matches"), f"{name}: no exact matches listed"
         assert entry.get("status") in {"synthetic", "awaiting_operator"}, name
         assert len(entry.get("reason", "")) > 40, f"{name}: reason too thin"
+        for match in entry["matches"]:
+            assert set(match) == {"class", "line", "sha256", "count"}
+            assert match["line"] >= 0 and match["count"] >= 1
+            assert len(match["sha256"]) == 64
+
+
+def test_history_scans_commit_metadata(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Private Person"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", POSITIVES["email"]], cwd=repo, check=True
+    )
+    (repo / "clean.txt").write_text("clean")
+    subprocess.run(["git", "add", "clean.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "clean message"], cwd=repo, check=True)
+    monkeypatch.setattr(privacy_scanner, "REPO_ROOT", repo)
+
+    findings = privacy_scanner.scan_history(set())
+
+    assert any(
+        finding["class"] == "email"
+        and finding["location"] == "commit_metadata"
+        for finding in findings
+    )
 
 
 # --- the synthetic fixtures -------------------------------------------------
@@ -271,3 +365,12 @@ def test_triage_classifiers_reject_a_realistic_secret():
     assert classify(realistic, "contextd/thing.py", "key = load()") == \
         "UNCLASSIFIED"
     assert classify(realistic, "docs/notes.md", "we used it") == "UNCLASSIFIED"
+
+
+def test_oversized_file_fails_closed_instead_of_silent_skip(tmp_path, monkeypatch):
+    path = tmp_path / "large.bin"
+    path.write_bytes(b"12345")
+    monkeypatch.setattr(privacy_scanner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(privacy_scanner, "MAX_SCAN_BYTES", 4)
+    with pytest.raises(privacy_scanner.UnscannedOversized):
+        privacy_scanner._read_tracked_path(path)

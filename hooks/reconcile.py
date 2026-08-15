@@ -23,6 +23,7 @@ from contextd.db import append_event, connect  # noqa: E402
 from contextd.capability import issue as issue_capability  # noqa: E402
 from contextd.capability import token as capability_token  # noqa: E402
 from contextd.gate import disclose, record_dispatch_outcome  # noqa: E402
+from contextd.redact import sanitize_content  # noqa: E402
 
 CLAUDE_BIN = os.environ.get("RECONCILE_CLAUDE_BIN", "claude")
 MODEL = os.environ.get("RECONCILE_MODEL", "haiku")
@@ -140,11 +141,13 @@ def main():
     except OSError:
         return  # another run is in flight
     conn = connect()
+    cfg = load_config()
     for epoch_id, meta in unreconciled_epochs(conn)[:MAX_EPOCHS_PER_RUN]:
         try:
             result = reconcile(conn, epoch_id, meta)
         except Exception as e:  # no marker written: the epoch retries next run
-            print(json.dumps({"epoch": epoch_id, "error": str(e)}), flush=True)
+            error = sanitize_content(cfg, str(e), max_len=500)
+            print(json.dumps({"epoch": epoch_id, "error": error}), flush=True)
             continue
         append_event(conn, "claude_code", "reconcile",
                      meta={"epoch_id": epoch_id, "model": MODEL, **result})

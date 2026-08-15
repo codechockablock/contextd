@@ -36,7 +36,7 @@ from itertools import combinations
 
 from .db import append_event
 from .gate import disclose, est_tokens, select_items
-from .assurance import is_authenticated_human
+from .assurance import OPERATOR_AUTHORIZED, known_event_assurance
 from .search import search
 
 PROVENANCE_CLASSES = ("human", "model", "activity", "other")
@@ -61,7 +61,8 @@ def provenance_class(source, kind, meta: dict) -> str:
     return "other"
 
 
-def epistemic_type(source, kind, meta: dict) -> str:
+def epistemic_type(source, kind, meta: dict,
+                   verified_assurance: str | None = None) -> str:
     """Epistemic type from what ingestion recorded.
 
     Five levels, and the split between the middle two is the point:
@@ -97,6 +98,7 @@ def epistemic_type(source, kind, meta: dict) -> str:
         (kind == "note" and meta.get("actor") not in (None, "mcp"))
         or (kind == "loop" and meta.get("authority") == "operator")
         or (kind == "decision" and meta.get("authority") == "operator")
+        or meta.get("attestation") is not None
         or (source == "claude_code" and kind == "message"
             and meta.get("role") == "user")
     )
@@ -106,7 +108,7 @@ def epistemic_type(source, kind, meta: dict) -> str:
         ):
             return "model_inference"
         return "unknown"
-    if is_authenticated_human(meta):
+    if verified_assurance == OPERATOR_AUTHORIZED:
         return "attested_human_assertion"
     return "claimed_human_assertion"
 
@@ -139,7 +141,12 @@ def freeze(conn, cfg, query: str, budget: int, since: str = "", until: str = "",
             "transport_role": meta.get("role") or meta.get("actor") or it["source"],
             "origin": ov["origin"] if ov else prov,
             "origin_basis": f"assessed: {ov['reason']}" if ov else "recorded",
-            "epistemic_type": epistemic_type(it["source"], it["kind"], meta),
+            "epistemic_type": epistemic_type(
+                it["source"],
+                it["kind"],
+                meta,
+                known_event_assurance(conn, it),
+            ),
             "est_tokens": it["est_tokens"],
             "header": it["header"], "text": it["text"],
             "sha": _sha(it["header"] + "\n" + it["text"]),

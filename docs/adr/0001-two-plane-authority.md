@@ -89,11 +89,11 @@ non-NFC strings, ints outside int64, non-string map keys, and **any key not in
 the schema below**. Floats are refused because IEEE-754 round-tripping is not
 reproducible across languages; there is no field that needs one.
 
-**Field schema — exactly these twelve keys, all required:**
+**Field schema — exactly these thirteen keys, all required:**
 
 | Key | Type | Meaning | Constructed by |
 |---|---|---|---|
-| `domain` | str | `"contextd.operator.action"` — domain separator | constant |
+| `domain` | str | `"contextd.OperatorActionV1"` — domain separator | constant |
 | `version` | int | protocol version, `1` | constant |
 | `archive_uuid` | str | UUID of the target archive | daemon |
 | `key_id` | str | operator key identifier (SHA-256 of SPKI, hex) | daemon |
@@ -118,11 +118,11 @@ stated per-verb:
 
 | Verb | Component | Notes |
 |---|---|---|
-| **constructs** | daemon (`contextd/attest.py` `build_action`) | from a validated request + fresh nonce/sequence |
-| **displays** | client, from the daemon's returned `human_summary` **and** the canonical bytes' digest | the client shows what it is about to ask the human to approve; the human's real assurance is the presence gesture plus the summary, and the ADR does **not** claim the human verified the digest |
-| **signs** | `native/contextd-signer` (Swift, Security.framework) | `kSecKeyAlgorithmECDSASignatureMessageX962SHA256` over the exact canonical bytes; `kSecAccessControlBiometryCurrentSet \| .userPresence`, `kSecAttrIsPermanent`, `kSecAttrTokenIDSecureEnclave` |
+| **constructs** | daemon (`contextd/attest.py` `prepare_action`) | from a validated request + fresh nonce/sequence |
+| **displays** | root-owned `native/contextd-signer`, decoded from the exact bytes it will sign | the client summary is cosmetic and untrusted; the native helper refuses malformed/non-OperatorActionV1 bytes and constructs the presence prompt itself |
+| **signs** | `native/contextd-signer` (Swift, Security.framework) | `kSecKeyAlgorithmECDSASignatureMessageX962SHA256` over the exact canonical bytes; private-key usage with `biometryCurrentSet OR devicePasscode`, a fresh zero-reuse `LAContext`, `kSecAttrIsPermanent`, and `kSecAttrTokenIDSecureEnclave` |
 | **verifies** | daemon (`contextd/attest.py` `verify_action`) using **pyca/cryptography** (P-256 ECDSA, X9.62/DER) | no hand-rolled primitives |
-| **consumes** | daemon, inside the same append critical section as the act | nonce marked used + sequence advanced atomically with the event insert |
+| **consumes** | daemon, after full transaction-local reverification | append nonces are spent atomically with the event; reads/filesystem operations spend first and fail closed before their effect |
 | **stores** | daemon | the action map, the DER signature, and `key_id` in the event's `attestation` block |
 
 **Signature algorithm**: ECDSA P-256 with SHA-256, DER (X9.62) encoding, over

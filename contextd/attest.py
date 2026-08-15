@@ -29,11 +29,12 @@ comprehension, truth, or provider receipt — see docs/SECURITY.md §5.
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
+import stat
 import subprocess
 import time
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +57,9 @@ ACTION_FIELDS = (
     "issued_at", "expires_at", "action", "scope", "arguments",
     "content_digest", "reason_digest",
 )
+ATTESTATION_FIELDS = (
+    "action", "signature", "key_id", "signer", "verified_at",
+)
 
 #: Closed action-class registry. A class not listed here cannot be authorized.
 ACTION_CLASSES = frozenset({
@@ -63,9 +67,8 @@ ACTION_CLASSES = frozenset({
     "loop.add", "loop.confirm", "loop.close", "loop.reopen", "loop.dismiss",
     "grant.add", "grant.revoke",
     "decision.supersede",
-    "outcome.judge",
     "archive.raw_read", "archive.export", "archive.backup", "archive.restore",
-    "security.policy", "security.key_register", "security.key_revoke",
+    "security.key_register", "security.key_revoke",
 })
 
 DEFAULT_TTL_SECONDS = 300
@@ -74,6 +77,7 @@ EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
 SIGNER_SECURE_ENCLAVE = "secure_enclave"
 SIGNER_TEST = INSECURE_TEST_SIGNER
+_SIGNER_TAG = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
 
 #: Set to "1" to permit the software test signer. Refused unless the archive is
 #: also an isolated temporary one (see `_assert_test_mode_ok`).
@@ -82,6 +86,48 @@ TEST_MODE_ENV = "CONTEXTD_INSECURE_TEST_SIGNER"
 
 class AttestationError(RuntimeError):
     """An operator action could not be prepared, signed, or verified."""
+
+
+class _FrozenDict(dict):
+    """A JSON/canonical-encoder compatible mapping that cannot drift after verify."""
+
+    def _immutable(self, *_args, **_kwargs):
+        raise TypeError("verified authorization data is immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = \
+        _immutable
+
+
+def _freeze_action(action: dict) -> _FrozenDict:
+    """Copy untrusted input into a deeply immutable, closed action object."""
+    _validate_action_shape(action)
+    copied = {field: action[field] for field in ACTION_FIELDS}
+    copied["arguments"] = _FrozenDict(dict(copied["arguments"]))
+    return _FrozenDict(copied)
+
+
+def _split_signer(value: str) -> tuple[str, str | None]:
+    if value == SIGNER_SECURE_ENCLAVE:
+        # Compatibility for keys enrolled before the registry retained the
+        # Keychain application tag. The old documented enrollment tag was
+        # literally "default".
+        return SIGNER_SECURE_ENCLAVE, "default"
+    prefix = SIGNER_SECURE_ENCLAVE + ":"
+    if value.startswith(prefix):
+        return SIGNER_SECURE_ENCLAVE, value[len(prefix):]
+    return value, None
+
+
+def _stored_signer(signer: str, signer_tag: str | None) -> str:
+    if signer == SIGNER_SECURE_ENCLAVE:
+        if not isinstance(signer_tag, str) or not _SIGNER_TAG.fullmatch(signer_tag):
+            raise AttestationError(
+                "a Secure Enclave key requires its 1-64 character enrollment tag"
+            )
+        return f"{SIGNER_SECURE_ENCLAVE}:{signer_tag}"
+    if signer_tag is not None:
+        raise AttestationError("only Secure Enclave keys have an enrollment tag")
+    return signer
 
 
 # --- state --------------------------------------------------------------
@@ -136,7 +182,8 @@ def key_id_for(public_der: bytes) -> str:
     return hashlib.sha256(public_der).hexdigest()
 
 
-def register_key(public_der: bytes, signer: str, conn=None) -> str:
+def register_key(public_der: bytes, signer: str, conn=None, *,
+                 signer_tag: str | None = None, commit: bool = True) -> str:
     own = conn is None
     conn = conn or state()
     try:
@@ -152,28 +199,47 @@ def register_key(public_der: bytes, signer: str, conn=None) -> str:
             raise AttestationError(f"unknown signer kind {signer!r}")
         if signer == SIGNER_TEST:
             _assert_test_mode_ok()
+        stored_signer = _stored_signer(signer, signer_tag) \
+            if signer == SIGNER_SECURE_ENCLAVE else signer
         kid = key_id_for(public_der)
+        existing = conn.execute(
+            "SELECT public_der, signer, revoked FROM operator_keys WHERE key_id = ?",
+            (kid,),
+        ).fetchone()
+        if existing is not None:
+            if existing["revoked"] is not None:
+                raise AttestationError(
+                    "a revoked key cannot be re-registered; enroll a new key"
+                )
+            if (bytes(existing["public_der"]) != public_der
+                    or existing["signer"] != stored_signer):
+                raise AttestationError("registered key metadata does not match")
+            return kid
         conn.execute(
-            "INSERT OR REPLACE INTO operator_keys(key_id, public_der, signer, "
-            "registered, revoked) VALUES (?,?,?,?, NULL)",
-            (kid, public_der, signer, _now_iso()),
+            "INSERT INTO operator_keys(key_id, public_der, signer, registered, "
+            "revoked) VALUES (?,?,?,?, NULL)",
+            (kid, public_der, stored_signer, _now_iso()),
         )
-        conn.commit()
+        if commit:
+            conn.commit()
         return kid
     finally:
         if own:
             conn.close()
 
 
-def revoke_key(key_id: str, conn=None) -> None:
+def revoke_key(key_id: str, conn=None, *, commit: bool = True) -> None:
     own = conn is None
     conn = conn or state()
     try:
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE operator_keys SET revoked = ? WHERE key_id = ? AND revoked IS NULL",
             (_now_iso(), key_id),
         )
-        conn.commit()
+        if cursor.rowcount != 1:
+            raise AttestationError("operator key does not exist or is already revoked")
+        if commit:
+            conn.commit()
     finally:
         if own:
             conn.close()
@@ -183,11 +249,15 @@ def registered_keys(conn=None) -> list[dict]:
     own = conn is None
     conn = conn or state()
     try:
-        return [
-            {"key_id": r["key_id"], "signer": r["signer"],
-             "registered": r["registered"], "revoked": r["revoked"]}
-            for r in conn.execute("SELECT * FROM operator_keys ORDER BY registered")
-        ]
+        out = []
+        for row in conn.execute("SELECT * FROM operator_keys ORDER BY registered"):
+            signer, tag = _split_signer(row["signer"])
+            out.append({
+                "key_id": row["key_id"], "signer": signer,
+                "signer_tag": tag, "registered": row["registered"],
+                "revoked": row["revoked"],
+            })
+        return out
     finally:
         if own:
             conn.close()
@@ -206,10 +276,100 @@ def _lookup_key(conn, key_id: str):
     return row
 
 
+def _service_account_uid() -> int:
+    try:
+        import pwd
+        return pwd.getpwnam("_contextd").pw_uid
+    except (ImportError, KeyError) as exc:
+        raise AttestationError(
+            "the _contextd service account does not exist; install the hardened "
+            "service before bootstrapping its first key"
+        ) from exc
+
+
+def _assert_bootstrap_boundary(conn: sqlite3.Connection) -> None:
+    """Require the out-of-band service-admin boundary for first enrollment."""
+    from .authd import is_service_process
+
+    if not is_service_process():
+        raise AttestationError(
+            "first-key bootstrap is out-of-band: run the explicit bootstrap "
+            "command as the _contextd service account, never over RPC"
+        )
+    service_uid = _service_account_uid()
+    if os.geteuid() != service_uid:
+        raise AttestationError(
+            "first-key bootstrap must run as the dedicated _contextd service UID"
+        )
+    root = home().resolve()
+    db_path = root / "contextd.db"
+    for path, allow_group_read in ((root, True), (db_path, False)):
+        try:
+            info = path.stat()
+        except OSError as exc:
+            raise AttestationError(f"bootstrap boundary is missing {path.name}") \
+                from exc
+        if info.st_uid != service_uid:
+            raise AttestationError(f"{path.name} is not owned by _contextd")
+        forbidden = 0o022 if allow_group_read else 0o077
+        if info.st_mode & forbidden:
+            raise AttestationError(
+                f"{path.name} permissions are too broad for first-key bootstrap"
+            )
+
+
+def bootstrap_key(public_der: bytes, signer_tag: str, conn=None, *,
+                  acknowledge_first_key: bool = False) -> str:
+    """Enroll the first key only across the service-admin filesystem boundary.
+
+    This function is deliberately not an RPC handler. The ceremony is:
+    enroll the Secure Enclave key as the desktop operator, transfer only its
+    public DER, then run ``ctx security key bootstrap`` as ``_contextd``.
+    """
+    if not acknowledge_first_key:
+        raise AttestationError(
+            "bootstrap requires --acknowledge-first-key-bootstrap"
+        )
+    own = conn is None
+    conn = conn or state()
+    try:
+        _assert_bootstrap_boundary(conn)
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT COUNT(*) FROM operator_keys").fetchone()[0]:
+            raise AttestationError(
+                "first-key bootstrap is permanently closed once any key exists"
+            )
+        kid = register_key(
+            public_der, SIGNER_SECURE_ENCLAVE, conn=conn,
+            signer_tag=signer_tag, commit=False,
+        )
+        conn.commit()
+        return kid
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        if own:
+            conn.close()
+
+
 # --- building the exact bytes ------------------------------------------
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _normalized_content(text) -> str:
+    """The exact post-boundary text whose bytes are stored and signed."""
+    if text is None or text == "":
+        return ""
+    if not isinstance(text, str):
+        raise AttestationError("only text can be digested into an action")
+    from . import load_config
+    from .redact import sanitize_content
+    return sanitize_content(load_config(), text)
 
 
 def _digest(text) -> str:
@@ -219,12 +379,7 @@ def _digest(text) -> str:
     the archive never holds, and the verifier's `matches()` would then have to
     be given the raw secret to check against.
     """
-    if text is None or text == "":
-        return EMPTY_DIGEST
-    if not isinstance(text, str):
-        raise AttestationError("only text can be digested into an action")
-    from .redact import redact
-    normalized = redact(None, unicodedata.normalize("NFC", text))
+    normalized = _normalized_content(text)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -238,12 +393,23 @@ def canonical_scope(scope: str) -> str:
     must agree on the bytes, so redaction has to happen on one side of the
     signature, and "before" is the only side that keeps the archive clean.
     """
-    from .redact import redact
+    import unicodedata
+
+    from . import load_config
+    from .redact import sanitize_content
     if not isinstance(scope, str) or not (
         scope == "global" or scope.startswith("repo:")
     ):
         raise AttestationError("scope must be 'global' or 'repo:<path>'")
-    return redact(None, unicodedata.normalize("NFC", scope))[:4096]
+    if len(scope) > 4096:
+        raise AttestationError("scope exceeds its bound")
+    normalized = unicodedata.normalize("NFC", scope)
+    sanitized = sanitize_content(load_config(), normalized)
+    if sanitized != normalized:
+        raise AttestationError(
+            "scope contains redacted or control-sequence data and is refused"
+        )
+    return normalized
 
 
 def _normalize_arguments(arguments: dict | None) -> dict:
@@ -256,18 +422,29 @@ def _normalize_arguments(arguments: dict | None) -> dict:
     """
     out: dict = {}
     for key, value in (arguments or {}).items():
-        if not isinstance(key, str) or len(key) > 64:
+        if (not isinstance(key, str) or len(key) > 64
+                or re.fullmatch(r"[a-z][a-z0-9_]*", key) is None):
             raise AttestationError("argument names must be short strings")
         if isinstance(value, bool) or value is None:
             raise AttestationError(f"argument {key!r} must be a string or integer")
         if isinstance(value, int):
             out[key] = value
         elif isinstance(value, str):
-            if len(value) > 512:
+            if len(value) > 4096:
                 raise AttestationError(f"argument {key!r} exceeds its bound")
             # same reasoning as canonical_scope: redact before signing
-            from .redact import redact
-            out[key] = redact(None, unicodedata.normalize("NFC", value))
+            import unicodedata
+
+            from . import load_config
+            from .redact import sanitize_content
+            normalized = unicodedata.normalize("NFC", value)
+            sanitized = sanitize_content(load_config(), normalized)
+            if sanitized != normalized:
+                raise AttestationError(
+                    f"argument {key!r} contains redacted or control-sequence "
+                    "data and is refused"
+                )
+            out[key] = normalized
         else:
             raise AttestationError(
                 f"argument {key!r} has unsupported type {type(value).__name__}"
@@ -347,6 +524,11 @@ def prepare_action(
             "canonical": canonical_bytes(DOMAIN, act).hex(),
             "digest": digest,
             "human_summary": human_summary(act),
+            # The native helper hashes these bytes against the digests inside
+            # the canonical action before it displays any preview. They are a
+            # trusted-display input, never an alternate signed payload.
+            "display_content": _normalized_content(content),
+            "display_reason": _normalized_content(reason),
         }
     except BaseException:
         conn.rollback()
@@ -377,6 +559,14 @@ def human_summary(act: dict) -> str:
 # --- verification -------------------------------------------------------
 
 @dataclass(frozen=True)
+class SignedAction:
+    """Untrusted wire form; the authority daemon must verify it on redemption."""
+
+    action: dict
+    signature: bytes
+
+
+@dataclass(frozen=True)
 class Authorization:
     """A verified operator authorization, ready to be consumed exactly once."""
 
@@ -384,6 +574,7 @@ class Authorization:
     signature: bytes
     key_id: str
     signer: str
+    signer_tag: str | None
     verified_at: str
 
     @property
@@ -403,13 +594,13 @@ class Authorization:
 
     def stored_block(self) -> dict:
         """The attestation block persisted in the event's metadata."""
-        return {
+        return _FrozenDict({
             "action": self.action,
             "signature": self.signature.hex(),
             "key_id": self.key_id,
             "signer": self.signer,
             "verified_at": self.verified_at,
-        }
+        })
 
     def attestation(self) -> Attestation:
         return Attestation(
@@ -461,6 +652,32 @@ def _validate_action_shape(act) -> None:
         raise AttestationError("expiry must be after issue")
     if act["expires_at"] - act["issued_at"] > MAX_TTL_SECONDS:
         raise AttestationError("authorization lifetime exceeds the maximum")
+    if act["sequence"] <= 0:
+        raise AttestationError("sequence must be positive")
+    for field, size in (
+        ("archive_uuid", 32), ("key_id", 64), ("nonce", 64),
+        ("content_digest", 64), ("reason_digest", 64),
+    ):
+        value = act[field]
+        if not isinstance(value, str) or not re.fullmatch(
+            rf"[0-9a-f]{{{size}}}", value
+        ):
+            raise AttestationError(f"{field} must be {size} lowercase hex digits")
+    if act["scope"] != canonical_scope(act["scope"]):
+        raise AttestationError("scope is not canonical")
+    if not isinstance(act["arguments"], dict):
+        raise AttestationError("arguments must be a mapping")
+    if act["arguments"] != _normalize_arguments(act["arguments"]):
+        raise AttestationError("arguments are not normalized")
+
+
+def _existing_archive_uuid(conn: sqlite3.Connection) -> str:
+    row = conn.execute(
+        "SELECT uuid FROM archive_identity WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        raise AttestationError("archive identity has not been initialized")
+    return row["uuid"]
 
 
 def verify_action(action: dict, signature: bytes, conn=None,
@@ -474,9 +691,11 @@ def verify_action(action: dict, signature: bytes, conn=None,
     own = conn is None
     conn = conn or state()
     try:
-        _validate_action_shape(action)
+        action = _freeze_action(action)
+        if not isinstance(signature, bytes) or not signature:
+            raise AttestationError("signature must be non-empty bytes")
         now = now if now is not None else int(time.time())
-        if action["archive_uuid"] != archive_uuid(conn):
+        if action["archive_uuid"] != _existing_archive_uuid(conn):
             raise AttestationError(
                 "action was issued for a different archive"
             )
@@ -518,15 +737,40 @@ def verify_action(action: dict, signature: bytes, conn=None,
         except InvalidSignature as exc:
             raise AttestationError("signature does not verify") from exc
 
-        if row["signer"] == SIGNER_TEST:
+        signer, signer_tag = _split_signer(row["signer"])
+        if signer == SIGNER_TEST:
             _assert_test_mode_ok()
         return Authorization(
             action=action, signature=signature, key_id=action["key_id"],
-            signer=row["signer"], verified_at=_now_iso(),
+            signer=signer, signer_tag=signer_tag, verified_at=_now_iso(),
         )
     finally:
         if own:
             conn.close()
+
+
+def reverify_for_use(conn: sqlite3.Connection, authorization: Authorization, *,
+                     action: str, scope: str = "global",
+                     arguments: dict | None = None, content: str | None = None,
+                     reason: str | None = None,
+                     now: int | None = None) -> Authorization:
+    """Reverify current key/nonce/signature state and exact act under a lock.
+
+    Callers must already hold a SQLite write transaction. This is intentionally
+    separate from the client-facing preflight verification: authorization state
+    can change between receipt and redemption.
+    """
+    if not conn.in_transaction:
+        raise AttestationError("authorization reverification requires a transaction")
+    verified = verify_action(
+        dict(authorization.action), authorization.signature, conn=conn, now=now
+    )
+    if not verified.matches(action, scope, arguments, content, reason):
+        raise AttestationError(
+            "the authorization does not cover this exact act (action, scope, "
+            "arguments, content digest, and reason digest must all match)"
+        )
+    return verified
 
 
 def consume_nonce(conn, authorization: Authorization, event_id: int) -> None:
@@ -536,16 +780,54 @@ def consume_nonce(conn, authorization: Authorization, event_id: int) -> None:
     concurrent appends racing on one authorization cannot both succeed: the
     loser's UPDATE matches zero rows and it raises.
     """
+    if not conn.in_transaction:
+        raise AttestationError("nonce consumption requires a transaction")
+    # Full cryptographic and registry verification is repeated here, inside
+    # the transaction. Custom appenders in loops.py call this primitive
+    # directly, so it cannot be a mere conditional UPDATE.
+    current = verify_action(
+        dict(authorization.action), authorization.signature, conn=conn
+    )
     cursor = conn.execute(
         "UPDATE operator_nonces SET consumed_event = ? "
-        "WHERE nonce = ? AND consumed_event IS NULL",
-        (event_id, authorization.nonce),
+        "WHERE nonce = ? AND key_id = ? AND sequence = ? AND digest = ? "
+        "AND expires_at = ? AND consumed_event IS NULL "
+        "AND EXISTS (SELECT 1 FROM operator_keys k WHERE k.key_id = ? "
+        "AND k.revoked IS NULL)",
+        (event_id, current.nonce, current.key_id, current.action["sequence"],
+         current.digest, current.action["expires_at"], current.key_id),
     )
     if cursor.rowcount != 1:
         raise AttestationError(
             "authorization was already consumed; one signature authorizes "
             "exactly one append"
         )
+
+
+def consume_authorization(conn: sqlite3.Connection,
+                          authorization: Authorization, *, action: str,
+                          scope: str = "global", arguments: dict | None = None,
+                          content: str | None = None,
+                          reason: str | None = None) -> None:
+    """Spend a non-append authorization once, immediately before its effect.
+
+    ``consumed_event = 0`` records that no archive event corresponds to this
+    protected read/filesystem operation. Spending first is fail-closed: a crash
+    can require the operator to approve again but can never replay an effect.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        verified = reverify_for_use(
+            conn, authorization, action=action, scope=scope,
+            arguments=arguments, content=content, reason=reason,
+        )
+        consume_nonce(conn, verified, 0)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 _TEST_KEYS: dict = {}
@@ -612,16 +894,155 @@ def authorized_append(conn, source: str, kind: str, authorization: Authorization
     }
 
     def bind(locked_conn, _ts, event_id):
-        consume_nonce(locked_conn, authorization, event_id)
+        verified = reverify_for_use(
+            locked_conn, authorization, action=action, scope=scope,
+            arguments=arguments, content=content, reason=reason,
+        )
+        consume_nonce(locked_conn, verified, event_id)
 
     return append_event_checked(
         conn, source, kind, uri=uri, content=content, meta=meta, bind=bind,
     )
 
 
+def _parse_utc(value: str) -> datetime:
+    if not isinstance(value, str):
+        raise AttestationError("attestation timestamp must be text")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise AttestationError("attestation timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def verify_stored_authorization(
+    conn: sqlite3.Connection,
+    event_row,
+    *,
+    action: str,
+    scope: str = "global",
+    arguments: dict | None = None,
+    content: str | None = None,
+    reason: str | None = None,
+) -> Authorization | None:
+    """Fail closed unless a persisted event carries a valid consumed action.
+
+    Historical verification deliberately does not require the key to be active
+    *now*. It requires registration before, and no revocation at or before, the
+    event timestamp. This preserves valid history after an intentional revoke.
+    """
+    try:
+        event_id = int(event_row["id"])
+        event_ts = _parse_utc(event_row["ts"])
+        raw_meta = event_row["meta"]
+        meta = json.loads(raw_meta or "{}") if isinstance(raw_meta, str) \
+            else raw_meta
+        if not isinstance(meta, dict):
+            raise AttestationError("event metadata is not a mapping")
+        block = meta.get("attestation")
+        if not isinstance(block, dict) or set(block) != set(ATTESTATION_FIELDS):
+            raise AttestationError("stored attestation does not have closed shape")
+        action_map = block["action"]
+        signature_hex = block["signature"]
+        if not isinstance(action_map, dict) or not isinstance(signature_hex, str):
+            raise AttestationError("stored action/signature is malformed")
+        immutable = _freeze_action(action_map)
+        if block["key_id"] != immutable["key_id"]:
+            raise AttestationError("stored key id does not match the signed action")
+        try:
+            signature = bytes.fromhex(signature_hex)
+        except ValueError as exc:
+            raise AttestationError("stored signature is not hexadecimal") from exc
+        if not signature or signature.hex() != signature_hex:
+            raise AttestationError("stored signature is not canonical lowercase hex")
+
+        if immutable["archive_uuid"] != _existing_archive_uuid(conn):
+            raise AttestationError("stored action belongs to another archive")
+        nonce = conn.execute(
+            "SELECT * FROM operator_nonces WHERE nonce = ?", (immutable["nonce"],)
+        ).fetchone()
+        if nonce is None or nonce["consumed_event"] != event_id:
+            raise AttestationError("stored action nonce is not bound to this event")
+        digest = canonical_digest(DOMAIN, immutable)
+        if (nonce["key_id"] != immutable["key_id"]
+                or nonce["sequence"] != immutable["sequence"]
+                or nonce["issued_at"] != immutable["issued_at"]
+                or nonce["expires_at"] != immutable["expires_at"]
+                or nonce["action"] != immutable["action"]
+                or nonce["digest"] != digest):
+            raise AttestationError("stored nonce row does not match the signed action")
+
+        key = conn.execute(
+            "SELECT * FROM operator_keys WHERE key_id = ?", (immutable["key_id"],)
+        ).fetchone()
+        if key is None:
+            raise AttestationError("stored action key is not registered")
+        signer, signer_tag = _split_signer(key["signer"])
+        if block["signer"] != signer:
+            raise AttestationError("stored signer does not match the key registry")
+        registered = _parse_utc(key["registered"])
+        revoked = _parse_utc(key["revoked"]) if key["revoked"] else None
+        if registered > event_ts or (revoked is not None and revoked <= event_ts):
+            raise AttestationError("key was not active when the event was appended")
+        event_epoch = int(event_ts.timestamp())
+        if (event_epoch < immutable["issued_at"] - 5
+                or event_epoch >= immutable["expires_at"]):
+            raise AttestationError("event was appended outside action lifetime")
+        verified_at = _parse_utc(block["verified_at"])
+        if verified_at > event_ts or int(verified_at.timestamp()) >= \
+                immutable["expires_at"]:
+            raise AttestationError("stored verification time is inconsistent")
+
+        message = canonical_bytes(DOMAIN, immutable)
+        public = load_der_public_key(bytes(key["public_der"]))
+        public.verify(signature, message, ec.ECDSA(hashes.SHA256()))
+        authorization = Authorization(
+            action=immutable, signature=signature, key_id=immutable["key_id"],
+            signer=signer, signer_tag=signer_tag,
+            verified_at=block["verified_at"],
+        )
+        if not authorization.matches(
+            action, scope, arguments, content, reason
+        ):
+            raise AttestationError("stored action does not match event semantics")
+        if meta.get("assurance") != authorization.assurance:
+            raise AttestationError("stored assurance does not match verified signer")
+        return authorization
+    except (AttestationError, CanonicalError, InvalidSignature, KeyError,
+            TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 # --- signers ------------------------------------------------------------
 
-SIGNER_HELPER = Path(__file__).resolve().parent.parent / "native" / "contextd-signer"
+DEVELOPMENT_SIGNER_HELPER = (
+    Path(__file__).resolve().parent.parent / "native" / "contextd-signer"
+)
+INSTALLED_SIGNER_HELPER = Path("/usr/local/libexec/contextd/contextd-signer")
+# Compatibility for deployment inspection; signing itself selects the fixed
+# installed path in hardened mode via `_signer_helper()`.
+SIGNER_HELPER = DEVELOPMENT_SIGNER_HELPER
+
+
+def _signer_helper() -> Path:
+    from . import load_config
+
+    hardened_mode = ((load_config().get("security") or {}).get("mode") or
+                     "development") == "hardened"
+    helper = INSTALLED_SIGNER_HELPER if hardened_mode else DEVELOPMENT_SIGNER_HELPER
+    try:
+        info = helper.lstat()
+    except OSError as exc:
+        raise AttestationError(
+            f"no production signer at {helper}; build and install the native "
+            "helper, with no software fallback"
+        ) from exc
+    if not stat.S_ISREG(info.st_mode) or helper.is_symlink():
+        raise AttestationError("production signer must be a regular non-symlink file")
+    if hardened_mode and (info.st_uid != 0 or info.st_mode & 0o022):
+        raise AttestationError(
+            "hardened signer helper must be root-owned and not group/world-writable"
+        )
+    return helper
 
 
 def _assert_test_mode_ok() -> None:
@@ -651,22 +1072,29 @@ def _assert_test_mode_ok() -> None:
         )
 
 
-def sign_with_secure_enclave(canonical: bytes, key_id: str,
-                             summary: str = "", timeout: int = 120) -> bytes:
+def sign_with_secure_enclave(canonical: bytes, signer_tag: str, *,
+                             display_content: str = "",
+                             display_reason: str = "",
+                             timeout: int = 120) -> bytes:
     """Ask the macOS helper to sign these exact bytes with user presence.
 
     The helper holds a non-exportable Secure Enclave P-256 key and requests a
     fresh presence gesture per signature. If the operator cancels, the helper
     exits nonzero and this raises — nothing is appended.
     """
-    if not SIGNER_HELPER.exists():
-        raise AttestationError(
-            f"no production signer at {SIGNER_HELPER}. Build it with "
-            f"native/build.sh and enroll a key; there is no software fallback."
-        )
+    helper = _signer_helper()
+    if not isinstance(signer_tag, str) or not _SIGNER_TAG.fullmatch(signer_tag):
+        raise AttestationError("invalid Secure Enclave enrollment tag")
+    if not isinstance(display_content, str) or not isinstance(display_reason, str):
+        raise AttestationError("trusted display content and reason must be text")
+    fields = (canonical, display_content.encode("utf-8"),
+              display_reason.encode("utf-8"))
+    request = b"contextd.SignerRequestV1\n" + b"".join(
+        len(field).to_bytes(8, "big") + field for field in fields
+    )
     proc = subprocess.run(
-        [str(SIGNER_HELPER), "sign", "--key-id", key_id, "--summary", summary],
-        input=canonical, capture_output=True, timeout=timeout,
+        [str(helper), "sign", "--key-id", signer_tag],
+        input=request, capture_output=True, timeout=timeout,
     )
     if proc.returncode != 0:
         detail = proc.stderr.decode("utf-8", errors="replace").strip()[:200]

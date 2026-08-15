@@ -2,9 +2,11 @@
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
+import stat
 import sys
 import tempfile
 import threading
@@ -16,8 +18,8 @@ from pathlib import Path
 import fcntl
 
 from . import home, load_config
-from .redact import redact
-from .schemas import validate_egress_meta, validate_event_meta
+from .redact import redact, sanitize_content, sanitize_label
+from .schemas import SchemaError, validate_egress_meta, validate_event_meta
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -87,10 +89,31 @@ CREATE TABLE IF NOT EXISTS archive_identity (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   uuid      TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS service_keys (
+  key_id     TEXT PRIMARY KEY,
+  public_pem TEXT NOT NULL,
+  created    INTEGER NOT NULL,
+  retired    INTEGER
+);
+CREATE TABLE IF NOT EXISTS service_signatures (
+  event_id   INTEGER PRIMARY KEY,
+  key_id     TEXT NOT NULL,
+  digest     TEXT NOT NULL,
+  signature  TEXT NOT NULL,
+  signed_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS service_tips (
+  tip_id     INTEGER PRIMARY KEY,
+  chain_hash TEXT NOT NULL,
+  key_id     TEXT NOT NULL,
+  signature  TEXT NOT NULL,
+  signed_at  INTEGER NOT NULL,
+  cutover    INTEGER NOT NULL DEFAULT 0
+);
 """
 
 WITNESS_VERSION = 1
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _PROCESS_CHAIN_LOCK = threading.RLock()
 
 
@@ -170,6 +193,10 @@ class SchemaVersionError(RuntimeError):
     """The archive was written by a newer contextd than this one."""
 
 
+class SchemaMigrationRequired(SchemaVersionError):
+    """An older archive must pass the explicit, audited migration first."""
+
+
 def assert_supported_schema(path: Path | None = None) -> int:
     """Refuse an unsupported future schema **before touching anything**.
 
@@ -186,6 +213,11 @@ def assert_supported_schema(path: Path | None = None) -> int:
     path = path or (home() / "contextd.db")
     if not path.exists():
         return 0
+    if path.is_symlink() or not path.is_file():
+        raise SchemaVersionError("archive database must be a regular non-symlink file")
+    # Do not use SQLite's ``immutable=1`` here: a live archive may hold the
+    # committed version stamp in its WAL, and immutable readers deliberately
+    # ignore that WAL and misclassify the archive as legacy.
     probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         version = probe.execute("PRAGMA user_version").fetchone()[0]
@@ -201,19 +233,49 @@ def assert_supported_schema(path: Path | None = None) -> int:
     return version
 
 
+def open_archive_for_migration(
+    path: Path | None = None, *, read_only: bool = False
+) -> sqlite3.Connection:
+    """Open an existing archive without applying schema or touching files.
+
+    This is the only supported way for the migration planner to inspect an old
+    archive.  In particular it does not call ``connect()``, create tables, stamp
+    ``user_version``, switch journal mode, recover a witness, or reap scratch.
+    """
+    _guard_direct_access()
+    path = path or (home() / "contextd.db")
+    if not path.exists() or path.is_symlink():
+        raise SchemaVersionError("migration requires a regular existing archive")
+    assert_supported_schema(path)
+    mode = "ro" if read_only else "rw"
+    conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def connect() -> sqlite3.Connection:
     _guard_direct_access()
     # BEFORE mkdir, chmod, WAL, or schema application
-    assert_supported_schema()
+    database = home() / "contextd.db"
+    existed = database.exists()
+    version = assert_supported_schema(database)
+    if existed and version < SCHEMA_VERSION:
+        raise SchemaMigrationRequired(
+            f"{database} uses schema version {version}; this build requires "
+            f"{SCHEMA_VERSION}. Refusing to mutate or append before the explicit "
+            "security migration. Run `ctx security migrate --dry-run`, inspect "
+            "the plan, then run `ctx security migrate` from the authority plane."
+        )
     home().mkdir(parents=True, exist_ok=True)
     os.chmod(home(), 0o700)
     conn = sqlite3.connect(home() / "contextd.db")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
-    # stamp legacy (user_version 0) archives; a pragma write touches no event
-    # bytes, so the chain and witness never see it. Never downgrades.
-    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+    # Only a brand-new archive is stamped here. Existing older archives must go
+    # through the explicit cutover migration above; otherwise an old binary can
+    # keep writing rows whose required signature coverage it does not know.
+    if not existed:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     _migrate_chain(conn)
     _bootstrap_witness(conn)
@@ -318,8 +380,21 @@ def _db_tip(conn: sqlite3.Connection) -> dict:
 def _read_state(path: Path, label: str) -> dict | None:
     if not path.exists():
         return None
+    if path.is_symlink():
+        raise ChainStateError(f"invalid {label}: symlinks are refused")
     try:
-        value = json.loads(path.read_text())
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ChainStateError(f"invalid {label}: not a regular file")
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
+                raw = stream.read(64 * 1024 + 1)
+            if len(raw) > 64 * 1024:
+                raise ChainStateError(f"invalid {label}: file is too large")
+        finally:
+            os.close(fd)
+        value = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ChainStateError(f"invalid {label}: {exc}") from exc
     if not isinstance(value, dict):
@@ -569,6 +644,39 @@ def verify_chain(conn, root: Path | None = None) -> dict:
     return result
 
 
+def verify_chain_read_only(conn, root: Path | None = None) -> dict:
+    """Verify rows and the external witness without recovery or mutation."""
+    result = _verify_rows(conn)
+    if not result["ok"]:
+        return result
+    try:
+        archive_root = root or _connection_root(conn)
+        witness = _read_state(
+            chain_state_paths(archive_root)["witness"], "chain witness"
+        )
+        if witness is None or set(witness) != {"version", "id", "chain_hash"}:
+            raise ChainStateError("chain witness is missing or malformed")
+        witnessed = _read_tip(
+            {"id": witness.get("id"), "chain_hash": witness.get("chain_hash")},
+            "chain witness",
+        )
+        current = _db_tip(conn)
+        if current != witnessed:
+            raise ChainStateError(
+                f"database tip {current['id']} does not match witnessed tip "
+                f"{witnessed['id']}"
+            )
+    except ChainStateError as exc:
+        return {
+            "ok": False,
+            "checked": result["checked"],
+            "first_bad": _db_tip(conn)["id"] + 1,
+            "ts_warnings": result["ts_warnings"],
+            "witness_error": str(exc),
+        }
+    return result
+
+
 def append_event_checked(
     conn,
     source,
@@ -618,10 +726,24 @@ def append_event_checked(
     # to remember (docs/SECURITY.md §6). Historical rows are never touched:
     # this runs only on the bytes of a new append.
     cfg = _append_config()
-    if content is not None:
-        content = redact(cfg, content)
-    if uri is not None:
-        uri = redact(cfg, uri)
+    for routing_value in (source, kind):
+        if (
+            not isinstance(routing_value, str)
+            or not routing_value
+            or len(routing_value) > 64
+            or sanitize_label(cfg, routing_value) != routing_value
+        ):
+            # Routing columns are outside the closed metadata schemas, so they
+            # must not become tiny arbitrary-content channels of their own.
+            # The error deliberately does not echo the rejected value.
+            raise SchemaError("event routing label is invalid")
+    try:
+        if content is not None:
+            content = sanitize_content(cfg, content)
+        if uri is not None:
+            uri = sanitize_content(cfg, uri)
+    except (TypeError, ValueError) as exc:
+        raise SchemaError("event content field is invalid") from exc
 
     def _validated(raw):
         if kind == "egress":
@@ -630,8 +752,16 @@ def append_event_checked(
 
     raw_meta = meta
     meta = _validated(meta)
-    if content is not None and content_hash is None:
+    if content is not None:
+        # A caller-supplied digest of pre-sanitization bytes would make the
+        # archive claim to contain bytes it does not.  The stored digest is
+        # always derived here from the exact stored content instead.
         content_hash = hashlib.sha256(content.encode()).hexdigest()
+    elif content_hash is not None and not (
+        isinstance(content_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", content_hash)
+    ):
+        raise SchemaError("event content digest is invalid")
     meta_json = json.dumps(meta) if meta else None
     fault = fault or (lambda _phase: None)
     with _chain_lock(_connection_root(conn)) as paths:
@@ -653,6 +783,13 @@ def append_event_checked(
             content_hash,
             meta_json,
         )
+        # The cutover defines complete signature coverage.  Load/create the key
+        # before BEGIN (the key registry may need one setup commit), then insert
+        # both the event and its service signatures in the single append
+        # transaction below.  A crash can therefore produce neither or both,
+        # never an accepted-but-unsigned event.
+        from .ledger_sig import prepare_append_signing
+        signing = prepare_append_signing(conn)
         target = {"id": eid, "chain_hash": chain}
         _atomic_json(
             paths["recovery"],
@@ -686,6 +823,22 @@ def append_event_checked(
                     chain,
                 ),
             )
+            if signing is not None:
+                from .ledger_sig import sign_accepted_append
+                sign_accepted_append(
+                    conn,
+                    {
+                        "id": eid,
+                        "ts": ts,
+                        "source": source,
+                        "kind": kind,
+                        "uri": uri,
+                        "content_hash": content_hash,
+                        "meta": meta_json,
+                    },
+                    chain,
+                    signing,
+                )
             fault("before_db_commit")
             conn.commit()
             committed = True
@@ -735,40 +888,246 @@ def last_hash(conn, uri):
     return row["content_hash"]
 
 
+class BlobPrivacyError(ValueError):
+    """A blob cannot cross the persistence privacy boundary safely."""
+
+
+def _binary_blob_has_secret(cfg: dict, data: bytes) -> bool:
+    """Detect floor/config secrets embedded in otherwise binary bytes.
+
+    A single invalid byte used to turn off the UTF-8 redaction path for the
+    entire blob.  Scan lossy UTF-8 and both UTF-16 byte orders so an attacker
+    cannot hide a credential-shaped canary behind that encoding switch.  We
+    refuse instead of rewriting binary offsets and silently corrupting data.
+    """
+    views = [data.decode("utf-8", errors="ignore")]
+    if len(data) >= 2:
+        views.extend(
+            (
+                data[: len(data) - len(data) % 2].decode(
+                    "utf-16-le", errors="ignore"
+                ),
+                data[: len(data) - len(data) % 2].decode(
+                    "utf-16-be", errors="ignore"
+                ),
+            )
+        )
+    if len(data) >= 4:
+        aligned = data[: len(data) - len(data) % 4]
+        views.extend(
+            (
+                aligned.decode("utf-32-le", errors="ignore"),
+                aligned.decode("utf-32-be", errors="ignore"),
+            )
+        )
+    return any(redact(cfg, view) != view for view in views)
+
+
+def _open_private_blob_directory(shard: str) -> tuple[int, int, int]:
+    """Open ``home/store/<shard>`` without following directory symlinks."""
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    root_fd = os.open(home(), flags)
+    opened = [root_fd]
+    try:
+        parent_fd = root_fd
+        for component in ("store", shard):
+            try:
+                os.mkdir(component, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            child_fd = os.open(component, flags, dir_fd=parent_fd)
+            opened.append(child_fd)
+            info = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077
+            ):
+                raise BlobPrivacyError("blob directory boundary is unsafe")
+            parent_fd = child_fd
+        return tuple(opened)  # type: ignore[return-value]
+    except BaseException:
+        for fd in reversed(opened):
+            os.close(fd)
+        raise
+
+
+def _verify_existing_blob(shard_fd: int, digest: str) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(digest, flags, dir_fd=shard_fd)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+        ):
+            raise BlobPrivacyError("stored blob boundary is unsafe")
+        observed = hashlib.sha256()
+        while chunk := os.read(fd, 1024 * 1024):
+            observed.update(chunk)
+        if observed.hexdigest() != digest:
+            raise BlobPrivacyError("stored blob digest does not verify")
+    finally:
+        os.close(fd)
+
+
 def store_blob(data: bytes) -> str:
-    """Content-addressed blob storage, floor-redacted when the bytes are text.
+    """Content-addressed blob storage with a no-follow privacy boundary.
 
     An oversized watched file is stored here instead of in `events.content`,
     which made the blob store a way around capture-side redaction. Anything
-    that decodes as UTF-8 goes through the same floor as event content; binary
-    blobs are stored as-is and are *not* covered by the redaction claim.
+    that is ordinary UTF-8 goes through the same sanitizer as event content.
+    Binary/multibyte data is stored byte-identically only after lossy UTF-8 and
+    UTF-16/32 views contain no pinned/configured credential match; a match is
+    refused because rewriting offsets would corrupt the object.
     """
+    if not isinstance(data, bytes):
+        raise BlobPrivacyError("blob payload must be bytes")
+    cfg = _append_config()
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
-        pass
+        if _binary_blob_has_secret(cfg, data):
+            raise BlobPrivacyError("binary blob was rejected by the privacy floor")
     else:
-        data = redact(_append_config(), text).encode("utf-8")
+        # ASCII encoded as UTF-16 is also valid UTF-8 (a NUL follows or
+        # precedes every character), so decode success alone cannot select the
+        # text path.  Treat BOMs or a high NUL density as an encoding switch
+        # and refuse credential matches rather than preserving them verbatim.
+        looks_utf16 = data.startswith((b"\xff\xfe", b"\xfe\xff")) or (
+            data and data.count(b"\x00") * 4 >= len(data)
+        )
+        if looks_utf16 and _binary_blob_has_secret(cfg, data):
+            raise BlobPrivacyError("encoded blob was rejected by the privacy floor")
+        data = sanitize_content(cfg, text).encode("utf-8")
     digest = hashlib.sha256(data).hexdigest()
-    path = home() / "store" / digest[:2] / digest
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        os.chmod(path, 0o600)
+    root_fd, store_fd, shard_fd = _open_private_blob_directory(digest[:2])
+    temp_name = f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
+    temp_fd = None
+    try:
+        try:
+            _verify_existing_blob(shard_fd, digest)
+            return digest
+        except FileNotFoundError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=shard_fd)
+        view = memoryview(data)
+        while view:
+            written = os.write(temp_fd, view)
+            if written <= 0:
+                raise OSError("short blob write")
+            view = view[written:]
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = None
+        try:
+            os.link(
+                temp_name,
+                digest,
+                src_dir_fd=shard_fd,
+                dst_dir_fd=shard_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            _verify_existing_blob(shard_fd, digest)
+        os.fsync(shard_fd)
+    finally:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        try:
+            os.unlink(temp_name, dir_fd=shard_fd)
+        except FileNotFoundError:
+            pass
+        os.close(shard_fd)
+        os.close(store_fd)
+        os.close(root_fd)
     return digest
 
 
+def _cursor_source(source) -> str:
+    cfg = _append_config()
+    if not isinstance(source, str) or not source or len(source) > 4096:
+        raise SchemaError("cursor source is invalid")
+    sanitized = sanitize_content(cfg, source, max_len=4096)
+    if sanitized != source:
+        raise SchemaError("cursor source is rejected by the privacy floor")
+    return source
+
+
+def _sanitize_cursor_value(cfg, value, *, depth=0, budget=None):
+    if budget is None:
+        budget = [100_000]
+    budget[0] -= 1
+    if budget[0] < 0 or depth > 12:
+        raise SchemaError("cursor state exceeds its structural bound")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if not (-(2**63) <= value < 2**63):
+            raise SchemaError("cursor state integer is out of range")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise SchemaError("cursor state number is invalid")
+        return value
+    if isinstance(value, str):
+        return sanitize_content(cfg, value, max_len=4096)
+    if isinstance(value, list):
+        return [
+            _sanitize_cursor_value(cfg, item, depth=depth + 1, budget=budget)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise SchemaError("cursor state contains a non-string key")
+            safe_key = sanitize_content(cfg, key, max_len=256)
+            if not safe_key or safe_key in out:
+                raise SchemaError("cursor state contains an unsafe key")
+            out[safe_key] = _sanitize_cursor_value(
+                cfg, item, depth=depth + 1, budget=budget
+            )
+        return out
+    raise SchemaError("cursor state contains an unsupported value")
+
+
 def get_cursor(conn, source) -> dict:
+    source = _cursor_source(source)
     row = conn.execute(
         "SELECT state FROM cursors WHERE source = ?", (source,)
     ).fetchone()
-    return json.loads(row["state"]) if row else {}
+    if row is None:
+        return {}
+    try:
+        state = json.loads(row["state"])
+        if not isinstance(state, dict):
+            raise ValueError("cursor root is not a mapping")
+        sanitized = _sanitize_cursor_value(_append_config(), state)
+        if sanitized != state:
+            raise ValueError("cursor is not privacy-clean")
+        return state
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SchemaError("stored cursor state is invalid") from exc
 
 
 def set_cursor(conn, source, state: dict):
+    source = _cursor_source(source)
+    if not isinstance(state, dict):
+        raise SchemaError("cursor state must be a mapping")
+    state = _sanitize_cursor_value(_append_config(), state)
     conn.execute(
         "INSERT INTO cursors (source, state) VALUES (?, ?) "
         "ON CONFLICT(source) DO UPDATE SET state = excluded.state",
-        (source, json.dumps(state)),
+        (source, json.dumps(state, allow_nan=False, separators=(",", ":"))),
     )
     conn.commit()

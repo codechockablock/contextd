@@ -28,7 +28,7 @@ produced this document. Nothing here has been acted on.
 ## How to reproduce
 
 ```bash
-audit_output_dir="$(mktemp -d)"
+audit_output_dir="$(cd "$(mktemp -d)" && pwd -P)"
 .venv/bin/python scripts/audit_repository_privacy.py \
   --history --redact-output \
   --report "$audit_output_dir/history-report.json"
@@ -45,45 +45,32 @@ tested (`tests/test_repository_privacy.py::test_scanner_output_contains_no_match
   --tracked --fail-on-findings --redact-output
 ```
 
-Exits **0**. Two findings are approved as `awaiting_operator` in
-`scripts/repository_privacy_allow.json` and are reprinted under `OUTSTANDING`
-on every run so they cannot silently become the baseline:
+Exits **0**. Current approvals are synthetic fixtures only. An approval is not
+a class-wide exception: it pins the match class, a one-way fingerprint of the
+exact planted value, its line, and its count. Moving/changing/removing it or
+adding another match fails the gate as `stale_approval` or a new finding.
 
-| Location | Class | Count | Why it is still there |
-|---|---|---|---|
-| `experiments/restore_scale/results.json` | `session_uuid` | 4 | One real archive UUID in a tracked benchmark **result**. `experiments/` was outside the pass's modify scope, and editing a recorded result is not path sanitization. |
-| `runs/handoff-20260812/final-report.md` | `session_uuid` | 1 | One real session UUID in a tracked benchmark **conclusion**. Run artifacts were permitted only portable path sanitization; a session id is not a path. |
+The tracked scan reads every git-tracked regular file and the text of tracked
+symlinks without following them. It has no suffix, binary, or 8 MiB skip; UTF-8,
+UTF-16, and arbitrary binary containers are scanned. Sensitive/control-bearing
+filenames are represented by a fingerprint rather than emitted.
 
-## History — 77 findings across 75 blobs
+## History — current scanner snapshot
 
 Exit code **0** (history mode does not fail the build). Report written to the
 path above.
 
 | Class | Occurrences |
 |---|---|
-| `credential` | 257 |
-| `home_path` | 59 |
-| `archive_dialogue` | 21 |
-| `session_uuid` | 5 |
+| `credential` | 340 |
+| `home_path` | 61 |
+| `archive_dialogue` | 25 |
+| `session_uuid` | 11 |
+| `email` | 265 |
 
-Concentration by path (top locations):
-
-| Occurrences | Path |
-|---|---|
-| 225 | `tests/smoke.py` |
-| 24 | `contextd/__init__.py` |
-| 20 | `README.md` |
-| 16 | `experiments/tasks/retrieval-contradiction-sets.json` |
-| 8 | `experiments/tasks/retrieval-synthesis-sets.json` |
-| 6 | `docs/operating-map.md` |
-| 6 | `launchd/com.contextd.watch.plist` |
-| 5 | `launchd/com.contextd.lineage-audit.plist` |
-| 5 | `launchd/com.contextd.reconcile.plist` |
-| 4 | `experiments/restore_scale/results.json` |
-| 4 | `launchd/com.contextd.restore-drill.plist` |
-| 4 | `tests/test_provenance_closure.py` |
-| 3 | `clients/codex.toml` |
-| 3 | `launchd/com.contextd.backup.plist` |
+These counts include commit author/committer fields and messages plus annotated
+tag metadata, not only blobs. They are a 2026-08-15 snapshot and will change as
+history grows; reproduce them rather than treating this table as a gate.
 
 ## Credential triage — complete
 

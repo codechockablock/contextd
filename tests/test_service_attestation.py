@@ -117,22 +117,28 @@ def test_service_signature_catches_what_the_chain_cannot():
 def test_forged_operator_event_does_not_verify():
     """An attacker appends an event that *looks* operator-authorized."""
     conn = connect()
+    sign_tip(conn, cutover=True)
     real = ingest_note(conn, "a genuine note")
-    sign_event(conn, real)
+    assert verify_event(conn, real)["ok"]
 
     forged = append_event(
         conn, "note", "note", content="I, the operator, approve this",
         meta={"claimed_client": "cli", "authority": "operator",
               "assurance": "operator_authorized"},
     )
+    # Model a direct database forger: remove the service evidence it cannot
+    # produce. Recomputing the ordinary chain/witness remains in its power.
+    conn.execute("DELETE FROM service_signatures WHERE event_id = ?", (forged,))
+    conn.execute("DELETE FROM service_tips WHERE tip_id = ?", (forged,))
+    conn.commit()
     _recompute_chain(conn)
 
     # the chain accepts it; the ledger does not, because it is unsigned
     assert verify_chain(conn)["ok"]
     assert verify_event(conn, forged)["signed"] is False
     ledger = verify_ledger(conn)
-    assert ledger["ok"] is True          # no BAD signatures ...
-    # ... but the forged event has none at all, which is the detectable state
+    assert ledger["ok"] is False
+    assert ledger["missing_events"] == [forged]
     signed = {r["event_id"] for r in conn.execute(
         "SELECT event_id FROM service_signatures")}
     assert forged not in signed
@@ -168,11 +174,9 @@ def test_rewritten_history_is_caught_by_the_signed_tip():
 
 def test_verify_ledger_reports_every_bad_signature():
     conn = connect()
+    sign_tip(conn, cutover=True)
     a = ingest_note(conn, "first")
-    b = ingest_note(conn, "second")
-    sign_event(conn, a)
-    sign_event(conn, b)
-    sign_tip(conn)
+    ingest_note(conn, "second")
     assert verify_ledger(conn)["ok"]
 
     _rewrite_event(conn, a, "tampered")
@@ -348,12 +352,36 @@ def test_envelope_covers_the_semantic_fields_not_the_chain_hash():
 def test_signed_events_survive_an_unrelated_append():
     """Signing must not be invalidated by the ledger simply growing."""
     conn = connect()
+    sign_tip(conn, cutover=True)
     eid = ingest_note(conn, "signed")
-    sign_event(conn, eid)
     for i in range(3):
         ingest_note(conn, f"later {i}")
     assert verify_event(conn, eid)["ok"]
     assert verify_ledger(conn)["ok"]
+
+
+def test_post_cutover_append_has_complete_atomic_coverage():
+    conn = connect()
+    cutover = sign_tip(conn, cutover=True)
+    eid = ingest_note(conn, "accepted after cutover")
+    report = verify_ledger(conn)
+    assert report["ok"] is True
+    assert report["cutover_tip"] == cutover["tip_id"]
+    assert report["required_events"] == 1
+    assert report["missing_events"] == []
+    assert report["current_tip"] == eid
+    assert verify_event(conn, eid)["ok"]
+    assert verify_tip(conn, eid)["ok"]
+
+
+def test_no_cutover_is_not_a_green_ledger():
+    conn = connect()
+    eid = ingest_note(conn, "not under service coverage")
+    sign_event(conn, eid)
+    report = verify_ledger(conn)
+    assert report["ok"] is False
+    assert report["coverage_ok"] is False
+    assert report["cutover_anomalies"] == ["no signed coverage cutover"]
 
 
 # --- signed backup manifests ------------------------------------------------

@@ -1,143 +1,542 @@
 {
-  "version": 1,
+  "version": 2,
   "_doc": [
-    "Approved findings for scripts/audit_repository_privacy.py --tracked.",
-    "Every entry needs a `status` and a `reason`. Two statuses exist and they",
-    "mean different things:",
-    "  synthetic  - not a finding at all. The matched text is a planted test",
-    "               canary or a fixture value that was never real.",
-    "  awaiting_operator - a REAL finding in a file this hardening pass is not",
-    "               authorized to modify. It is approved only in the sense that",
-    "               it does not fail the gate; it is still outstanding, and the",
-    "               scanner prints it under OUTSTANDING on every run so it",
-    "               cannot quietly become the baseline.",
-    "Adding an entry to silence a finding you could have fixed is misuse."
+    "Exact synthetic approvals: class, one-way fingerprint, line, and count. Any changed, relocated, added, or missing match fails."
   ],
   "tracked": {
     "tests/smoke.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 63,
+          "sha256": "6c2b82b5db2d55c4e1869eecd8b5d53af11425839bde5ee86a55d300c93e819e",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 66,
+          "sha256": "32f4cf588c77f0941514cadc1cb18fa0e186716c93e067c22d9ef4e27718f506",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 91,
+          "sha256": "8e26b95170bff4a304b66d697fbe41f20ec05ccc8a155a5a440538bd098a6036",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 91,
+          "sha256": "babd52a67283fb2f32e1d118f2c0a16c8c4bc3e88cdb90b239aa10f671688826",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 92,
+          "sha256": "2c0f89085ca7c7bf8e0ec8d4f3319b9dd97f2c45e1204063b072f2673e4c2207",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 155,
+          "sha256": "3e3bd8c97bc98cb6c8cf37622f415888203ddda0dd94efec3c9f062d58320bbc",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 203,
+          "sha256": "f3268fec6969357e07e80e8fdb1841a46387ae89b5054fefc8ce153e0f797a0e",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 241,
+          "sha256": "8d85e01e68554c029b090884bc20498170121e8f2db53949c6e8c89e202ae81a",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 268,
+          "sha256": "8d85e01e68554c029b090884bc20498170121e8f2db53949c6e8c89e202ae81a",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 324,
+          "sha256": "088537cbccde92dedc8a1b625dcae4b32d80cbad2c36acd798dff662e1aec9ab",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 326,
+          "sha256": "088537cbccde92dedc8a1b625dcae4b32d80cbad2c36acd798dff662e1aec9ab",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 328,
+          "sha256": "3bd706da809d3209c638f661e525e82b87ae175409463a30b4f8653db6663adc",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 330,
+          "sha256": "3bd706da809d3209c638f661e525e82b87ae175409463a30b4f8653db6663adc",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 333,
+          "sha256": "3bd706da809d3209c638f661e525e82b87ae175409463a30b4f8653db6663adc",
+          "count": 1
+        }
       ],
       "status": "synthetic",
       "reason": "Planted redaction canaries of several pinned classes. They exist to prove the floor redacts them; each is a literal invented for the test and was never a valid credential."
     },
     "tests/test_gate_atomic.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 25,
+          "sha256": "6c2b82b5db2d55c4e1869eecd8b5d53af11425839bde5ee86a55d300c93e819e",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 77,
+          "sha256": "6c2b82b5db2d55c4e1869eecd8b5d53af11425839bde5ee86a55d300c93e819e",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "Planted canary 'sk-abcdefghijklmnop1234' asserting disclose() redacts exact bytes before the egress row is written."
+      "reason": "An invented key-shaped planted canary asserts disclose redacts exact bytes before the egress row is written."
     },
     "tests/test_loop_scan_gate.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 22,
+          "sha256": "6c2b82b5db2d55c4e1869eecd8b5d53af11425839bde5ee86a55d300c93e819e",
+          "count": 1
+        }
       ],
       "status": "synthetic",
       "reason": "Planted canary proving the loop-scan payload is receipted post-redaction."
     },
     "tests/test_provenance_closure.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 233,
+          "sha256": "8d85e01e68554c029b090884bc20498170121e8f2db53949c6e8c89e202ae81a",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 233,
+          "sha256": "d119db7b69251d3f38e396d0f15025df19b2c5497755ee6a8e904ef328c25924",
+          "count": 1
+        }
       ],
       "status": "synthetic",
       "reason": "Planted canary proving the verifier grounds quotes against post-redaction disclosed bytes."
     },
     "tests/test_reconcile_gate.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 20,
+          "sha256": "6c2b82b5db2d55c4e1869eecd8b5d53af11425839bde5ee86a55d300c93e819e",
+          "count": 1
+        }
       ],
       "status": "synthetic",
       "reason": "Planted canary proving the reconciler dispatches only receipted, redacted payloads."
     },
     "tests/test_privacy_boundary.py": {
-      "classes": [
-        "credential",
-        "home_path",
-        "session_uuid"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 38,
+          "sha256": "dde4e5591c877b3f85ceae6d4fb7049df34c1fcaca5d28880e31cf427a533a72",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 39,
+          "sha256": "37797e6f271db7ec84974ba4863be76353ff0b039aacc99ca851e5fc5123a09c",
+          "count": 2
+        },
+        {
+          "class": "credential",
+          "line": 40,
+          "sha256": "41f31d4865324592e9a8b621cfbc11347dd126dab121d4a41b1a3294c1675e3f",
+          "count": 2
+        },
+        {
+          "class": "credential",
+          "line": 42,
+          "sha256": "3ef5662dbee92e137cc189f86b2ae3b193e62be84bd9f8f7d2731cb1e5df2313",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 43,
+          "sha256": "a844bdcc09ebf6b4ff1fb99435922a6a0ee0a0a921f5843224669961a2d972ba",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 44,
+          "sha256": "fb21c01547b01973a8e6ab5e993e0ecc04e00a6ba7bdddba1bfc0f559eb8945a",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 45,
+          "sha256": "70a9a73df88e5cc3e8ef9bade7f69c4d897e86fa9f79032d0bbddebc89fa5ea7",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 46,
+          "sha256": "01a54629efb952287e554eb23ef69c52097a75aecc0e3a93ca0855ab6d7a31a0",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 47,
+          "sha256": "6a7e0e79b018d08c9d1bb20be79999a7778399f7ee17258b3a0d36d4b4a7bec5",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 48,
+          "sha256": "bff6d4fbb87af37742b2c088623870c21353362e49feab38f936d52a71163c62",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 49,
+          "sha256": "4ce68133299afa3b2a0bdf93c18972ed2c960287c1f412bc06238373d1a17edf",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 50,
+          "sha256": "a843e0bee5b3c656ac30332d3f93788e9b2124b87ea958b2604488f1e03bb079",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 51,
+          "sha256": "15088eba2c6d9c188d68103b6e338e7d17dcc92331a318ca195e3f2b2ae5a42a",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 51,
+          "sha256": "563ca0d8d4edce9179067baa5392eca5e4705098319af3d493702e6c9dabcfcf",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 53,
+          "sha256": "8bcac7908eb950419537b91e19adc83ce2c9cbfdacf4f81157fdadfec11f7017",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 61,
+          "sha256": "3ef5662dbee92e137cc189f86b2ae3b193e62be84bd9f8f7d2731cb1e5df2313",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 62,
+          "sha256": "01a54629efb952287e554eb23ef69c52097a75aecc0e3a93ca0855ab6d7a31a0",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 62,
+          "sha256": "eca3ccad47b041274d4b2ca951a6b13120705fb755d42ba8633175140edf2ab4",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 63,
+          "sha256": "6a7e0e79b018d08c9d1bb20be79999a7778399f7ee17258b3a0d36d4b4a7bec5",
+          "count": 1
+        },
+        {
+          "class": "email",
+          "line": 49,
+          "sha256": "3603d97a7f6a7a557f5173e04ff03e7307eef9ff621ad1b8b443301af693e293",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "The credential-canary suite itself. Every value here is invented for the test and is asserted to be absent from every persistence and output surface."
+      "reason": "The credential-canary suite itself. Every value here is invented for the test and asserted absent from persistence and output surfaces."
     },
     "tests/test_repository_privacy.py": {
-      "classes": [
-        "credential",
-        "home_path",
-        "session_uuid",
-        "archive_dialogue"
+      "matches": [
+        {
+          "class": "archive_dialogue",
+          "line": 36,
+          "sha256": "67275563aca2c3129a634d4d393225425654093240bad8e8bdda6409bdfeeec9",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 40,
+          "sha256": "9a3618bf7623c13744b6aabccbe0ac2b820aa0d017b820ffde489ddc123dfabc",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 148,
+          "sha256": "9a3618bf7623c13744b6aabccbe0ac2b820aa0d017b820ffde489ddc123dfabc",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 318,
+          "sha256": "3ef5662dbee92e137cc189f86b2ae3b193e62be84bd9f8f7d2731cb1e5df2313",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 319,
+          "sha256": "eca3ccad47b041274d4b2ca951a6b13120705fb755d42ba8633175140edf2ab4",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 320,
+          "sha256": "01a54629efb952287e554eb23ef69c52097a75aecc0e3a93ca0855ab6d7a31a0",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 320,
+          "sha256": "6a7e0e79b018d08c9d1bb20be79999a7778399f7ee17258b3a0d36d4b4a7bec5",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 322,
+          "sha256": "9a3618bf7623c13744b6aabccbe0ac2b820aa0d017b820ffde489ddc123dfabc",
+          "count": 1
+        },
+        {
+          "class": "email",
+          "line": 41,
+          "sha256": "872a1f125164a9ca1e9586c5cdd07304c123314b49be347fa8c44d7e322c58aa",
+          "count": 1
+        },
+        {
+          "class": "home_path",
+          "line": 33,
+          "sha256": "d95b190702e0f6fe7123b7cb7d76dd99cc495276463eeadf4f2d16a11723f549",
+          "count": 1
+        },
+        {
+          "class": "session_uuid",
+          "line": 34,
+          "sha256": "edae6d1982583551ee70f6bf0b61431a78cdf09a44c946ccd6851886b515b6be",
+          "count": 1
+        },
+        {
+          "class": "session_uuid",
+          "line": 149,
+          "sha256": "edae6d1982583551ee70f6bf0b61431a78cdf09a44c946ccd6851886b515b6be",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "Planted-positive fixtures for this scanner: the file deliberately contains one example of each detected class so a detector that silently stops matching is caught."
+      "reason": "Planted-positive fixtures for every scanner class, pinned so a detector cannot silently stop or broaden."
     },
     "tests/fixtures/legacy_archive.json": {
-      "classes": [
-        "session_uuid",
-        "archive_dialogue"
+      "matches": [
+        {
+          "class": "archive_dialogue",
+          "line": 20,
+          "sha256": "083e2640dd439056d66b1687e1eedd9d96079fd515bc3ca150ca6920eb5fd5e2",
+          "count": 1
+        },
+        {
+          "class": "archive_dialogue",
+          "line": 23,
+          "sha256": "72b1b17108f3aeae82799fd0ec2ac7c92dff007f07dd99c05fb184db92336e82",
+          "count": 1
+        },
+        {
+          "class": "session_uuid",
+          "line": 21,
+          "sha256": "103dbc6420ddaf1742188b7786d5824f79a30c6c76ae26182f1c3be5c7ac7076",
+          "count": 1
+        },
+        {
+          "class": "session_uuid",
+          "line": 24,
+          "sha256": "e4e0dcf9402800f633db8533f4346e1847c414c4529ff5343b61936e622489df",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "The frozen legacy-archive fixture. Its rows deliberately reproduce the SHAPES that mattered before hardening \u2014 including claude:// session URIs and role-tagged dialogue \u2014 because a migration test against a fixture that lacks them proves nothing. Every value is invented; tests/test_security_migration.py asserts the fixture still carries these shapes."
+      "reason": "Frozen synthetic legacy archive shapes required by migration tests; no value was derived from a live archive."
     },
     "contextd/redact.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 38,
+          "sha256": "10d31279e94740e0758168ee67b90453c95cc642b0af96612906d1f377185b81",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 38,
+          "sha256": "560298e35cd37a96409b1d5f5ccdedb6a636d349f6a922ef766a5f368ed9e3ae",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 39,
+          "sha256": "695d34d142edd15dc6b02b04b498c1dd972e1dfaa054e71c6dfe53e6fd0bd6aa",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "The file that DEFINES the redaction floor. Its url_param pattern enumerates auth-shaped parameter names, so the pattern text matches itself. Unavoidable self-reference: a scanner built on these patterns will always flag their definition."
+      "reason": "The immutable redaction-floor definitions necessarily match their own detector patterns."
     },
     "contextd/capability.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 263,
+          "sha256": "579927a175e3f0b91b0e3ed2f2258035f213fe81baa279a21c4fbd5744c6de0f",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "The dispatch-capability module documents its own `secret` field in a docstring, which the password_assignment pattern matches. No value is present; the field holds a per-issue random token returned once and stored only as a hash."
+      "reason": "A code identifier in capability documentation matches an assignment-shaped detector; no literal value is present."
     },
     "docs/SECURITY.md": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 222,
+          "sha256": "e06ede399650611b1a27debf5a45ac7573d762fc3a31eb41f54b53d6247036d1",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "The security contract names each pinned redaction class, including basic_auth_url with its scheme://user:pass@host shape. Documenting what is detected necessarily contains the shape being detected."
-    },
-    "scripts/repository_privacy_allow.json": {
-      "classes": [
-        "credential"
-      ],
-      "status": "synthetic",
-      "reason": "This allowlist itself. Explaining why a canary is approved requires naming its class, and the api_key pattern matches the sk- prefix convention referenced in a reason string."
+      "reason": "The security contract documents a credential-bearing URL shape that necessarily matches its detector."
     },
     "tests/test_derivation_capability.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 93,
+          "sha256": "317ee7f3639aac490ac6a6574ca3c79746f164e1084df9fa91e41c2f05aa553b",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "Dispatch-capability suite; asserts a capability secret never reaches the archive, so the word appears in assignments the password_assignment pattern matches. Every token is randomly generated at test time."
+      "reason": "Capability tests use runtime-random synthetic tokens and assert they never reach the archive."
     },
     "tests/test_process_isolation.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 204,
+          "sha256": "dde4e5591c877b3f85ceae6d4fb7049df34c1fcaca5d28880e31cf427a533a72",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 437,
+          "sha256": "dde4e5591c877b3f85ceae6d4fb7049df34c1fcaca5d28880e31cf427a533a72",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 731,
+          "sha256": "dde4e5591c877b3f85ceae6d4fb7049df34c1fcaca5d28880e31cf427a533a72",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "Planted canary proving a refusal message never quotes an argument value, and that no private key material sits on any client-visible surface. Invented literals only."
+      "reason": "Planted refusal and client-surface canaries; all literals are invented and asserted absent from outputs."
     },
     "tests/test_security_doctor.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 287,
+          "sha256": "dde4e5591c877b3f85ceae6d4fb7049df34c1fcaca5d28880e31cf427a533a72",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "Planted canary proving the doctor's report carries no archive content. An invented literal, asserted absent from the doctor's output."
+      "reason": "Planted canary proving the doctor report carries no archive content."
     },
     "docs/REPOSITORY_HISTORY_REMEDIATION.md": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 95,
+          "sha256": "579927a175e3f0b91b0e3ed2f2258035f213fe81baa279a21c4fbd5744c6de0f",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "The triage write-up quotes a line of contextd's own source as its example of the code_identifier class \u2014 an assignment whose right-hand side is an expression, containing no secret. Documenting why a shape matches necessarily contains the shape."
+      "reason": "Triage documentation quotes a code identifier whose expression contains no literal secret."
     },
     "scripts/triage_history_credentials.py": {
-      "classes": [
-        "credential"
+      "matches": [
+        {
+          "class": "credential",
+          "line": 81,
+          "sha256": "579927a175e3f0b91b0e3ed2f2258035f213fe81baa279a21c4fbd5744c6de0f",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 82,
+          "sha256": "1275301167203004d663aebc521627a5e42395d954188fce32a56a24f4c84e10",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 140,
+          "sha256": "01a54629efb952287e554eb23ef69c52097a75aecc0e3a93ca0855ab6d7a31a0",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 153,
+          "sha256": "d7e73c56cf4073307ce4d73d6b05cd39ec611a9b7271f87a0b233b2d0fbc5c8e",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 180,
+          "sha256": "10d31279e94740e0758168ee67b90453c95cc642b0af96612906d1f377185b81",
+          "count": 1
+        },
+        {
+          "class": "credential",
+          "line": 180,
+          "sha256": "560298e35cd37a96409b1d5f5ccdedb6a636d349f6a922ef766a5f368ed9e3ae",
+          "count": 1
+        }
       ],
       "status": "synthetic",
-      "reason": "The triage tool's own constants: its marker-word list, its regex tells, and the prefix-stripping expression it uses to measure entropy. Same unavoidable self-reference as contextd/redact.py \u2014 a tool built on these patterns will always match its own definition of them."
+      "reason": "The history-triage tool necessarily matches its own marker list and regex definitions; exact occurrences are pinned by line and value digest. Re-pinned after the KNOWN_METADATA_EXAMPLES addition shifted line numbers \u2014 every value digest was verified unchanged, so this absorbed line drift only, not new content."
     }
   }
 }

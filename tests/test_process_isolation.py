@@ -20,6 +20,8 @@ import threading
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from contextd import attest, home, load_config
 from contextd.authd import (
@@ -28,7 +30,9 @@ from contextd.authd import (
     allowed_operations,
     hardened,
     socket_path,
+    service_context,
 )
+from contextd.canonical import canonical_bytes
 from contextd.db import DirectAccessRefused, connect
 from contextd.rpc import (
     MAX_FRAME,
@@ -115,10 +119,11 @@ def test_a_client_connection_cannot_widen_its_tier(service):
         again = client.call("capabilities", tier=TIER_OPERATOR,
                             principal={"uid": 0, "kind": "service"})
         assert again["tier"] == TIER_MODEL
-        assert "raw_read" not in again["operations"]
+        assert "raw_read" in again["operations"]
+        assert "prepare_action" in again["operations"]
 
 
-def test_operator_operations_refuse_at_model_tier(service):
+def test_attested_operations_are_reachable_but_unauthorized_at_model_tier(service):
     operator_ops = [n for n, op in OPERATIONS.items()
                     if op.tier == TIER_OPERATOR]
     assert operator_ops, "the registry declares no operator operations"
@@ -126,8 +131,7 @@ def test_operator_operations_refuse_at_model_tier(service):
         for name in operator_ops:
             with pytest.raises(RpcError) as exc:
                 client.call(name, event_id=1)
-            assert exc.value.code == "tier", name
-            assert "cannot be widened" in str(exc.value)
+            assert exc.value.code in ("attestation_required", "malformed"), name
 
 
 def test_reaching_operator_tier_is_still_not_sufficient(service, short_dir):
@@ -443,11 +447,15 @@ def test_model_tier_reads_are_gated_redacted_and_receipted(service):
 def test_allowed_operations_are_disjoint_by_tier():
     model = set(allowed_operations(TIER_MODEL))
     operator_set = set(allowed_operations(TIER_OPERATOR))
-    assert model < operator_set
-    only_operator = operator_set - model
+    assert model == operator_set
+    only_operator = {
+        name for name, operation in OPERATIONS.items()
+        if operation.tier == TIER_OPERATOR
+    }
     assert {"raw_read", "export", "backup", "restore", "grant_add",
             "grant_revoke", "key_register", "key_revoke",
             "note_deliberate"} <= only_operator
+    assert all(OPERATIONS[name].attested for name in only_operator)
 
 
 def test_socket_is_not_world_accessible(service):
@@ -478,6 +486,234 @@ def test_export_refuses_without_a_recovery_recipient(short_dir):
 
 def test_socket_path_is_configurable_but_defaults_inside_the_archive():
     assert socket_path().parent == home()
+
+
+def test_fresh_hardened_first_key_ceremony_from_model_tier(
+    short_dir, monkeypatch
+):
+    """SIMULATED hardware crypto; real service UID ownership needs installer tests."""
+    conn = connect()
+    private = ec.generate_private_key(ec.SECP256R1())
+    monkeypatch.setattr(attest, "_service_account_uid", lambda: os.geteuid())
+    with service_context():
+        key_id = attest.bootstrap_key(
+            attest.public_der(private), "ceremony-key", conn=conn,
+            acknowledge_first_key=True,
+        )
+        with pytest.raises(attest.AttestationError, match="permanently closed"):
+            attest.bootstrap_key(
+                attest.public_der(private), "ceremony-key", conn=conn,
+                acknowledge_first_key=True,
+            )
+    assert attest.registered_keys(conn)[0]["signer_tag"] == "ceremony-key"
+    (home() / "config.toml").write_text('[security]\nmode = "hardened"\n')
+
+    svc = AuthorityService(path=short_dir / "ceremony.sock")
+    svc.start()
+    try:
+        with RpcClient(svc.path) as client:
+            capabilities = client.call("capabilities")
+            assert capabilities["tier"] == TIER_MODEL
+            assert "note_deliberate" in capabilities["operations"]
+            prepared = client.call(
+                "prepare_action", action="note.deliberate", scope="global",
+                arguments={}, content="fresh install", reason="",
+                ttl_seconds=60, key_id=key_id,
+            )
+            exact = bytes.fromhex(prepared["canonical"])
+            assert exact == canonical_bytes(attest.DOMAIN, prepared["action"])
+            assert prepared["signer_tag"] == "ceremony-key"
+            assert "note.deliberate" in prepared["human_summary"]
+            signature = private.sign(exact, ec.ECDSA(hashes.SHA256()))
+            blob = {"action": prepared["action"],
+                    "signature": signature.hex()}
+            result = client.call(
+                "note_deliberate", text="fresh install", authorization=blob
+            )
+            with pytest.raises(RpcError) as replay:
+                client.call(
+                    "note_deliberate", text="fresh install", authorization=blob
+                )
+            assert replay.value.code == "attestation"
+        row = conn.execute(
+            "SELECT meta FROM events WHERE id = ?", (result["event"],)
+        ).fetchone()
+        meta = json.loads(row["meta"])
+        assert meta["attestation"]["key_id"] == key_id
+        assert meta["attestation"]["signer"] == attest.SIGNER_SECURE_ENCLAVE
+    finally:
+        svc.stop()
+
+
+def test_first_key_bootstrap_is_not_an_rpc_or_desktop_library_race(
+    service, monkeypatch
+):
+    conn = connect()
+    private = ec.generate_private_key(ec.SECP256R1())
+    monkeypatch.setattr(attest, "_service_account_uid", lambda: os.geteuid())
+    with pytest.raises(attest.AttestationError, match="out-of-band"):
+        attest.bootstrap_key(
+            attest.public_der(private), "race-key", conn=conn,
+            acknowledge_first_key=True,
+        )
+    assert attest.registered_keys(conn) == []
+    with RpcClient(service.path) as client:
+        with pytest.raises(RpcError) as unknown:
+            client.call(
+                "key_bootstrap", public_der=attest.public_der(private).hex(),
+                signer_tag="race-key",
+            )
+        assert unknown.value.code == "unknown_operation"
+
+
+def test_model_challenge_minting_is_rate_and_storage_bounded(service):
+    conn = connect()
+    op = operator(conn)
+    with RpcClient(service.path) as client:
+        for index in range(service.CHALLENGES_PER_WINDOW):
+            result = client.call(
+                "prepare_action", action="archive.raw_read", scope="global",
+                arguments={"event_id": index + 1}, content="", reason="",
+                ttl_seconds=60, key_id=op.key_id,
+            )
+            assert len(bytes.fromhex(result["canonical"])) < 8192
+        before = conn.execute(
+            "SELECT COUNT(*) FROM operator_nonces WHERE consumed_event IS NULL"
+        ).fetchone()[0]
+        with pytest.raises(RpcError) as limited:
+            client.call(
+                "prepare_action", action="archive.raw_read", scope="global",
+                arguments={"event_id": 99}, content="", reason="",
+                ttl_seconds=60, key_id=op.key_id,
+            )
+        assert limited.value.code == "rate_limited"
+        after = conn.execute(
+            "SELECT COUNT(*) FROM operator_nonces WHERE consumed_event IS NULL"
+        ).fetchone()[0]
+    assert before == after == service.CHALLENGES_PER_WINDOW
+
+
+def test_raw_read_authorization_is_consumed_once_from_default_client(service):
+    from contextd.ingest import ingest_note
+
+    conn = connect()
+    event_id = ingest_note(conn, "protected read")
+    op = operator(conn)
+    with RpcClient(service.path) as client:
+        prepared = client.call(
+            "prepare_action", action="archive.raw_read", scope="global",
+            arguments={"event_id": event_id}, content="", reason="",
+            ttl_seconds=60, key_id=op.key_id,
+        )
+        blob = {"action": prepared["action"],
+                "signature": op.sign(prepared["canonical"]).hex()}
+        assert client.call(
+            "raw_read", event_id=event_id, authorization=blob
+        )["content"] == "protected read"
+        with pytest.raises(RpcError) as replay:
+            client.call("raw_read", event_id=event_id, authorization=blob)
+        assert replay.value.code == "attestation"
+    nonce = conn.execute(
+        "SELECT consumed_event FROM operator_nonces WHERE nonce = ?",
+        (prepared["action"]["nonce"],),
+    ).fetchone()
+    assert nonce["consumed_event"] == 0
+
+
+def test_backup_challenge_binds_normalized_path_retention_and_archive_tip(
+    service,
+):
+    from contextd.ingest import ingest_note
+
+    conn = connect()
+    event_id = ingest_note(conn, "snapshot identity")
+    tip = conn.execute(
+        "SELECT chain_hash FROM events WHERE id = ?", (event_id,)
+    ).fetchone()["chain_hash"]
+    op = operator(conn)
+    destination = home().parent / "rpc-backups"
+    with RpcClient(service.path) as client:
+        prepared = client.call(
+            "prepare_action", action="archive.backup", scope="global",
+            arguments={"destination": str(destination), "keep": 2},
+            content="", reason="", ttl_seconds=60, key_id=op.key_id,
+        )
+        covered = prepared["action"]["arguments"]
+        assert covered == {
+            "destination_path": str(destination),
+            "keep": 2,
+            "archive_uuid": attest.archive_uuid(conn),
+            "snapshot_head_id": event_id,
+            "snapshot_head_hash": tip,
+        }
+        blob = {"action": prepared["action"],
+                "signature": op.sign(prepared["canonical"]).hex()}
+        with pytest.raises(RpcError) as wrong:
+            client.call(
+                "backup", destination=str(destination), keep=3,
+                authorization=blob,
+            )
+        assert wrong.value.code == "attestation"
+        assert conn.execute(
+            "SELECT consumed_event FROM operator_nonces WHERE nonce = ?",
+            (prepared["action"]["nonce"],),
+        ).fetchone()["consumed_event"] is None
+        result = client.call(
+            "backup", destination=str(destination), keep=2,
+            authorization=blob,
+        )
+    assert Path(result["bundle"]).is_dir()
+    assert result["manifest_sha256"]
+    assert conn.execute(
+        "SELECT consumed_event FROM operator_nonces WHERE nonce = ?",
+        (prepared["action"]["nonce"],),
+    ).fetchone()["consumed_event"] == 0
+
+
+def test_restore_challenge_binds_authenticated_manifest_and_destination(service):
+    from contextd.backup import create_backup
+    from contextd.ingest import ingest_note
+
+    conn = connect()
+    ingest_note(conn, "restore identity")
+    op = operator(conn)
+    backup = create_backup(conn, home(), home().parent / "restore-source")
+    destination = home().parent / "restored-archive"
+    with RpcClient(service.path) as client:
+        prepared = client.call(
+            "prepare_action", action="archive.restore", scope="global",
+            arguments={"bundle": str(backup["bundle"]),
+                       "destination": str(destination)},
+            content="", reason="", ttl_seconds=60, key_id=op.key_id,
+        )
+        covered = prepared["action"]["arguments"]
+        assert covered["bundle_path"] == str(backup["bundle"])
+        assert covered["destination_path"] == str(destination)
+        assert covered["manifest_sha256"] == backup["manifest_sha256"]
+        assert covered["authenticated"] == 1
+        assert covered["signing_key_id"]
+        blob = {"action": prepared["action"],
+                "signature": op.sign(prepared["canonical"]).hex()}
+        with pytest.raises(RpcError) as wrong:
+            client.call(
+                "restore", bundle=str(backup["bundle"]),
+                destination=str(destination) + "-wrong", authorization=blob,
+            )
+        assert wrong.value.code == "attestation"
+        assert conn.execute(
+            "SELECT consumed_event FROM operator_nonces WHERE nonce = ?",
+            (prepared["action"]["nonce"],),
+        ).fetchone()["consumed_event"] is None
+        restored = client.call(
+            "restore", bundle=str(backup["bundle"]),
+            destination=str(destination), authorization=blob,
+        )
+    assert restored["destination"] == str(destination)
+    assert destination.is_dir()
+    assert conn.execute(
+        "SELECT consumed_event FROM operator_nonces WHERE nonce = ?",
+        (prepared["action"]["nonce"],),
+    ).fetchone()["consumed_event"] == 0
 
 
 # --- end to end through the daemon in hardened mode -------------------------

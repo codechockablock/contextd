@@ -193,20 +193,17 @@ class Provenance:
 # --- resolving stored events ------------------------------------------------
 
 def assurance_of(meta: dict | None) -> str:
-    """The honest assurance level of a stored event.
+    """Resolve metadata-only claims without granting cryptographic assurance.
 
-    The rule that matters: a stored ``authority``/``actor``/``role`` string is
-    **never** promoted. An event reaches OPERATOR_AUTHORIZED only by carrying a
-    verified attestation block, which only the authority plane writes.
+    This function has no connection, event bytes, key registry, nonce row, or
+    service signature, so it is structurally incapable of verifying an
+    attestation.  In particular, ``{"attestation": {"signer":
+    "secure_enclave"}}`` is just more caller-controlled JSON.  Reducers that
+    enforce authority must use :func:`assurance_for_event` with exact action
+    semantics instead.
     """
     meta = meta or {}
-    attestation = meta.get("attestation")
-    if isinstance(attestation, dict):
-        signer = attestation.get("signer")
-        if signer == "secure_enclave":
-            return OPERATOR_AUTHORIZED
-        if signer == INSECURE_TEST_SIGNER:
-            return INSECURE_TEST_SIGNER
+    if meta.get("attestation") is not None:
         return UNVERIFIED
     recorded = meta.get("assurance")
     if recorded in (MODEL_GRANTED, TRANSPORT_OBSERVED, LEGACY_UNVERIFIED):
@@ -222,12 +219,109 @@ def assurance_of(meta: dict | None) -> str:
     return UNVERIFIED
 
 
+def assurance_for_event(conn, event_row, *, action: str, scope: str = "global",
+                        arguments: dict | None = None,
+                        content: str | None = None,
+                        reason: str | None = None) -> str:
+    """Cryptographically resolve one stored event and its exact semantics.
+
+    A verified operator signature is necessary but, after a service cutover,
+    not sufficient: the event must also carry the authority service's
+    signature.  Events at or before a cutover stay legacy evidence because the
+    cutover explicitly does not authenticate prior history.
+    """
+    from .attest import verify_stored_authorization
+
+    authorization = verify_stored_authorization(
+        conn,
+        event_row,
+        action=action,
+        scope=scope,
+        arguments=arguments,
+        content=content,
+        reason=reason,
+    )
+    if authorization is None:
+        try:
+            import json
+
+            raw = event_row["meta"]
+            meta = json.loads(raw or "{}") if isinstance(raw, str) else raw
+        except (KeyError, TypeError, ValueError):
+            meta = {}
+        return assurance_of(meta)
+
+    # Once the archive has an integrity cutover, a row absent from the
+    # service-signed coverage set was not accepted by the authority daemon.
+    import sqlite3
+
+    from .ledger_sig import LedgerSignatureError, cutover_tip_id, verify_event
+
+    try:
+        cutover = cutover_tip_id(conn)
+    except sqlite3.OperationalError:  # pre-schema legacy inspection only
+        cutover = None
+    except LedgerSignatureError:
+        return UNVERIFIED
+    event_id = int(event_row["id"])
+    if cutover is not None:
+        if event_id <= cutover:
+            return LEGACY_UNVERIFIED
+        verification = verify_event(conn, event_id)
+        if not verification.get("signed") or not verification.get("ok"):
+            return UNVERIFIED
+    return authorization.assurance
+
+
 def is_authenticated_human(meta: dict | None) -> bool:
-    """The single question every caller should ask instead of reading strings."""
-    if assurance_of(meta) not in AUTHENTICATED_HUMAN:
-        return False
-    attestation = (meta or {}).get("attestation") or {}
-    return attestation.get("signer") == "secure_enclave"
+    """Metadata alone never authenticates a human.
+
+    Kept as a deliberately fail-closed compatibility helper.  Code with an
+    event row must use :func:`is_authenticated_event` instead.
+    """
+    del meta
+    return False
+
+
+def is_authenticated_event(conn, event_row, **semantics) -> bool:
+    """True only for a production operator signature over this exact event."""
+    return assurance_for_event(conn, event_row, **semantics) in AUTHENTICATED_HUMAN
+
+
+def known_event_assurance(conn, event_row) -> str:
+    """Resolve assurance for event types with a closed action mapping.
+
+    This is the bridge used by provenance/experiment displays.  Unknown event
+    types stay metadata-only and therefore unverified; adding a new operator
+    action requires adding its exact semantic mapping here or in its reducer.
+    """
+    import json
+
+    try:
+        raw = event_row["meta"]
+        meta = json.loads(raw or "{}") if isinstance(raw, str) else raw
+        if not isinstance(meta, dict):
+            return UNVERIFIED
+        source, kind = event_row["source"], event_row["kind"]
+        if source == "note" and kind == "note":
+            return assurance_for_event(
+                conn,
+                event_row,
+                action="note.deliberate",
+                scope="global",
+                content=event_row["content"] or None,
+            )
+        if source == "loop" and kind == "loop":
+            from .loops import stored_loop_assurance
+
+            return stored_loop_assurance(conn, int(event_row["id"]))
+        if source == "decision" and kind == "decision":
+            from .decisions import stored_decision_assurance
+
+            return stored_decision_assurance(conn, int(event_row["id"]))
+        return assurance_of(meta)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return UNVERIFIED
 
 
 def refuse_forged_authority(**caller_fields) -> None:

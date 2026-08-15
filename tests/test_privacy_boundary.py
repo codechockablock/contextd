@@ -24,7 +24,13 @@ from contextd.backup import create_backup
 from contextd.db import append_event, connect, store_blob
 from contextd.gate import GateError, assemble, disclose, record_dispatch_outcome
 from contextd.ingest import ingest_note
-from contextd.redact import FLOOR, redact, sanitize_label, sanitize_text
+from contextd.redact import (
+    FLOOR,
+    redact,
+    sanitize_content,
+    sanitize_label,
+    sanitize_text,
+)
 from contextd.schemas import SchemaError, validate_egress_meta, validate_event_meta
 
 # One planted literal per pinned class. None was ever a valid credential.
@@ -103,6 +109,18 @@ def test_config_cannot_weaken_the_floor():
     assert "PROJECT-1234" not in redact(extended, "see PROJECT-1234")
 
 
+def test_config_pattern_names_and_errors_cannot_echo_secrets():
+    secret_name = CANARIES["api_key"]
+    valid = {"gate": {"redact": {secret_name: r"PROJECT-[0-9]{4}"}}}
+    output = redact(valid, "PROJECT-1234")
+    assert secret_name not in output and output == "[REDACTED:config.0]"
+
+    invalid = {"gate": {"redact": {secret_name: "(" + secret_name}}}
+    with pytest.raises(ValueError) as exc:
+        redact(invalid, "ordinary")
+    assert secret_name not in str(exc.value)
+
+
 def test_floor_is_immutable_at_runtime():
     with pytest.raises(TypeError):
         FLOOR["api_key"] = "nope"          # type: ignore[index]
@@ -119,13 +137,21 @@ def test_sanitizers_bound_and_redact():
     assert CANARIES["aws_key"] not in label and len(label) <= 64
 
 
+def test_sanitizer_removes_terminal_control_families():
+    hostile = "ok\x07\x1b]52;c;payload\x07\x1b[31mred\x9b32m\x80\u202edone"
+    clean = sanitize_content({}, hostile)
+    assert clean == "okreddone"
+    assert not any(ord(ch) < 32 and ch not in "\t\n\r" for ch in clean)
+    assert not any(0x7F <= ord(ch) <= 0x9F for ch in clean)
+
+
 # --- closed schema ----------------------------------------------------------
 
 def test_unknown_disclosure_field_is_refused_not_dropped():
     cfg = load_config()
     with pytest.raises(SchemaError) as exc:
         validate_egress_meta(cfg, {"type": "recall", "smuggled": "payload"})
-    assert "smuggled" in str(exc.value)
+    assert "smuggled" not in str(exc.value)
 
 
 def test_unknown_disclosure_type_is_refused():
@@ -151,6 +177,60 @@ def test_schema_error_never_quotes_the_offending_value():
     with pytest.raises(SchemaError) as exc:
         validate_egress_meta(cfg, {"type": "recall", "leak": CANARIES["api_key"]})
     _assert_clean(str(exc.value), "SchemaError message")
+
+
+def test_nested_schema_errors_never_echo_attacker_keys_or_types():
+    cfg = load_config()
+    canary_key = CANARIES["api_key"]
+    cases = [
+        {"op": "add", "scope": {"global": True, canary_key: 1}},
+        {"op": "add", "derivation": {canary_key: object()}},
+    ]
+    for meta in cases:
+        with pytest.raises(SchemaError) as exc:
+            validate_event_meta(cfg, "loop", "loop", meta)
+        assert canary_key not in str(exc.value)
+        assert "object" not in str(exc.value)
+
+
+def test_nested_scope_strings_strip_terminal_sequences():
+    out = validate_event_meta(
+        load_config(),
+        "loop",
+        "loop",
+        {"op": "add", "scope": {"repo": "/safe/\x1b[31mrepo"}},
+    )
+    assert out["scope"] == {"repo": "/safe/repo"}
+
+
+def test_verbatim_derivation_quote_cannot_bypass_privacy_floor():
+    meta = {
+        "derivation": {
+            "source_egress": 1,
+            "support": [{"event": 1, "quote": CANARIES["api_key"]}],
+        }
+    }
+    with pytest.raises(SchemaError) as exc:
+        validate_event_meta(load_config(), "note", "note", meta)
+    _assert_clean(str(exc.value), "derivation refusal")
+
+
+def test_signed_attestation_strings_cannot_bypass_privacy_floor():
+    block = {
+        "action": {"reason": CANARIES["api_key"]},
+        "signature": "00",
+        "key_id": "a" * 64,
+        "signer": "secure_enclave",
+        "verified_at": "2026-08-15T00:00:00+00:00",
+    }
+    with pytest.raises(SchemaError) as exc:
+        validate_event_meta(
+            load_config(),
+            "note",
+            "note",
+            {"assurance": "operator_authorized", "attestation": block},
+        )
+    _assert_clean(str(exc.value), "attestation refusal")
 
 
 def test_disclose_refuses_undeclared_intent_and_appends_nothing():
@@ -227,11 +307,18 @@ def _plant_everything(conn, cfg):
         "task_hint": f"hint {CANARIES['bearer_header']}",
         "purpose": f"why {CANARIES['password_assignment']}",
         "loop_scope": f"repo:/srv/{CANARIES['basic_auth_url']}",
-        "staleness": {"nested": {"deep": CANARIES["openai_key"]}},
+        "staleness": {
+            "nested": {
+                "deep": [CANARIES["openai_key"], CANARIES["google_api_key"]]
+            }
+        },
     })
     from contextd.loops import add_loop, make_scope
-    add_loop(conn, f"loop text {CANARIES['anthropic_key']}",
-             make_scope(f"/srv/demo/{CANARIES['google_api_key']}"))
+    add_loop(
+        conn,
+        f"loop text {CANARIES['anthropic_key']}",
+        make_scope("/srv/demo/privacy-floor"),
+    )
 
 
 def test_no_canary_survives_in_any_persistence_surface(tmp_path):

@@ -15,7 +15,14 @@ text, recency, or anything else; that refusal is the authority boundary.
 
 import json
 
-from .assurance import refuse_forged_authority
+from .assurance import (
+    INSECURE_TEST_SIGNER,
+    MODEL_GRANTED,
+    OPERATOR_AUTHORIZED,
+    UNVERIFIED,
+    assurance_for_event,
+    refuse_forged_authority,
+)
 
 SUPERSEDE_RESERVE_SHARE = 0.06   # of budget, when any edge exists
 SUPERSEDE_RESERVE_MIN = 120      # est. tokens; keeps the loud line affordable
@@ -33,18 +40,42 @@ def _require_authorization(conn, authorization, reason, old, new):
     if authorization is None:
         try:
             return test_mode_authorization(
-                conn, "decision.supersede", "global", arguments, body, reason)
+                conn, "decision.supersede", "global", arguments, body, body)
         except AttestationError as exc:
             raise DecisionError(
                 f"recording a supersession is an operator act and requires a "
                 f"verified authorization (contextd/attest.py). ({exc})"
             ) from exc
     if not authorization.matches("decision.supersede", "global", arguments,
-                                 body, reason):
+                                 body, body):
         raise DecisionError(
             "the authorization does not cover exactly this supersession edge"
         )
     return authorization
+
+
+def _decision_event_assurance(conn, row, meta: dict, old: int,
+                              new: int) -> str:
+    if meta.get("grant") is not None:
+        from .grants import covering_grant_for_event
+
+        return (
+            MODEL_GRANTED
+            if covering_grant_for_event(
+                conn, row, "decision.supersede", None
+            ) is not None
+            else UNVERIFIED
+        )
+    body = row["content"] or None
+    return assurance_for_event(
+        conn,
+        row,
+        action="decision.supersede",
+        scope="global",
+        arguments={"old": old, "new": new},
+        content=body,
+        reason=body,
+    )
 
 
 def record_supersession(conn, old: int, new: int, reason: str = "",
@@ -75,13 +106,14 @@ def record_supersession(conn, old: int, new: int, reason: str = "",
         return {"result": "existing", "edge": existing}
     meta = {"op": "supersede", "old": old, "new": new,
             "claimed_client": client}
+    body = reason.strip() or None
     if grant is not None:
         # delegated act: the covering grant is verified inside the append
         # transaction, so a revoke that commits first is seen
         from .grants import granted_append
         eid = granted_append(
             conn, "decision", "decision", "decision.supersede", None,
-            content=reason.strip() or None, meta=meta,
+            content=body, meta=meta,
         )["event"]
     else:
         authorization = _require_authorization(conn, authorization, reason,
@@ -90,7 +122,7 @@ def record_supersession(conn, old: int, new: int, reason: str = "",
         eid = authorized_append(
             conn, "decision", "decision", authorization, "decision.supersede",
             "global", arguments={"old": old, "new": new},
-            content=reason.strip() or None, reason=reason, meta=meta,
+            content=body, reason=body, meta=meta,
         )
     return {"result": "created",
             "edge": reduce_supersessions(conn)["edges"][old], "event": eid}
@@ -106,7 +138,7 @@ def reduce_supersessions(conn) -> dict:
     edges: dict = {}
     anomalies: list = []
     rows = conn.execute(
-        "SELECT id, content, meta FROM events WHERE kind='decision' "
+        "SELECT id, ts, content, meta FROM events WHERE kind='decision' "
         "ORDER BY id").fetchall()
     for r in rows:
         meta = json.loads(r["meta"] or "{}")
@@ -118,11 +150,60 @@ def reduce_supersessions(conn) -> dict:
         if not isinstance(old, int) or not isinstance(new, int) or old == new:
             anomalies.append({"event": r["id"], "why": "malformed edge"})
             continue
+        targets = conn.execute(
+            "SELECT id, kind, content FROM events WHERE id IN (?, ?) AND id < ?",
+            (old, new, r["id"]),
+        ).fetchall()
+        if (
+            len(targets) != 2
+            or any(row["kind"] == "egress" or row["content"] is None
+                   for row in targets)
+        ):
+            anomalies.append({
+                "event": r["id"],
+                "why": "edge does not reference two prior content events",
+            })
+            continue
+        level = _decision_event_assurance(conn, r, meta, old, new)
+        if level not in (
+            OPERATOR_AUTHORIZED,
+            INSECURE_TEST_SIGNER,
+            MODEL_GRANTED,
+        ):
+            anomalies.append({
+                "event": r["id"],
+                "why": "edge lacks a verified authorization",
+            })
+            continue
         if old in edges:
             anomalies.append({"event": edges[old]["edge"],
                               "why": f"displaced by later edge {r['id']}"})
         edges[old] = {"new": new, "edge": r["id"], "old": old}
     return {"edges": edges, "anomalies": anomalies}
+
+
+def stored_decision_assurance(conn, event_id: int) -> str:
+    """Verify one supersession event independently of whether it is current."""
+    row = conn.execute(
+        "SELECT id, ts, content, meta FROM events "
+        "WHERE id = ? AND kind = 'decision'",
+        (int(event_id),),
+    ).fetchone()
+    if row is None:
+        return UNVERIFIED
+    try:
+        meta = json.loads(row["meta"] or "{}")
+        old, new = meta.get("old"), meta.get("new")
+        if (
+            meta.get("op") != "supersede"
+            or not isinstance(old, int)
+            or not isinstance(new, int)
+            or old == new
+        ):
+            return UNVERIFIED
+        return _decision_event_assurance(conn, row, meta, old, new)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return UNVERIFIED
 
 
 def current_version(edges: dict, event_id: int) -> dict:

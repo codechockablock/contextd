@@ -44,6 +44,7 @@ few minutes; under-reporting costs them a live credential.
 
 import argparse
 import collections
+import hashlib
 import json
 import math
 import os
@@ -56,7 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from contextd.redact import FLOOR  # noqa: E402
-from scripts.audit_repository_privacy import _decode, _git  # noqa: E402
+from scripts.audit_repository_privacy import _decode_views, _git  # noqa: E402
 
 #: Words that only appear in a value someone invented on purpose.
 MARKERS = (
@@ -86,6 +87,19 @@ CODE_TELLS = ("(", ")", ".split", ".get", ".pop", "self.", "os.", "args.",
 DOC_TELLS = ("...", "…", "<", ">", "[REDACTED:", "$(", "${", "%s", "{}")
 
 ENTROPY_FLOOR = 3.0          # bits/char; below this a random key is unlikely
+
+# Exact, manually reviewed metadata examples.  Metadata has no repository path
+# where the ordinary docs/test classifiers can infer intent, so approvals bind
+# object + line + detector + value digest.  Moving or changing one reopens
+# review instead of silently inheriting a class-wide exception.
+KNOWN_METADATA_EXAMPLES = {
+    (
+        "c62b5bf76011e853ea081efcdcceae11935fae7c",
+        26,
+        "basic_auth_url",
+        "e06ede399650611b1a27debf5a45ac7573d762fc3a31eb41f54b53d6247036d1",
+    ): "documented_example",
+}
 
 
 def shannon(text: str) -> float:
@@ -218,6 +232,53 @@ def history_blobs() -> dict:
     return blobs
 
 
+def history_metadata() -> list[tuple[str, str]]:
+    """Reachable commit and annotated-tag objects omitted by blob walks."""
+    objects = [(oid, "commit_metadata")
+               for oid in _git("rev-list", "--all").splitlines()]
+    tags = _git(
+        "for-each-ref", "--format=%(objectname) %(objecttype)", "refs/tags"
+    )
+    for line in tags.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "tag":
+            objects.append((parts[0], "tag_metadata"))
+    return objects
+
+
+def _triage_text(text: str, path: str, oid: str, compiled, by_class,
+                 by_class_path, unclassified) -> None:
+    for pattern_name, rx in compiled:
+        for match in rx.finditer(text):
+            value = match.group(0)
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            line_text = text[
+                line_start:line_end if line_end != -1 else len(text)
+            ]
+            line_no = text.count("\n", 0, match.start()) + 1
+            exact = (
+                oid,
+                line_no,
+                pattern_name,
+                hashlib.sha256(value.encode()).hexdigest(),
+            )
+            verdict = KNOWN_METADATA_EXAMPLES.get(exact) or classify(
+                value, path, line_text
+            )
+            by_class[verdict] += 1
+            by_class_path[verdict][path] += 1
+            if verdict == "UNCLASSIFIED":
+                unclassified.append({
+                    "pattern": pattern_name,
+                    "path": path,
+                    "object": oid[:12],
+                    "line": line_no,
+                    "length": len(value),
+                    "entropy_bits_per_char": round(shannon(value), 2),
+                })
+
+
 def triage() -> dict:
     compiled = [(name, re.compile(pattern)) for name, pattern in FLOOR.items()]
     blobs = history_blobs()
@@ -241,32 +302,38 @@ def triage() -> dict:
             proc.stdout.read(1)
             if header[1] != "blob":
                 continue
-            text = _decode(raw)
-            if text is None:
-                continue
-            for pattern_name, rx in compiled:
-                for match in rx.finditer(text):
-                    value = match.group(0)
-                    line_start = text.rfind("\n", 0, match.start()) + 1
-                    line_end = text.find("\n", match.end())
-                    line_text = text[line_start:
-                                     line_end if line_end != -1 else len(text)]
-                    verdict = classify(value, path, line_text)
-                    by_class[verdict] += 1
-                    by_class_path[verdict][path] += 1
-                    if verdict == "UNCLASSIFIED":
-                        line_no = text.count("\n", 0, match.start()) + 1
-                        unclassified.append({
-                            "pattern": pattern_name,
-                            "path": path,
-                            "object": oid[:12],
-                            "line": line_no,
-                            "length": len(value),
-                            "entropy_bits_per_char": round(shannon(value), 2),
-                        })
+            for text in _decode_views(raw):
+                _triage_text(
+                    text,
+                    path,
+                    oid,
+                    compiled,
+                    by_class,
+                    by_class_path,
+                    unclassified,
+                )
     finally:
         proc.stdin.close()
         proc.wait()
+
+    for oid, path in history_metadata():
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-p", oid],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        for text in _decode_views(result.stdout):
+            _triage_text(
+                text,
+                path,
+                oid,
+                compiled,
+                by_class,
+                by_class_path,
+                unclassified,
+            )
 
     return {
         "total": sum(by_class.values()),

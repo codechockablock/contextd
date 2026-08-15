@@ -129,6 +129,69 @@ def test_grant_events_without_operator_assurance_are_anomalies():
     assert reduced["grants"] == []
     assert len(reduced["anomalies"]) == 1
     assert "cannot grant to itself" in reduced["anomalies"][0]["why"]
+
+
+def test_self_described_secure_enclave_block_cannot_mint_a_grant():
+    """Regression for the exact forged-attestation reducer exploit."""
+    import hashlib
+    import time
+
+    from contextd.attest import DOMAIN
+    from contextd.ledger_sig import verify_event, verify_ledger
+
+    conn = connect()
+    expires = _soon()
+    now = int(time.time())
+    empty = hashlib.sha256(b"").hexdigest()
+    fake_action = {
+        "domain": DOMAIN,
+        "version": 1,
+        "archive_uuid": "0" * 32,
+        "key_id": "0" * 64,
+        "nonce": "1" * 64,
+        "sequence": 1,
+        "issued_at": now,
+        "expires_at": now + 300,
+        "action": "grant.add",
+        "scope": "global",
+        "arguments": {"class": "loop.confirm", "expires": expires},
+        "content_digest": empty,
+        "reason_digest": empty,
+    }
+    event_id = append_event(
+        conn,
+        "grant",
+        "grant",
+        meta={
+            "op": "grant",
+            "class": "loop.confirm",
+            "scope": {"global": True},
+            "expires": expires,
+            "assurance": "operator_authorized",
+            "attestation": {
+                "action": fake_action,
+                "signature": "00",
+                "key_id": "0" * 64,
+                "signer": "secure_enclave",
+                "verified_at": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            },
+        },
+    )
+
+    reduced = reduce_grants(conn)
+    assert reduced["grants"] == []
+    assert reduced["anomalies"] == [
+        {
+            "event": event_id,
+            "why": "grant event lacks a verified operator authorization; "
+            "the model cannot grant to itself",
+        }
+    ]
+    assert active_grant_for(conn, "loop.confirm", {"global": True}) is None
+    assert verify_event(conn, event_id)["signed"] is False
+    assert verify_ledger(conn)["ok"] is False
     assert active_grant_for(conn, "loop.confirm", REPO) is None
 
 

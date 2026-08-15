@@ -42,6 +42,7 @@ import json
 import re
 
 from .experiment import epistemic_type
+from .assurance import known_event_assurance
 
 # Levels this module can assign, weakest to strongest. Semantic levels
 # (semantically_supported, contradicted, unresolved) are intentionally not
@@ -285,7 +286,12 @@ def closure(conn, event_id: int, quotes: bool = True, _visited=None) -> dict:
     node = {
         "event": event_id, "exists": True,
         "ts": row["ts"], "source": row["source"], "kind": row["kind"],
-        "epistemic_type": epistemic_type(row["source"], row["kind"], meta),
+        "epistemic_type": epistemic_type(
+            row["source"],
+            row["kind"],
+            meta,
+            known_event_assurance(conn, row),
+        ),
         "superseded_by": superseded_by(conn, event_id),
         "children": {},
     }

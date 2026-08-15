@@ -146,17 +146,17 @@ as a property contextd has.
 | S4 | Domain mutators refuse free-form `actor="human"` / `authority="operator"`; they require a verified authorization object. | `test_authenticated_provenance.py` | enforced |
 | S5 | Grant authorization is verified inside the same append lock as the delegated act; concurrent replay yields exactly one success. | `test_grant_atomicity.py` | enforced |
 | S6 | Grants require finite expiry; naive timestamps are refused; equivalent UTC offsets decide identically. | `test_grant_atomicity.py` | enforced |
-| S7 | Every disclosure/event type uses a **closed** metadata schema; unknown fields are refused. | `test_privacy_boundary.py` | enforced |
+| S7 | Every disclosure/event type uses a **closed** metadata schema; unknown fields are refused without echoing attacker-controlled nested keys or types. | `test_privacy_boundary.py` | enforced |
 | S8 | The built-in redaction floor cannot be weakened by configuration. | `test_privacy_boundary.py` | enforced |
 | S9 | Credential canaries of the **pinned classes** (§6) do not survive in event content, URI, serialized metadata, SQLite/WAL/SHM, blobs, logs, errors, audit output, backup manifests, or temp files. | `test_privacy_boundary.py` | enforced |
-| S10 | Scratch dirs are `0700`, scratch files `0600`, cleanup runs in `finally` on success and ordinary failure, and cleanup failure is loud. | `test_scratch_cleanup.py` | enforced |
+| S10 | Scratch dirs are `0700`, scratch files `0600`, cleanup runs on every exit path, cleanup failure is loud, and ingest reads reject symlink files/parents using descriptor-relative no-follow opens. | `test_scratch_cleanup.py`, `test_ingest_path_safety.py` | enforced |
 | S11 | A forged `CONTEXTD_DERIVATION_SOURCE` has no authority; wrong-session/principal/egress, expired, or replayed capabilities refuse. | `test_derivation_capability.py` | enforced |
 | S12 | Recomputing the hash chain and witness after tampering does not make a forged authoritative signature verify. | `test_service_attestation.py` | enforced² |
 | S13 | Migration preserves every historical byte; legacy authority labels resolve `legacy_unverified`. | `test_security_migration.py` | enforced |
 | S14 | Unsupported future schema versions refuse **before** filesystem or DB mutation. | `test_security_migration.py` | enforced |
 | S15 | A hostile same-UID process cannot open the daemon-owned DB, obtain raw content through a CLI fallback, invoke a production signer without presence, read key material from env/argv/config/logs/backups/temp, or widen its RPC capabilities. | `test_process_isolation.py` | enforced¹ |
 | S16 | `ctx security doctor --strict --json` reports each invariant separately and exits nonzero unless every one holds. | `test_security_doctor.py` | enforced |
-| S17 | Tracked repository files contain no personal home path, live session UUID, raw archive dialogue, or private repository name. | `test_repository_privacy.py` | enforced |
+| S17 | Every tracked file type and filename is scanned without binary/size skips; synthetic approvals pin exact fingerprint, line, and count; reachable history includes blob, commit, and annotated-tag metadata. | `test_repository_privacy.py` | enforced |
 
 ² **S12 holds against a chain-recomputing attacker, not against one that
 re-signs.** The service key is 0600 but currently lives beside the archive, so
@@ -225,6 +225,12 @@ parameters, including %-encoded), `openai_key` (sk-proj-…), `anthropic_key`
 > a floor, not a claim of complete privacy. A secret of an unlisted shape will
 > pass through. Adding a class requires adding its tests in the same change.
 
+All ordinary persisted/displayed strings also pass a terminal-safety boundary:
+OSC/CSI sequences, C0/C1 controls (except ordinary TAB/LF/CR layout), and
+Unicode format controls are removed before redaction. Signed or verbatim structures, including attestation
+strings and derivation quotes, are **refused** if that privacy-clean copy would
+differ; rewriting them after verification would create false provenance.
+
 ---
 
 ## 7. Migration boundary
@@ -264,8 +270,9 @@ parameters, including %-encoded), `openai_key` (sk-proj-…), `anthropic_key`
   policy configured, export **refuses** rather than emitting plaintext.
 - **Key loss**: losing the Secure Enclave key (device loss, key deletion)
   makes new operator-authorized events impossible until a new key is enrolled.
-  Enrollment of the first key is a bootstrap act performed by the operator
-  out of band; contextd does not self-enroll.
+  Enrollment of the first key is an out-of-band service-admin act with closed
+  ownership and empty-registry preconditions; it is never an RPC. See
+  `docs/OPERATOR_CEREMONY.md`. Later rotation is authorized by an active key.
 - **Crash**: the witness/recovery journal reconciles exactly one interrupted
   append. Nonce and capability consumption are atomic with the append they
   authorize, so a crash cannot leave a consumed nonce with no event or an

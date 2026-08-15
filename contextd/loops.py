@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .assurance import (
     INSECURE_TEST_SIGNER, LEGACY_UNVERIFIED, MODEL_GRANTED, OPERATOR_AUTHORIZED,
-    UNVERIFIED, assurance_of, refuse_forged_authority,
+    UNVERIFIED, assurance_for_event, assurance_of, refuse_forged_authority,
 )
 
 
@@ -45,7 +45,8 @@ def _authority_label(assurance: str, op: str = "") -> str | None:
     return "model" if op == "candidate" else None
 
 
-def _legacy_authority_view(meta: dict, op: str) -> str | None:
+def _legacy_authority_view(meta: dict, op: str,
+                           level: str | None = None) -> str | None:
     """The pre-hardening `authority` vocabulary, derived from real assurance.
 
     Kept because the open-loops benchmark corpus and its scorers read these
@@ -55,7 +56,7 @@ def _legacy_authority_view(meta: dict, op: str) -> str | None:
     reports whatever string it was written with — which authenticates nothing
     (docs/SECURITY.md §3).
     """
-    level = assurance_of(meta)
+    level = assurance_of(meta) if level is None else level
     if level in (OPERATOR_AUTHORIZED, INSECURE_TEST_SIGNER):
         return "operator"
     if level == MODEL_GRANTED:
@@ -135,6 +136,62 @@ def _rows(conn):
         "ORDER BY id").fetchall()
 
 
+def _loop_event_assurance(conn, row, meta: dict, loop: dict | None) -> str:
+    """Resolve a loop event only against the act that could have produced it."""
+    op = meta.get("op")
+    if op == "candidate":
+        return assurance_of(meta)
+
+    if meta.get("grant") is not None:
+        if loop is None or op not in TRANSITION_OPS:
+            return UNVERIFIED
+        from .grants import covering_grant_for_event
+
+        grant = covering_grant_for_event(
+            conn, row, f"loop.{op}", loop["scope"]
+        )
+        return MODEL_GRANTED if grant is not None else UNVERIFIED
+
+    body = row["content"] or None
+    if op == "add":
+        scope = meta.get("scope")
+        if not isinstance(scope, dict):
+            return UNVERIFIED
+        return assurance_for_event(
+            conn,
+            row,
+            action="loop.add",
+            scope=scope_str(scope),
+            content=body,
+        )
+    if loop is None or op not in TRANSITION_OPS:
+        return assurance_of(meta)
+
+    # Adding wording identical to a candidate records a confirm transition but
+    # is authorized as loop.add over the wording, not as loop.confirm over a
+    # loop id. Try that exact ceremony first; a fabricated action selector does
+    # not help because assurance_for_event cryptographically verifies it.
+    if op == "confirm":
+        promoted = assurance_for_event(
+            conn,
+            row,
+            action="loop.add",
+            scope=scope_str(loop["scope"]),
+            content=body,
+        )
+        if promoted in (OPERATOR_AUTHORIZED, INSECURE_TEST_SIGNER):
+            return promoted
+    return assurance_for_event(
+        conn,
+        row,
+        action=f"loop.{op}",
+        scope=scope_str(loop["scope"]),
+        arguments={"loop": int(loop["id"])},
+        content=None,
+        reason=body,
+    )
+
+
 def reduce_loops(conn) -> dict:
     """Rebuild every loop's current state from the append-only record.
 
@@ -150,6 +207,16 @@ def reduce_loops(conn) -> dict:
         meta = json.loads(r["meta"] or "{}")
         op = meta.get("op")
         if op in CREATING_OPS:
+            level = _loop_event_assurance(conn, r, meta, None)
+            if op == "add" and level not in (
+                OPERATOR_AUTHORIZED,
+                INSECURE_TEST_SIGNER,
+            ):
+                orphans.append({
+                    "event": r["id"],
+                    "why": "loop add lacks a verified operator authorization",
+                })
+                continue
             state = "open" if op == "add" else "candidate"
             loops[r["id"]] = {
                 "id": r["id"],
@@ -159,8 +226,8 @@ def reduce_loops(conn) -> dict:
                 "created_state": state,
                 # resolved, never read raw: a stored `authority` string is a
                 # legacy label with no authentication behind it
-                "created_assurance": assurance_of(meta),
-                "created_authority": _legacy_authority_view(meta, op),
+                "created_assurance": level,
+                "created_authority": _legacy_authority_view(meta, op, level),
                 # `claimed_client` since the rename; legacy rows carry the
                 # old `client` key. Either way it is an unverified self-report
                 # (docs/SECURITY.md §3), never a principal.
@@ -176,8 +243,10 @@ def reduce_loops(conn) -> dict:
                 "dedupe": meta.get("dedupe") or dedupe_key(
                     meta.get("scope") or {"global": True}, r["content"] or ""),
                 "history": [{"event": r["id"], "op": op, "ts": r["ts"],
-                             "assurance": assurance_of(meta),
-                             "authority": _legacy_authority_view(meta, op)}],
+                             "assurance": level,
+                             "authority": _legacy_authority_view(
+                                 meta, op, level
+                             )}],
                 "anomalies": [],
             }
             continue
@@ -190,11 +259,27 @@ def reduce_loops(conn) -> dict:
             orphans.append({"event": r["id"],
                             "why": f"{op} targets unknown loop {target!r}"})
             continue
+        level = _loop_event_assurance(conn, r, meta, loop)
+        if level not in (
+            OPERATOR_AUTHORIZED,
+            INSECURE_TEST_SIGNER,
+            MODEL_GRANTED,
+        ):
+            loop["anomalies"].append({
+                "event": r["id"],
+                "op": op,
+                "ts": r["ts"],
+                "assurance": level,
+                "authority": _legacy_authority_view(meta, op, level),
+                "reason": (r["content"] or "").strip(),
+                "why": f"{op} lacks a verified authorization",
+            })
+            continue
         allowed = {"confirm": ("candidate",), "close": ("open",),
                    "reopen": ("closed",), "dismiss": ("candidate",)}[op]
         entry = {"event": r["id"], "op": op, "ts": r["ts"],
-                 "assurance": assurance_of(meta),
-                 "authority": _legacy_authority_view(meta, op),
+                 "assurance": level,
+                 "authority": _legacy_authority_view(meta, op, level),
                  "reason": (r["content"] or "").strip()}
         if loop["state"] not in allowed:
             loop["anomalies"].append(
@@ -205,8 +290,8 @@ def reduce_loops(conn) -> dict:
         loop["last_reason"] = entry["reason"]
         if op == "confirm":
             loop["state"] = "open"
-            loop["promoted_assurance"] = assurance_of(meta)
-            loop["promoted_authority"] = _legacy_authority_view(meta, op)
+            loop["promoted_assurance"] = level
+            loop["promoted_authority"] = _legacy_authority_view(meta, op, level)
         elif op == "close":
             loop["state"] = "closed"
         elif op == "reopen":
@@ -215,6 +300,27 @@ def reduce_loops(conn) -> dict:
         elif op == "dismiss":
             loop["state"] = "dismissed"
     return {"loops": loops, "orphans": orphans}
+
+
+def stored_loop_assurance(conn, event_id: int) -> str:
+    """Return the reducer-verified assurance for one loop event."""
+    event_id = int(event_id)
+    reduced = reduce_loops(conn)
+    for loop in reduced["loops"].values():
+        if loop["id"] == event_id:
+            return loop["created_assurance"]
+        for entry in (*loop["history"], *loop["anomalies"]):
+            if entry["event"] == event_id:
+                return entry.get("assurance", UNVERIFIED)
+    row = conn.execute(
+        "SELECT meta FROM events WHERE id = ? AND kind = 'loop'", (event_id,)
+    ).fetchone()
+    if row is None:
+        return UNVERIFIED
+    try:
+        return assurance_of(json.loads(row["meta"] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return UNVERIFIED
 
 
 def _scope_matches(loop: dict, scope: dict | None) -> bool:
@@ -299,8 +405,16 @@ def add_loop(conn, text: str, scope: dict, client: str = "cli",
         meta["source_events"] = sorted(int(i) for i in source_events)
 
     def _consume(locked_conn, _ts, event_id):
-        from .attest import consume_nonce
-        consume_nonce(locked_conn, authorization, event_id)
+        from .attest import consume_nonce, reverify_for_use
+
+        verified = reverify_for_use(
+            locked_conn,
+            authorization,
+            action="loop.add",
+            scope=scope_str(scope),
+            content=text,
+        )
+        consume_nonce(locked_conn, verified, event_id)
 
     try:
         eid = append_event_checked(conn, "loop", "loop", content=text,
@@ -397,10 +511,11 @@ def transition(conn, loop_id: int, op: str, authority: str | None = None,
         raise LoopError(
             f"loop#{loop_id} is {loop['state']}: {rules['refuse'][loop['state']]}")
     meta = {"op": op, "loop": loop_id, "claimed_client": client}
+    body = reason.strip() or None
     if grant is None:
         authorization = _require_authorization(
             authorization, f"loop.{op}", loop["scope"], conn=conn,
-            arguments={"loop": loop_id}, reason=reason)
+            arguments={"loop": loop_id}, reason=body)
         meta["assurance"] = authorization.assurance
         meta["authority"] = _authority_label(authorization.assurance)
         meta["attestation"] = authorization.stored_block()
@@ -420,14 +535,23 @@ def transition(conn, loop_id: int, op: str, authority: str | None = None,
         meta.pop("authority", None)
         eid = granted_append(
             conn, "loop", "loop", f"loop.{op}", loop["scope"],
-            content=reason.strip() or None, meta=meta,
+            content=body, meta=meta,
         )["event"]
     else:
         def _consume(locked_conn, _ts, event_id):
-            from .attest import consume_nonce
-            consume_nonce(locked_conn, authorization, event_id)
+            from .attest import consume_nonce, reverify_for_use
+
+            verified = reverify_for_use(
+                locked_conn,
+                authorization,
+                action=f"loop.{op}",
+                scope=scope_str(loop["scope"]),
+                arguments={"loop": loop_id},
+                reason=body,
+            )
+            consume_nonce(locked_conn, verified, event_id)
         eid = append_event_checked(conn, "loop", "loop",
-                                   content=reason.strip() or None, meta=meta,
+                                   content=body, meta=meta,
                                    bind=_consume)
     return {"result": op, "loop": reduce_loops(conn)["loops"][loop_id],
             "event": eid}

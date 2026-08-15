@@ -12,6 +12,11 @@ import pytest
 from contextd import load_config
 from contextd.backup import (
     BackupError,
+    LegacyBundlePolicy,
+    ManifestTrustStore,
+    _sign_manifest,
+    _signable_v1,
+    bundle_identity,
     create_backup,
     restore_backup,
     validate_bundle,
@@ -53,10 +58,16 @@ def _bundle(tmp_path: Path) -> tuple[Path, str, bytes]:
     return result["bundle"], digest, blob_bytes
 
 
-def _rewrite_manifest(bundle: Path, mutate) -> None:
+def _rewrite_manifest(bundle: Path, mutate, *, resign: bool = True) -> None:
     manifest_path = bundle / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     mutate(manifest)
+    if resign:
+        conn = connect()
+        try:
+            manifest["service_signature"] = _sign_manifest(conn, manifest)
+        finally:
+            conn.close()
     raw = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
     manifest_path.write_bytes(raw)
     (bundle / "manifest.sha256").write_text(hashlib.sha256(raw).hexdigest() + "\n")
@@ -121,6 +132,38 @@ def test_online_snapshot_contains_committed_wal_rows(tmp_path):
         == 1
     )
     snapshot.close()
+
+
+def test_backup_refuses_if_authorized_snapshot_tip_has_drifted(tmp_path):
+    archive, conn, _, _ = _seed_archive()
+    authorized = conn.execute(
+        "SELECT id, chain_hash FROM events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    append_event(conn, "note", "note", content="arrived after authorization")
+    backups = tmp_path / "backups"
+
+    with pytest.raises(BackupError, match="tip changed after backup authorization"):
+        create_backup(
+            conn,
+            archive,
+            backups,
+            expected_head_id=authorized["id"],
+            expected_head_hash=authorized["chain_hash"],
+        )
+    assert not list(backups.glob("*.ctxbackup"))
+
+    current = conn.execute(
+        "SELECT id, chain_hash FROM events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    result = create_backup(
+        conn,
+        archive,
+        backups,
+        expected_head_id=current["id"],
+        expected_head_hash=current["chain_hash"],
+    )
+    assert result["events"] == current["id"]
+    conn.close()
 
 
 @pytest.mark.parametrize(
@@ -549,3 +592,388 @@ def test_loop_state_survives_backup_and_restore(tmp_path, monkeypatch):
                       reason="verified post-restore")["loop"]["state"] == \
         "closed"
     rconn.close()
+
+
+def test_recomputed_tampered_bundle_with_stale_signature_fails_closed(tmp_path):
+    bundle, _, _ = _bundle(tmp_path)
+    config = bundle / "config.toml"
+    config.write_text("[gate]\ndaily_token_budget = 1\n")
+
+    def launder_payload_hash(manifest):
+        entry = next(item for item in manifest["files"] if item["path"] == "config.toml")
+        entry["size"] = config.stat().st_size
+        entry["sha256"] = hashlib.sha256(config.read_bytes()).hexdigest()
+
+    _rewrite_manifest(bundle, launder_payload_hash, resign=False)
+    destination = tmp_path / "must-not-publish"
+
+    with pytest.raises(BackupError, match="manifest signature does not verify"):
+        validate_bundle(bundle)
+    with pytest.raises(BackupError, match="manifest signature does not verify"):
+        restore_backup(bundle, destination)
+    assert not destination.exists()
+
+
+def test_unsigned_bundle_fails_closed_by_default(tmp_path):
+    bundle, _, _ = _bundle(tmp_path)
+    _rewrite_manifest(
+        bundle,
+        lambda manifest: manifest.update(
+            service_signature={"signed": False, "why": "removed"}
+        ),
+        resign=False,
+    )
+
+    with pytest.raises(BackupError, match="unsigned"):
+        validate_bundle(bundle)
+    with pytest.raises(BackupError, match="unsigned"):
+        restore_backup(bundle, tmp_path / "must-not-publish")
+
+
+def test_exact_legacy_manifest_pin_is_explicit_and_never_signature_fallback(tmp_path):
+    bundle, _, _ = _bundle(tmp_path)
+    _rewrite_manifest(
+        bundle,
+        lambda manifest: manifest.update(service_signature={"signed": False}),
+        resign=False,
+    )
+    digest = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+    policy = LegacyBundlePolicy(frozenset({digest}))
+    verified = validate_bundle(bundle, legacy_policy=policy)
+    assert verified["authentication"] == {
+        "authenticated": False,
+        "signed": False,
+        "legacy_manifest_pin": digest,
+    }
+
+    # A stale signed block is never downgraded to the legacy exception, even
+    # when an operator pins that exact tampered manifest.
+    bundle, _, _ = _bundle(tmp_path / "stale-signed")
+    _rewrite_manifest(
+        bundle,
+        lambda manifest: manifest["snapshot"].update(
+            events=manifest["snapshot"]["events"] + 1
+        ),
+        resign=False,
+    )
+    digest = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+    with pytest.raises(BackupError, match="signature does not verify"):
+        validate_bundle(
+            bundle, legacy_policy=LegacyBundlePolicy(frozenset({digest}))
+        )
+
+
+def test_unsigned_post_cutover_bundle_cannot_use_legacy_policy(tmp_path):
+    from contextd.ledger_sig import sign_tip
+
+    archive, conn, _, _ = _seed_archive()
+    sign_tip(conn, cutover=True)
+    bundle = create_backup(conn, archive, tmp_path / "backups")["bundle"]
+    conn.close()
+    _rewrite_manifest(
+        bundle,
+        lambda manifest: manifest.update(service_signature={"signed": False}),
+        resign=False,
+    )
+    digest = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+
+    with pytest.raises(BackupError, match="post-cutover"):
+        validate_bundle(
+            bundle, legacy_policy=LegacyBundlePolicy(frozenset({digest}))
+        )
+
+
+def test_fresh_home_restore_uses_external_pinned_trust_root(
+    tmp_path, monkeypatch
+):
+    bundle, _, _ = _bundle(tmp_path)
+    archive = Path(os.environ["CONTEXTD_HOME"])
+    pins_dir = tmp_path / "offline-pins"
+    pins_dir.mkdir(mode=0o700)
+    pin_path = pins_dir / "backup-trust.json"
+    pin_path.write_bytes((archive / "backup-trust.json").read_bytes())
+    pin_path.chmod(0o600)
+    fresh_home = tmp_path / "fresh-home"
+    monkeypatch.setenv("CONTEXTD_HOME", str(fresh_home))
+
+    result = restore_backup(bundle, fresh_home, trust_store=pin_path)
+    assert result["manifest_sha256"] == hashlib.sha256(
+        (bundle / "manifest.json").read_bytes()
+    ).hexdigest()
+    assert (fresh_home / "contextd.db").is_file()
+    assert not (fresh_home / "backup-trust.json").exists()
+
+
+def test_manifest_trust_store_rotation_keeps_old_and_new_bundles_valid(tmp_path):
+    from contextd.ledger_sig import rotate_key
+
+    archive, conn, _, _ = _seed_archive()
+    first = create_backup(conn, archive, tmp_path / "backups")["bundle"]
+    old_key = json.loads((first / "manifest.json").read_text())["service_signature"][
+        "key_id"
+    ]
+    new_key = rotate_key(conn)
+    second = create_backup(conn, archive, tmp_path / "backups")["bundle"]
+    conn.close()
+
+    pins = ManifestTrustStore.load(archive / "backup-trust.json")
+    assert set(pins.pem_map) >= {old_key, new_key}
+    assert (archive / "backup-trust.json").stat().st_mode & 0o777 == 0o600
+    assert not list(archive.glob(".backup-trust.json.*.tmp"))
+    assert validate_bundle(first, trust_store=pins)["authentication"]["ok"]
+    assert validate_bundle(second, trust_store=pins)["authentication"]["ok"]
+
+
+def test_manifest_pin_update_is_atomic_on_publish_failure(tmp_path, monkeypatch):
+    import contextd.backup as backup_module
+    from contextd.ledger_sig import rotate_key
+
+    archive, conn, _, _ = _seed_archive()
+    create_backup(conn, archive, tmp_path / "backups")
+    trust_path = archive / "backup-trust.json"
+    before = trust_path.read_bytes()
+    rotate_key(conn)
+    real_rename = backup_module.os.rename
+
+    def fail_trust_publish(source, destination, *args, **kwargs):
+        if destination == "backup-trust.json":
+            raise OSError("injected trust-store publish failure")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module.os, "rename", fail_trust_publish)
+    with pytest.raises(OSError, match="injected trust-store publish failure"):
+        create_backup(conn, archive, tmp_path / "backups")
+    assert trust_path.read_bytes() == before
+    assert not list(archive.glob(".backup-trust.json.*.tmp"))
+    conn.close()
+
+
+def test_pinned_legacy_signature_scheme_remains_verifiable(tmp_path):
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from contextd.canonical import canonical_bytes
+    from contextd.ledger_sig import _load_or_create_key
+
+    bundle, _, _ = _bundle(tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    conn = connect()
+    try:
+        private, key_id = _load_or_create_key(conn)
+    finally:
+        conn.close()
+    signature = private.sign(
+        canonical_bytes("contextd.BackupManifestV1", _signable_v1(manifest)),
+        ec.ECDSA(hashes.SHA256()),
+    )
+    manifest["service_signature"] = {
+        "signed": True,
+        "key_id": key_id,
+        "signature": signature.hex(),
+    }
+    raw = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    (bundle / "manifest.json").write_bytes(raw)
+    (bundle / "manifest.sha256").write_text(hashlib.sha256(raw).hexdigest() + "\n")
+
+    verified = validate_bundle(bundle)
+    assert verified["authentication"]["signature_scheme"] == 1
+
+
+def test_manifest_trust_store_rejects_unsafe_files_parents_and_key_ids(tmp_path):
+    bundle, _, _ = _bundle(tmp_path)
+    archive = Path(os.environ["CONTEXTD_HOME"])
+    trusted_bytes = (archive / "backup-trust.json").read_bytes()
+
+    loose_file = tmp_path / "loose-pins.json"
+    loose_file.write_bytes(trusted_bytes)
+    loose_file.chmod(0o644)
+    with pytest.raises(BackupError, match="group/world-accessible"):
+        ManifestTrustStore.load(loose_file)
+
+    loose_parent = tmp_path / "loose-parent"
+    loose_parent.mkdir(mode=0o777)
+    loose_parent.chmod(0o777)
+    parent_pin = loose_parent / "pins.json"
+    parent_pin.write_bytes(trusted_bytes)
+    parent_pin.chmod(0o600)
+    with pytest.raises(BackupError, match="parent .*group/world-writable"):
+        ManifestTrustStore.load(parent_pin)
+
+    symlink_pin = tmp_path / "symlink-pins.json"
+    symlink_pin.symlink_to(archive / "backup-trust.json")
+    with pytest.raises(BackupError, match="symlinked"):
+        ManifestTrustStore.load(symlink_pin)
+
+    document = json.loads(trusted_bytes)
+    document["keys"].append(dict(document["keys"][0]))
+    duplicate = tmp_path / "duplicate-pins.json"
+    duplicate.write_bytes(
+        (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    duplicate.chmod(0o600)
+    with pytest.raises(BackupError, match="duplicate"):
+        ManifestTrustStore.load(duplicate)
+
+    document["keys"][-1]["public_pem"] = "different key bytes"
+    conflict = tmp_path / "conflicting-pins.json"
+    conflict.write_bytes(
+        (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    conflict.chmod(0o600)
+    with pytest.raises(BackupError, match="conflicting"):
+        ManifestTrustStore.load(conflict)
+
+    document["keys"] = document["keys"][:1]
+    document["keys"][0]["key_id"] = "0" * 32
+    mismatch = tmp_path / "mismatched-pins.json"
+    mismatch.write_bytes(
+        (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    mismatch.chmod(0o600)
+    with pytest.raises(BackupError, match="does not match"):
+        ManifestTrustStore.load(mismatch)
+    assert validate_bundle(bundle)["authentication"]["authenticated"]
+
+    bundled_pin = bundle / "attacker-selected-pins.json"
+    bundled_pin.write_bytes(trusted_bytes)
+    bundled_pin.chmod(0o600)
+    with pytest.raises(BackupError, match="cannot come from the backup bundle"):
+        validate_bundle(bundle, trust_store=str(bundled_pin))
+
+    hardlink_pin = tmp_path / "hardlink-pins.json"
+    os.link(archive / "backup-trust.json", hardlink_pin)
+    with pytest.raises(BackupError, match="must not be hard-linked"):
+        ManifestTrustStore.load(hardlink_pin)
+
+
+def test_restore_refuses_approved_path_symlink_redirect(tmp_path):
+    bundle, _, _ = _bundle(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    approved = tmp_path / "approved"
+    approved.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(BackupError, match="symlinked or unsafe directory"):
+        restore_backup(bundle, approved / "restored")
+    assert list(outside.iterdir()) == []
+
+
+def test_backup_refuses_symlinked_destination_parent(tmp_path):
+    archive, conn, _, _ = _seed_archive()
+    outside = tmp_path / "outside-backups"
+    outside.mkdir()
+    approved = tmp_path / "approved-backups"
+    approved.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(BackupError, match="symlinked or unsafe directory"):
+        create_backup(conn, archive, approved)
+    conn.close()
+    assert list(outside.iterdir()) == []
+
+
+def test_backup_detects_destination_parent_swap_before_snapshot(
+    tmp_path, monkeypatch
+):
+    import contextd.backup as backup_module
+
+    archive, conn, _, _ = _seed_archive()
+    approved = tmp_path / "approved-backups"
+    approved.mkdir()
+    moved = tmp_path / "approved-backups-moved"
+    outside = tmp_path / "outside-backups"
+    outside.mkdir()
+    real_assert = backup_module._assert_path_matches_fd
+    checks = 0
+
+    def swap_before_snapshot(path, descriptor, label):
+        nonlocal checks
+        if label == "backup destination":
+            checks += 1
+            if checks == 3:
+                approved.rename(moved)
+                approved.symlink_to(outside, target_is_directory=True)
+        return real_assert(path, descriptor, label)
+
+    monkeypatch.setattr(backup_module, "_assert_path_matches_fd", swap_before_snapshot)
+    with pytest.raises(BackupError, match="backup destination changed"):
+        create_backup(conn, archive, approved)
+    conn.close()
+    assert list(outside.iterdir()) == []
+    assert not list(moved.glob(".contextd-backup-*"))
+
+
+def test_restore_detects_parent_swap_and_never_publishes_to_redirect(
+    tmp_path, monkeypatch
+):
+    import contextd.backup as backup_module
+
+    bundle, _, _ = _bundle(tmp_path)
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    moved = tmp_path / "approved-moved"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_assert = backup_module._assert_path_matches_fd
+    checks = 0
+
+    def swap_before_second_check(path, descriptor, label):
+        nonlocal checks
+        if label == "restore parent":
+            checks += 1
+            if checks == 2:
+                approved.rename(moved)
+                approved.symlink_to(outside, target_is_directory=True)
+        return real_assert(path, descriptor, label)
+
+    monkeypatch.setattr(
+        backup_module, "_assert_path_matches_fd", swap_before_second_check
+    )
+    with pytest.raises(BackupError, match="restore parent changed"):
+        restore_backup(bundle, approved / "restored")
+    assert list(outside.iterdir()) == []
+    assert not (moved / "restored").exists()
+
+
+def test_restore_rejects_special_file_in_bundle(tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO test requires mkfifo")
+    bundle, _, _ = _bundle(tmp_path)
+    os.mkfifo(bundle / "hostile.fifo", 0o600)
+
+    with pytest.raises(BackupError, match="special file: hostile.fifo"):
+        restore_backup(bundle, tmp_path / "must-not-publish")
+
+
+def test_restore_rejects_unlisted_empty_directory(tmp_path):
+    bundle, _, _ = _bundle(tmp_path)
+    (bundle / "unlisted-empty").mkdir()
+
+    with pytest.raises(BackupError, match="unexpected directory: unlisted-empty"):
+        restore_backup(bundle, tmp_path / "must-not-publish")
+
+
+def test_bundle_identity_binds_normalized_paths_and_authenticated_manifest(tmp_path):
+    bundle, _, _ = _bundle(tmp_path)
+    destination = tmp_path / "future" / ".." / "restored"
+    identity = bundle_identity(bundle / ".", destination=destination)
+
+    assert identity["bundle_path"] == str(bundle)
+    assert identity["destination_path"] == str(tmp_path / "restored")
+    assert identity["authenticated"] is True
+    assert identity["manifest_sha256"] == hashlib.sha256(
+        (bundle / "manifest.json").read_bytes()
+    ).hexdigest()
+
+
+def test_restore_enforces_manifest_digest_bound_by_prior_authorization(tmp_path):
+    first, _, _ = _bundle(tmp_path / "first")
+    first_identity = bundle_identity(first, destination=tmp_path / "restored")
+    second, _, _ = _bundle(tmp_path / "second")
+
+    with pytest.raises(BackupError, match="authorized manifest digest"):
+        restore_backup(
+            second,
+            tmp_path / "restored",
+            expected_manifest_sha256=first_identity["manifest_sha256"],
+        )
+    assert not (tmp_path / "restored").exists()

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from contextd.backup import BackupError, create_backup, restore_backup
+from contextd.backup import BackupError, _sign_manifest, create_backup, restore_backup
 from contextd.cli import cmd_restore
 from contextd.db import append_event, connect, store_blob
 
@@ -32,9 +32,15 @@ def _bundle(tmp_path: Path) -> Path:
     return result["bundle"]
 
 
-def _rewrite_manifest(bundle: Path, mutate) -> None:
+def _rewrite_manifest(bundle: Path, mutate, *, resign: bool = True) -> None:
     manifest = json.loads((bundle / "manifest.json").read_text())
     mutate(manifest)
+    if resign:
+        conn = connect()
+        try:
+            manifest["service_signature"] = _sign_manifest(conn, manifest)
+        finally:
+            conn.close()
     raw = (json.dumps(manifest, sort_keys=True, separators=(",", ":"))
            + "\n").encode()
     (bundle / "manifest.json").write_bytes(raw)

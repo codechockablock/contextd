@@ -126,6 +126,69 @@ ctx backup --keep 5
 ctx restore <newest-bundle> /tmp/restore-check   # must succeed
 ```
 
+The first backup also atomically creates `backup-trust.json` in the live
+archive home. This is the independent public-key pin set used to authenticate
+bundle manifests. It is deliberately **not included in the bundle** and a
+restore never loads keys from the bundle's SQLite database. Preserve a copy of
+this 0600 file through a separately protected channel before relying on the
+backup for whole-machine recovery. A bundle and a trust file stored under the
+same attacker-writable directory do not form two trust roots.
+
+Every validation and restore requires a valid signature from a pinned key.
+Missing pins, unknown keys, unsigned manifests, and stale signatures all fail
+before publication. Key rotation is continuous: each backup append-merges the
+live archive's current and retired public keys into the pin file, so old and
+new bundles remain verifiable. Pin-file loading refuses symlinks, insecure
+file/parent modes, hard links, duplicate/conflicting key IDs, and IDs that do
+not match their public keys. Previously issued, pinned-key signed manifests
+remain verifiable under signature scheme 1; new scheme-2 signatures bind each
+payload path, size, and digest as well as the snapshot and blob inventory.
+
+For a fresh-machine drill where `CONTEXTD_HOME` has no pin file, load the
+offline pin explicitly through the recovery API:
+
+```python
+from pathlib import Path
+from contextd.backup import ManifestTrustStore, bundle_identity, restore_backup
+
+pins = ManifestTrustStore.load(Path("/offline/contextd-backup-trust.json"))
+bundle = Path("/safe/contextd-….ctxbackup")
+destination = Path("/new/empty/contextd-home")
+authorized = bundle_identity(
+    bundle, destination=destination, trust_store=pins
+)
+# After the operator authorizes this exact identity:
+restore_backup(
+    bundle,
+    destination,
+    trust_store=pins,
+    expected_manifest_sha256=authorized["manifest_sha256"],
+)
+```
+
+Do not copy a key registry out of `contextd.db` in the bundle and call it a
+pin. `ManifestTrustStore.from_connection(...)` is only for an already-trusted
+live archive. Operator authorization for restore must bind the canonical
+identity returned by `bundle_identity(...)`: normalized bundle path,
+normalized destination path, manifest SHA-256, signing key ID, and snapshot
+tip. Pass the authorized digest back as `expected_manifest_sha256` when
+executing the restore; otherwise a different valid signed bundle can be
+substituted under the approved path between approval and execution. Binding
+only the lexical paths permits the same substitution.
+
+Backup authorization likewise binds `normalized_path(destination)`, retention,
+archive UUID, and the exact current head id/hash. The authority plane passes
+that pair to `create_backup(expected_head_id=..., expected_head_hash=...)`;
+creation rechecks it inside the append lock immediately before the online
+snapshot and keeps the lock through the snapshot. A concurrent append after
+approval therefore refuses instead of silently producing a different backup.
+
+Unsigned legacy recovery is a one-time, non-hardened exception. It requires an
+explicit `LegacyBundlePolicy` containing the exact reviewed manifest digest;
+it is never a fallback for a bad signature and cannot authorize a snapshot
+with a service-signature cutover. Hardened RPC code must not expose this
+policy.
+
 Then:
 
 ```bash
@@ -264,6 +327,12 @@ recovery is a restore:
 ctx restore <pre-migration-bundle> ~/.contextd-restored
 # inspect, then swap only after `ctx verify` on the restored copy passes
 ```
+
+That command uses the live archive's external `backup-trust.json`. If the live
+archive is unavailable, use the separately protected pin and the explicit
+fresh-home recovery API shown above. Losing both the live pin file and its
+offline copy is intentionally unrecoverable through authenticated restore;
+trusting a public key supplied by the bundle would make forged backups pass.
 
 Revoking an enrolled key is an operator action and does not remove events it
 already authorized; it stops new ones:

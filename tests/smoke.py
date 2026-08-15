@@ -44,7 +44,7 @@ for stmt in ("UPDATE events SET content='rewritten' WHERE id=1",
         assert "append-only" in str(e), e
 
 # 3. fs scan: ingest, dedup, modify, delete
-watch = Path(tempfile.mkdtemp(prefix="contextd-watch-"))
+watch = Path(tempfile.mkdtemp(prefix="contextd-watch-")).resolve()
 (watch / "a.md").write_text("alpha beaver notes")
 cfg["ingest"]["watch_dirs"] = [str(watch)]
 r = scan_fs(conn, cfg)
@@ -229,7 +229,7 @@ assert len(search(conn, "xylophone zzznope")) == 1, "OR fallback missing"
 # 21. claude code ingestion: mechanical dialogue filter, roles, redaction, watermark
 from contextd.ingest import scan_claude
 
-claude_root = Path(tempfile.mkdtemp(prefix="contextd-claude-"))
+claude_root = Path(tempfile.mkdtemp(prefix="contextd-claude-")).resolve()
 (claude_root / "-Users-test").mkdir()
 sess = claude_root / "-Users-test" / "sess-aaaa-bbbb.jsonl"
 lines = [

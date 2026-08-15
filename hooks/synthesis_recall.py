@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from contextd import load_config  # noqa: E402
 from contextd.db import connect  # noqa: E402
 from contextd.scratch import scratch_dir  # noqa: E402
+from contextd.redact import sanitize_content  # noqa: E402
 from contextd.gate import (GateError, disclose, record_dispatch_outcome,  # noqa: E402
                            select_items, verify_anchors)
 
@@ -58,7 +59,7 @@ class DistillError(RuntimeError):
         self.exit_code = exit_code
 
 
-def distill(payload: str, model: str, timeout: int = 300):
+def distill(payload: str, model: str, timeout: int = 300, cfg=None):
     env = os.environ.copy()
     env["MCP_CONNECTION_NONBLOCKING"] = "false"
     env["ENABLE_TOOL_SEARCH"] = "off"
@@ -74,14 +75,16 @@ def distill(payload: str, model: str, timeout: int = 300):
             text=True, timeout=timeout, cwd=workdir, env=env)
     if r.returncode != 0:
         raise DistillError(
-            f"distiller failed (exit {r.returncode}): {r.stderr[-500:]}",
+            "distiller failed "
+            f"(exit {r.returncode}): {sanitize_content(cfg, r.stderr, max_len=500)}",
             exit_code=r.returncode,
         )
     try:
         out = json.loads(r.stdout)
     except json.JSONDecodeError:
         raise DistillError("distiller returned unparseable output", exit_code=0)
-    return (out.get("result") or "").strip(), out.get("total_cost_usd")
+    result = sanitize_content(cfg, out.get("result") or "", max_len=20_000)
+    return result.strip(), out.get("total_cost_usd")
 
 
 def main():
@@ -121,7 +124,7 @@ def main():
             sys.exit(f"gate refused: {e}")
         src_egress = source["egress_id"]
         try:
-            text, cost = distill(source["content"], args.model)
+            text, cost = distill(source["content"], args.model, cfg=cfg)
         except subprocess.TimeoutExpired:
             record_dispatch_outcome(
                 conn, src_egress, "timeout", timeout_seconds=300,

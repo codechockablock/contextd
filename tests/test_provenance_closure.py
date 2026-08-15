@@ -238,10 +238,10 @@ def test_quote_must_match_disclosed_bytes_not_raw_bytes():
     assert secret not in egress_content  # the gate redacted it
 
     # quoting the RAW bytes the model never saw: refused
-    raw = _model_note(conn, f"Deploy key noted [{a}].",
-                      {"source_egress": egress, "anchors": [a],
-                       "support": [{"event": a, "quote": secret}]})
-    assert "quote_not_in_disclosure" in verify_derivation(conn, raw)["errors"]
+    with pytest.raises(SchemaError):
+        _model_note(conn, f"Deploy key noted [{a}].",
+                    {"source_egress": egress, "anchors": [a],
+                     "support": [{"event": a, "quote": secret}]})
 
     # quoting the redacted bytes the model actually saw: verified
     redacted = _model_note(conn, f"Deploy key noted [{a}].",
