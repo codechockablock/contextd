@@ -21,43 +21,33 @@ handoff, done), not as a journal.
   (only once watch_dirs configured), safari and note deliberately
   unthresholded — thresholds flag pipeline death, not operator behavior.
 
-## Lanes
+- 2026-08-15 — Live archive migrated to schema 2 (cutover tip #44150, 44150
+  events byte-identical). Reconciler revived: hardening had closed the meta
+  registry without declaring `("claude_code","reconcile")` — every run
+  dispatched, then crashed appending its marker (fix + regression test on
+  master). Dev harness automated: repo `.claude/settings.json` (gate
+  allowlist; operator speech acts kept behind `ask` — see
+  docs/GRANTS-r2-proposal.md R2.5; live-verified ruff PostToolUse hook),
+  `scripts/gates.sh` (CI-mirroring battery, network surface pinned by
+  `tests/network_surface.txt`), restore-drill + lineage-audit launchd agents
+  instantiated and loaded (calibration read AUDIT EARNED), first `.ctxbackup`
+  bundle created and drill-verified PASS (#44177). Known operator-only items:
+  Secure Enclave signer not enrolled (all operator CLI acts refuse since
+  hardening — enrollment steps in GRANTS-r2-proposal.md), Safari FDA missing,
+  grant-calibration field window not started (tally at 0/20, 0/10).
 
-### grant-calibration
-- **Objective:** Measure whether model-granted loop confirmation matches
-  operator judgment before any grant class widens: synthetic calibration
-  benchmark (constructed ground truth, preregistered bars, ≤ 250 haiku
-  calls) + frozen operator field protocol (morning reviews, VETO
-  convention, veto-rate bars). Machine-side verdict capped at CALIBRATION
-  NOT EARNED; only the operator's field window earns it. Tracks live
-  loop#42848.
-- **Owning session:** Claude Code / Fable 5, branch `grant-calibration`
-  (worktree agent-a054d9c593f6f12d3), launched 2026-08-14
-- **State:** done — synthetic bars MET, machine verdict capped at
-  CALIBRATION NOT EARNED as designed; field window handed to the
-  operator (docs/GRANT_CALIBRATION.md frozen: >=20 model-granted
-  confirms over >=10 grant-active days, <=1 VETO, zero VETO-HARMFUL;
-  `field_tally.py` reads the live archive read-only). Held-out (prereg
-  #56, dedicated ledger): false confirm 0/36 trials 0/12 fixtures,
-  false dismiss 0/18, coverage 18/18, abstain 0/54, no-context control
-  ABSTAIN 18/18, 0 malformed. Dispatches 127/250. Validity gate met at
-  calibration iteration 1 (full decided acc 1.0 vs no-context all-
-  abstain; surface 0.7222 vs 0.6667+0.10). Report:
-  runs/grant-calibration-2026-08-14/ (rebuilds byte-identically via
-  `bench.py report 56`). Gates: ruff clean, 250 pytest, selftest OK.
-- **Blockers:** none
-- **Last update:** 2026-08-14 — mission complete, field window pending
-  operator start
+## Lanes
 
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned
   or not by the frozen bars.
 - **Owning session:** the operator (manual; no agent lane)
-- **State:** handoff — protocol frozen, awaiting operator start
-- **Blockers:** — (instruments merge recommended first so staleness can't be
-  misread as compilation failure)
-- **Last update:** 2026-08-13 — pending
+- **State:** RUNNING — window open since 2026-08-13 (archive marker #42453);
+  this entry previously said "awaiting operator start" and was stale, caught
+  by loop candidate #42915
+- **Blockers:** —
+- **Last update:** 2026-08-15 — map reconciled to the archive marker
 
 ## Done
 
