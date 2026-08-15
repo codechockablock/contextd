@@ -13,26 +13,32 @@ lane checkouts themselves.
 
 ## Operator queue
 
-Everything the machinery cannot do for you, with the exact act. `ctx status`
-warns about the first two until they are done.
+Everything the machinery cannot do for you, with the exact act.
 
-1. **Enroll the production signer** (all operator CLI acts refuse until
-   then; a model must never create the operator key, so this stays human):
-   `native/build.sh`, then
-   `native/contextd-signer enroll --key-id default > operator-key.der`,
-   then `ctx security key bootstrap operator-key.der --signer-tag default
-   --development --acknowledge-first-key-bootstrap` — the development
-   first-key path; plain `key register` cannot self-authorize on a keyless
-   archive and is for later, already-attested keys
-   (docs/OPERATOR_CEREMONY.md).
-2. **Grant Full Disk Access** for Safari history capture: System Settings →
+1. **Grant Full Disk Access** for Safari history capture: System Settings →
    Privacy & Security → Full Disk Access, for your terminal and the watch
-   daemon — or set `[browser] safari=false`. Status now warns from the
-   scanner's recorded no-access state and self-clears on the next good scan.
-3. **Start the grant-calibration field window** when ready (tally 0/20,
-   0/10; protocol frozen in the grant-calibration lane report). Machine-side
-   results cannot substitute; the verdict stays capped at NOT EARNED until
-   the field bars are met.
+   daemon's python (`/opt/homebrew/Cellar/python@3.14/…/bin/python3.14`) —
+   or set `[browser] safari=false`. The daemon was restarted onto the
+   merged code 2026-08-15; a denied scan now records no-access in its
+   cursor, `ctx status` warns from that state, and the first good scan
+   self-clears it.
+2. **Morning review ritual** while the grant-calibration field window
+   accrues (docs/GRANT_CALIBRATION.md): `ctx loop list`, review each
+   model-granted confirmation since the last review — silence after review
+   is agreement; `VETO:` / `VETO-HARMFUL:` close-reasons are the exact
+   tally markers. Check bars:
+   `.venv/bin/python experiments/grant_calibration/field_tally.py`.
+
+Resolved 2026-08-15 (evening), by the operator: **production signer
+enrolled** — key `0885eb01…` (secure_enclave, tag=default); first signed
+act was grant ev 44232 (loop.confirm, repo-scoped, "field window night
+3"). **Field window RUNNING**: 2/20 model-granted confirmations (loops
+42848, 42914, both open awaiting review), 1/10 grant-active days, 0
+vetoes. Grant events #42847/#42878/#42908 from the r1 era now reduce as
+anomalies ("lacks a verified operator authorization") — expected after the
+trust-model upgrade, not an incident: they were legitimate operator acts
+under r1 metadata authority, are expired and inert, and the confirmations
+they enabled still count in the field tally.
 
 ## Decisions
 
