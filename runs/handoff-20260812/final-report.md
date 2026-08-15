@@ -2,7 +2,7 @@
 
 2026-08-12 → 08-13 · commits `b76d358`→`c2622a6` · ledger events #41823–#42258
 · 13 preregistered experiments · rendered version:
-https://claude.ai/code/artifact/db50fff8-d9a8-4f2a-a751-ec0214bc9a86
+https://claude.ai/code/artifact/<artifact-id-redacted>
 
 ## Verdict
 

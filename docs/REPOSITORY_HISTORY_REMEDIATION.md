@@ -4,9 +4,23 @@
 
 **Triage result: zero credentials require rotation.** All 314 credential-shaped
 strings in history have a non-secret explanation (§ "Credential triage" below).
-The remaining exposure is 21 `archive_dialogue` + 5 `session_uuid` findings —
-real private material, and the only part of this document still awaiting a
-decision.
+
+**Current tree: clean.** The `archive_dialogue` and `session_uuid` findings that
+remained in tracked files are fixed (§ "Current tree").
+
+**What is left is history-only**, and it is the one thing that cannot be fixed
+without rewriting published history:
+
+| Count | Class | Where |
+|---|---|---|
+| 14 | `archive_dialogue` | old blobs of `experiments/tasks/retrieval-contradiction-sets.json` |
+| 7 | `archive_dialogue` | old blobs of `experiments/tasks/retrieval-synthesis-sets.json` |
+| 5 | `session_uuid` | old blobs of the two artifacts sanitized above |
+
+Those old blobs are the **pre-replacement** versions of the two retrieval
+fixtures — the ones that carried verbatim private dialogue. The working tree
+has held synthetic replacements since the hardening pass; only history still
+has the originals.
 
 Git history rewriting was explicitly out of scope for the hardening pass that
 produced this document. Nothing here has been acted on.

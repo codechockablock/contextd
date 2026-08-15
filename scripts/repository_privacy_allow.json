@@ -68,20 +68,6 @@
       "status": "synthetic",
       "reason": "Planted-positive fixtures for this scanner: the file deliberately contains one example of each detected class so a detector that silently stops matching is caught."
     },
-    "experiments/restore_scale/results.json": {
-      "classes": [
-        "session_uuid"
-      ],
-      "status": "awaiting_operator",
-      "reason": "Four occurrences of one real archive UUID inside a tracked benchmark result artifact. experiments/ is outside this pass's MAY-modify scope, and editing a recorded result is not path sanitization. Needs an explicit operator decision: rewrite the artifact, or accept it."
-    },
-    "runs/handoff-20260812/final-report.md": {
-      "classes": [
-        "session_uuid"
-      ],
-      "status": "awaiting_operator",
-      "reason": "One real session UUID in a tracked benchmark conclusion. Same constraint: run artifacts may only receive portable path sanitization, and a session id is not a path."
-    },
     "tests/fixtures/legacy_archive.json": {
       "classes": [
         "session_uuid",
@@ -145,6 +131,13 @@
       ],
       "status": "synthetic",
       "reason": "The triage write-up quotes a line of contextd's own source as its example of the code_identifier class \u2014 an assignment whose right-hand side is an expression, containing no secret. Documenting why a shape matches necessarily contains the shape."
+    },
+    "scripts/triage_history_credentials.py": {
+      "classes": [
+        "credential"
+      ],
+      "status": "synthetic",
+      "reason": "The triage tool's own constants: its marker-word list, its regex tells, and the prefix-stripping expression it uses to measure entropy. Same unavoidable self-reference as contextd/redact.py \u2014 a tool built on these patterns will always match its own definition of them."
     }
   }
 }

@@ -215,10 +215,10 @@
     "events": 2015,
     "inflate_seconds": 0.7,
     "paths": {
-      "backups": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/bundle shelf with spaces",
-      "home": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/other machine home",
-      "live": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/live archive with spaces",
-      "temp": "/private/tmp/claude-501/-Users-joseph-ctx-c/034bb97e-58dc-4dc1-a207-5ca152dbb067/scratchpad/scale/rehearsal/re store temp"
+      "backups": "/private/tmp/claude-501/-Users-joseph-ctx-c/restore-scale-scratch/scratchpad/scale/rehearsal/bundle shelf with spaces",
+      "home": "/private/tmp/claude-501/-Users-joseph-ctx-c/restore-scale-scratch/scratchpad/scale/rehearsal/other machine home",
+      "live": "/private/tmp/claude-501/-Users-joseph-ctx-c/restore-scale-scratch/scratchpad/scale/rehearsal/live archive with spaces",
+      "temp": "/private/tmp/claude-501/-Users-joseph-ctx-c/restore-scale-scratch/scratchpad/scale/rehearsal/re store temp"
     },
     "target_bytes": 1073741824
   }
