@@ -349,7 +349,15 @@ def _scan_browser(conn, cfg, name, src_path, query, to_unix) -> dict:
     except (OSError, sqlite3.Error) as e:
         # Exception strings are attacker- and environment-controlled display
         # input.  Retain only the exception class, never paths or row bytes.
-        return {"status": f"no access ({type(e).__name__})"}
+        status = f"no access ({type(e).__name__})"
+        # Persist the failure in this browser's cursor so `ctx status` can
+        # warn from archive state (Full Disk Access denials otherwise die in
+        # a log nobody reads); the next successful scan replaces the cursor
+        # wholesale, which clears it.
+        state = dict(cursor) if isinstance(cursor, dict) else {}
+        state["last_status"] = status
+        set_cursor(conn, name, state)
+        return {"status": status}
     skip = load_skip_domains(cfg)
     new = skipped = 0
     for url, title, raw_time in rows:
