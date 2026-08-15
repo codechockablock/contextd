@@ -279,11 +279,75 @@ want both, mirror the checkpoint to iCloud or another provider after writing
 it. Be honest about what the mirror buys: the local copy there is writable by
 your UID, so its value is the provider's version history, not permissions.
 
-## 7. Configure export policy — DECISION REQUIRED
+## 7. Configure export policy — OPERATOR ACTION
 
-Hardened mode refuses plaintext export. Encrypted export needs an explicitly
-configured recovery recipient; **none has been selected**, so export stays
-refused rather than silently emitting plaintext.
+Export seals the archive to an X25519 recipient. With no recipient configured
+it refuses; it never emits plaintext as a fallback.
+
+### Generate the recipient somewhere else
+
+This is the step that decides whether encrypted export is worth anything. The
+attacker in this threat model runs as your desktop user. If the private key is
+on this machine, they read it and decrypt the export, and the encryption was
+decoration. **Generate the key on another machine and bring only the public
+half here.**
+
+On the *other* machine:
+
+```bash
+openssl genpkey -algorithm X25519 -out contextd-export.key
+```
+
+```bash
+openssl pkey -in contextd-export.key -pubout -out contextd-export.pub
+```
+
+Keep `contextd-export.key` there — offline media, a hardware-backed store, a
+password manager. It is the only thing that can ever open an export. Copy
+`contextd-export.pub` to this host, then:
+
+```bash
+chmod 600 ~/.contextd/contextd-export.pub
+```
+
+The 0600 is an integrity requirement, not a secrecy one: a public key is not
+secret, but a group-writable key file is one another local account can
+substitute. Export refuses a group- or world-accessible recipient file.
+
+Point config at it in `~/.contextd/config.toml`:
+
+```toml
+[security]
+export_recipient = "/Users/you/.contextd/contextd-export.pub"
+```
+
+### What config does and does not decide
+
+Config *names* the recipient. It does not authorize it. `config.toml` is
+writable by the modeled attacker, so the recipient's sha256 is covered by the
+operator's signed action. If the configured key is swapped between the moment
+you approve and the moment the export runs, the export **refuses** — it does
+not quietly re-address itself. `ctx security export` prints the digest it is
+about to seal to, before the presence prompt, so what you approve is legible.
+
+### Producing and opening an export
+
+```bash
+ctx security export --dest ~/exports
+```
+
+Opening is done on the recovery machine, where the private key lives:
+
+```bash
+ctx security export-open contextd-20260815-154446.ctxexport --identity contextd-export.key --dest ./recovered
+```
+
+Without `--identity` it prints the header only — recipient, manifest digest,
+suite — and says plainly that none of it is authenticated until opened. That
+is enough to work out *which* key you need without having the key present.
+
+The recovered directory is an ordinary backup bundle, so `ctx restore` and the
+manifest trust store apply to it unchanged.
 
 ## 8. Final verification
 

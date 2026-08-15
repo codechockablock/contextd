@@ -265,9 +265,28 @@ differ; rewriting them after verification would create false provenance.
   both the database and the witness file. Rehearsed: after truncating the
   ledger *and* rewriting the witness to match, `verify_chain` returns OK and
   the archive opens cleanly — and only the checkpoint reports the rollback.
-- **Backup/export** manifests are service-signed. In hardened mode, export is
-  encrypted to an explicitly configured recovery recipient; with no recovery
-  policy configured, export **refuses** rather than emitting plaintext.
+- **Backup/export** manifests are service-signed. Export is encrypted to an
+  explicitly configured recovery recipient; with no recovery policy
+  configured, export **refuses** rather than emitting plaintext. The plaintext
+  bundle exists only inside 0700 scratch and is removed before the call
+  returns.
+
+  Two properties are worth stating exactly, because both are easy to assume
+  wrongly:
+
+  1. **Encryption does not defend against the modeled attacker.** A same-UID
+     process can read the archive directly; it does not need the export. What
+     encryption protects is the bundle *after it leaves this host* — backup
+     media, a sync folder, a disk that outlives the machine. It follows that a
+     recipient whose private half is stored on this host buys nothing, which
+     is why `ctx security export` says so at the point of use.
+  2. **Config names the recipient; it does not authorize it.** `config.toml`
+     is writable by the attacker, so the operator's `OperatorActionV1` covers
+     the recipient's sha256 (`_export_action_arguments`). Swapping the
+     configured key after the operator approves makes the export **refuse**,
+     not redirect. Verified by mutation: with the digest removed from the
+     covered arguments, the substitution test stops refusing and the archive
+     is sealed to the attacker's key.
 - **Key loss**: losing the Secure Enclave key (device loss, key deletion)
   makes new operator-authorized events impossible until a new key is enrolled.
   Enrollment of the first key is an out-of-band service-admin act with closed
@@ -303,13 +322,15 @@ differ; rewriting them after verification would create false provenance.
 | `ctx security doctor --strict --json` | implemented, tested (reports 6 of 7 invariants failing on this tree, which is correct) |
 | Service-signed envelopes and chain tips, key rotation, protected checkpoint | implemented, tested (see ² — the key is not yet service-owned) |
 | Signed backup manifests | implemented, tested |
-| Encrypted export | **not implemented** — hardened export *refuses* without a configured recovery recipient rather than emitting plaintext, and no recipient has been selected |
+| Encrypted export | implemented, tested — X25519/HKDF-SHA256/ChaCha20-Poly1305 sealed to a configured recipient, whose sha256 the operator's signed action covers. No recipient is configured on this tree, so export refuses here. |
 | Migration (append-only, idempotent, crash-safe), frozen legacy fixture, crash/concurrency tests, future-schema refusal | implemented, tested |
 
 **This repository is in `development`.** No service has been installed, no key
-enrolled, no checkpoint destination selected, and no migration run against a
-live archive. Production may be called hardened only after the operator
-performs those steps separately and gets a clean
+enrolled, no export recipient configured, and no migration run against a live
+archive. A checkpoint destination has been *selected* (§8,
+`/var/db/contextd/checkpoint.json`) but is not in force, because the service
+account that must own it does not exist yet. Production may be called hardened
+only after the operator performs those steps separately and gets a clean
 `ctx security doctor --strict --json`.
 
 See `docs/adr/0001-two-plane-authority.md` for the architecture and the exact

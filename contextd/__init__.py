@@ -62,8 +62,18 @@ DEFAULTS = {
         # cannot rewrite. Empty means rollback resistance is INCOMPLETE, and
         # `ctx security doctor` says so rather than passing.
         "checkpoint_destination": "",
-        # Hardened export encrypts to this recipient. Empty means export
-        # refuses rather than emitting plaintext.
+        # Path to the X25519 public key that `ctx security export` seals to,
+        # as DER or PEM, mode 0600. Empty means export refuses; export never
+        # emits plaintext as a fallback.
+        #
+        # This names the recipient, it does not AUTHORIZE it: config.toml is
+        # writable by the modeled attacker, so the operator's signed action
+        # covers the key's sha256 and a swapped file makes the export refuse
+        # rather than redirect (contextd/authd.py:_export_action_arguments).
+        #
+        # The private half belongs on ANOTHER machine. Encryption here protects
+        # the bundle once it leaves this host; against a same-UID attacker
+        # holding the private key it protects nothing.
         "export_recipient": "",
     },
     "gate": {

@@ -189,8 +189,12 @@ def test_all_non_test_subprocesses_are_inventory_classified():
     for path in ROOT.rglob("*.py"):
         relative = path.relative_to(ROOT).as_posix()
         # runs/ holds benchmark artifacts (including model-written scratch
-        # repos), not shipped code; it is gitignored and not inventoried
-        if relative.startswith(("tests/", ".venv/", "runs/")):
+        # repos), not shipped code; it is gitignored and not inventoried.
+        # .claude/ is agent tooling and may contain whole git WORKTREES —
+        # a second checkout of this repository, whose every subprocess call
+        # would otherwise be reported as an uninventoried one in a file that
+        # is not part of this tree at all.
+        if relative.startswith(("tests/", ".venv/", "runs/", ".claude/")):
             continue
         visitor = SubprocessInventory(relative)
         visitor.visit(ast.parse(path.read_text(), filename=str(path)))

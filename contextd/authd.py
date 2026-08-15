@@ -685,6 +685,34 @@ def _backup_action_arguments(conn, destination: str, keep: int) -> dict:
     }
 
 
+def _export_action_arguments(conn, destination: str, recipient_sha256: str) -> dict:
+    """The arguments an export authorization must cover.
+
+    `recipient_sha256` is in here, and that is the point. The recipient is
+    named by `security.export_recipient` in config.toml, and config.toml is
+    writable by the modeled attacker — the same-UID process. If the recipient
+    were read from config at export time and not covered by the signature, the
+    attack is trivial and total: swap the configured key, wait for the operator
+    to approve an export they believe is going to themselves, and receive a
+    readable copy of the archive. Binding the digest here means a swapped
+    recipient produces an authorization that no longer matches, and the export
+    refuses instead.
+    """
+    from .attest import archive_uuid
+    from .backup import normalized_path
+
+    tip = conn.execute(
+        "SELECT id, chain_hash FROM events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return {
+        "destination_path": normalized_path(destination),
+        "recipient_sha256": recipient_sha256,
+        "archive_uuid": archive_uuid(conn),
+        "snapshot_head_id": tip["id"] if tip else 0,
+        "snapshot_head_hash": tip["chain_hash"] if tip else "",
+    }
+
+
 def _restore_action_arguments(identity: dict) -> dict:
     snapshot = identity.get("snapshot")
     if (identity.get("authenticated") is not True
@@ -1097,26 +1125,87 @@ def op_restore(service, principal, tier, args):
 
 
 def op_export(service, principal, tier, args):
-    """Hardened export requires an explicitly configured recovery recipient.
+    """Export the archive sealed to the configured recovery recipient.
 
-    None has been selected, so this refuses rather than emitting plaintext
-    outside service-owned storage (docs/SECURITY.md §8).
+    Export never emits plaintext outside service-owned storage: with no
+    recipient configured it refuses, and the only bytes it writes are sealed
+    (docs/SECURITY.md §8). The plaintext bundle exists solely inside 0700
+    scratch, which is removed before this returns.
+
+    What encryption here does and does not buy is stated in
+    `contextd/export_crypto.py`: it protects the bundle after it leaves this
+    host, and it is worth nothing if the private half of the recipient key
+    lives on this host, because the modeled attacker owns this host.
     """
-    conn = _archive(service)
-    try:
-        _needs_attestation(args, "archive.export", "global", conn=conn)
-    finally:
-        conn.close()
-    recipient = ((load_config().get("security") or {}).get("export_recipient")
-                 or "").strip()
-    if not recipient:
+    from .attest import consume_authorization
+    from .backup import BackupError, _read_secure_file
+    from .export import ExportError, create_sealed_export
+    from .export_crypto import ExportCryptoError, load_recipient
+
+    # The recipient policy is checked FIRST, before the destination, because
+    # it is the gate that must hold unconditionally: "there is no recovery
+    # policy, so export refuses" is true whether or not the caller got as far
+    # as naming somewhere to write. Checking the destination first would let a
+    # usage error mask a policy refusal.
+    configured = ((load_config().get("security") or {}).get("export_recipient")
+                  or "").strip()
+    if not configured:
         raise _Refusal(
             "export refuses: hardened mode requires an explicitly configured "
             "recovery recipient, and none is set. Plaintext export outside "
-            "service-owned storage is not a fallback.",
+            "service-owned storage is not a fallback. Set "
+            "security.export_recipient to the path of an X25519 public key "
+            "whose private half is NOT on this host.",
             code="policy",
         )
-    raise _Refusal("encrypted export is not implemented", code="unimplemented")
+    try:
+        recipient_key = _read_secure_file(Path(configured).expanduser(),
+                                          "export recipient")
+        _, digest = load_recipient(recipient_key)
+    except ExportCryptoError as exc:
+        raise _Refusal(f"configured export recipient is unusable: {exc}",
+                       code="policy") from exc
+    except BackupError as exc:
+        # `_read_secure_file` also refuses a group/world-accessible file. That
+        # is an INTEGRITY requirement, not a secrecy one — a public key is not
+        # secret, but a 0644 key file in a shared directory is one another
+        # local account can swap, which is exactly the substitution the signed
+        # recipient digest exists to prevent. Say so, since being told a public
+        # key is "too readable" is otherwise baffling.
+        raise _Refusal(
+            f"configured export recipient at {configured} is unusable: {exc}. "
+            f"The recipient must be a regular, non-symlinked file at mode 0600 "
+            f"(chmod 600) — not because a public key is secret, but so no other "
+            f"local account can substitute one.",
+            code="policy",
+        ) from exc
+
+    destination = _text(args, "destination", limit=4096)
+    if not destination:
+        raise _Refusal("export requires a destination", code="policy")
+
+    conn = _archive(service)
+    try:
+        covered = _export_action_arguments(conn, destination, digest)
+        authorization = _needs_attestation(
+            args, "archive.export", "global", conn=conn, arguments=covered,
+        )
+        consume_authorization(
+            conn, authorization, action="archive.export", scope="global",
+            arguments=covered,
+        )
+        try:
+            result = create_sealed_export(
+                conn, home(), Path(covered["destination_path"]),
+                recipient_key=recipient_key,
+                expected_head_id=covered["snapshot_head_id"],
+                expected_head_hash=covered["snapshot_head_hash"],
+            )
+        except (ExportError, ExportCryptoError) as exc:
+            raise _Refusal(f"export failed: {exc}", code="policy") from exc
+        return result
+    finally:
+        conn.close()
 
 
 def op_grant_add(service, principal, tier, args):

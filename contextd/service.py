@@ -236,6 +236,17 @@ def backup(destination: str, authorization, keep: int = 0) -> dict:
                                       "authorization": blob})
 
 
+def export(destination: str, authorization) -> dict:
+    blob = _authorization_blob(authorization)
+    if hardened():
+        return _call("export", destination=destination, authorization=blob)
+    from .authd import AuthorityService, op_export, service_context
+    with service_context():
+        return op_export(AuthorityService.__new__(AuthorityService), None,
+                         "operator",
+                         {"destination": destination, "authorization": blob})
+
+
 def restore(bundle: str, destination: str, authorization) -> dict:
     blob = _authorization_blob(authorization)
     if hardened():

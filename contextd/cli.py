@@ -454,6 +454,12 @@ def cmd_security(args):
             sys.exit(0 if result["ok"] else 1)
         print(json.dumps(checkpoint_record(conn), indent=2, sort_keys=True))
         return
+    if args.security_action == "export":
+        cmd_security_export(args)
+        return
+    if args.security_action == "export-open":
+        cmd_security_export_open(args)
+        return
     if args.security_action == "key":
         from . import service
         if args.key_action == "list":
@@ -899,6 +905,80 @@ def cmd_backup(args):
         )
 
 
+def cmd_security_export(args):
+    """Produce one sealed export, addressed to the configured recipient."""
+    from . import service
+    from .authd import _export_action_arguments
+    from .backup import BackupError, _read_secure_file
+    from .export_crypto import ExportCryptoError, load_recipient
+
+    dest_dir = Path(args.dest).expanduser() if args.dest else home() / "exports"
+    configured = ((load_config().get("security") or {})
+                  .get("export_recipient") or "").strip()
+    if not configured:
+        sys.exit(
+            "export refused: no recovery recipient configured.\n"
+            "  Set security.export_recipient in ~/.contextd/config.toml to the\n"
+            "  path of an X25519 public key (DER or PEM, mode 0600).\n"
+            "  Generate it on ANOTHER machine — a private key held here is\n"
+            "  readable by exactly the attacker encryption is meant to stop:\n"
+            "    openssl genpkey -algorithm X25519 -out contextd-export.key\n"
+            "    openssl pkey -in contextd-export.key -pubout -out contextd-export.pub\n"
+            "  Copy only the .pub here; keep the .key off this host."
+        )
+    try:
+        recipient_key = _read_secure_file(Path(configured).expanduser(),
+                                          "export recipient")
+        _, digest = load_recipient(recipient_key)
+    except (BackupError, ExportCryptoError) as exc:
+        sys.exit(f"export refused: configured recipient is unusable: {exc}")
+
+    # The operator approves the recipient, not just the act. Show the digest so
+    # what they are signing is legible before the presence prompt appears.
+    print(f"sealing to recipient {digest[:16]}… ({configured})")
+    try:
+        covered = _export_action_arguments(connect(), str(dest_dir), digest)
+        authorization = operator_authorization(
+            None, "archive.export", "global", arguments=covered,
+        )
+        result = service.export(str(dest_dir), authorization)
+    except (BackupError, ExportCryptoError) as exc:
+        sys.exit(f"export refused: {exc}")
+    print(
+        f"sealed {result['events']} events and {result['blobs']} blobs -> "
+        f"{result['export']} ({result['sealed_bytes']} bytes, manifest "
+        f"{result['manifest_sha256'][:12]})"
+    )
+
+
+def cmd_security_export_open(args):
+    """Open a sealed export. Intended for the RECOVERY host, not this one."""
+    from .export import ExportError, open_sealed_export
+    from .export_crypto import ExportCryptoError, peek
+
+    sealed = Path(args.sealed).expanduser().read_bytes()
+    if args.identity is None:
+        header = peek(sealed)
+        print(f"sealed export  created {header.get('created_at')}")
+        print(f"  recipient    {header.get('recipient_sha256')}")
+        print(f"  manifest     {header.get('manifest_sha256')}")
+        print(f"  suite        {header.get('suite')}")
+        print("\nnothing above is authenticated until it is opened with "
+              "--identity.")
+        return
+    from cryptography.hazmat.primitives import serialization
+    identity = serialization.load_pem_private_key(
+        Path(args.identity).expanduser().read_bytes(), password=None
+    )
+    try:
+        result = open_sealed_export(sealed, identity,
+                                    Path(args.dest).expanduser())
+    except (ExportError, ExportCryptoError) as exc:
+        sys.exit(f"open refused: {exc}")
+    print(f"opened -> {result['destination']} "
+          f"(manifest {result['manifest_sha256'][:12]})")
+
+
 def cmd_restore(args):
     try:
         from . import service
@@ -1117,6 +1197,20 @@ def main():
     sc.add_argument("--write", action="store_true",
                     help="write the checkpoint to the configured destination")
     sc.add_argument("--destination", default=None)
+    se = ssub.add_parser("export",
+                         help="seal the archive to the configured recipient")
+    se.add_argument("--dest", default=None,
+                    help="directory for the sealed export (default ~/.contextd/exports)")
+    so = ssub.add_parser(
+        "export-open",
+        help="open a sealed export (run this on the RECOVERY host)",
+    )
+    so.add_argument("sealed", help="the .ctxexport file")
+    so.add_argument("--identity", default=None,
+                    help="PEM X25519 private key; omitted, this only reports "
+                         "the unauthenticated header")
+    so.add_argument("--dest", default=".",
+                    help="directory to unpack the bundle into")
     sk = ssub.add_parser("key", help="operator key registry")
     ksub = sk.add_subparsers(dest="key_action", required=True)
     ksub.add_parser("list", help="registered operator keys")
