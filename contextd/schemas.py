@@ -144,6 +144,9 @@ EGRESS_TYPES: dict = {
         "arm": Field("ident", max_len=MAX_LABEL),
         "epoch_id": Field("int"),
         "model": Field("ident", max_len=MAX_LABEL),
+        # messages the size/count caps kept out of this disclosure; the items
+        # list names only what the payload actually carries
+        "omitted_messages": Field("int"),
         "replay_of": Field("int"),
         "session": Field("ident", max_len=128, stored_as="session_id"),
         "session_id": Field("ident", max_len=128),
