@@ -135,14 +135,16 @@ def record_dispatch_outcome(
     *,
     exit: int | None = None,
     timeout_seconds: int | None = None,
+    duration_ms: int | None = None,
 ) -> int:
     """Append an immutable result linked to a pre-dispatch egress receipt.
 
     This used to take ``**details`` and persist them verbatim, which is how
     exception text, stderr, and command output reached the archive unbounded
-    and unredacted. The outcome record now carries only two integers: an exit
-    code and a configured timeout. A *class* of failure is representable; the
-    failing process's own bytes are not.
+    and unredacted. The outcome record now carries only integers: an exit
+    code, a configured timeout, and a measured duration. A *class* of failure
+    is representable, and so is how long it took; the failing process's own
+    bytes are not.
     """
     if status not in DISPATCH_STATUSES:
         raise ValueError(f"invalid dispatch status: {status}")
@@ -155,6 +157,8 @@ def record_dispatch_outcome(
         meta["exit"] = int(exit)
     if timeout_seconds is not None:
         meta["timeout_seconds"] = int(timeout_seconds)
+    if duration_ms is not None:
+        meta["duration_ms"] = int(duration_ms)
     return append_event(conn, "gate", "egress_outcome", meta=meta)
 
 

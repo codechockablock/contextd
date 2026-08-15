@@ -61,17 +61,17 @@ EXPECTED_SUBPROCESS_CALLS = {
         "local git log only",
     ("experiments/handoff/openthreads.py", "run_pass", "run"):
         "model (open-threads extraction; episode dialogue passes the frozen "
-        "view's gate first, notes bound via CONTEXTD_DERIVATION_SOURCE)",
+        "view's gate first, notes bound via a dispatch capability)",
     ("experiments/handoff/openthreads.py", "run_case", "run"):
         "local git log only",
     ("experiments/handoff/livethreads.py", "run_pass", "run"):
         "model (live open/discharge tracking; open-set + dialogue pass the "
-        "frozen view's gate, notes bound via CONTEXTD_DERIVATION_SOURCE)",
+        "frozen view's gate, notes bound via a dispatch capability)",
     ("experiments/handoff/livethreads.py", "run_case", "run"):
         "local git log only",
     ("experiments/handoff/board.py", "run_pass", "run"):
         "model (board maintenance; board + dialogue pass the frozen view's "
-        "gate, updates bound via CONTEXTD_DERIVATION_SOURCE)",
+        "gate, updates bound via a dispatch capability)",
     ("experiments/handoff/board.py", "run_case", "run"):
         "local git log only",
     ("experiments/handoff/operator_note.py", "main", "run"):
@@ -82,7 +82,7 @@ EXPECTED_SUBPROCESS_CALLS = {
     ("hooks/loop_scan.py", "scan", "run"):
         "model (open-loops candidate generation; dialogue + loop board pass "
         "the archive-under-test's gate first, candidates bound via "
-        "CONTEXTD_DERIVATION_SOURCE, promotion mechanically absent from "
+        "a dispatch capability, promotion mechanically absent from "
         "the spawned server's registry)",
     ("experiments/lineage_calibration/calibrate.py", "dispatch", "run"):
         "model (lineage judge: calibration corpus items and, via "

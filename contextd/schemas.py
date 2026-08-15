@@ -237,6 +237,7 @@ EVENT_SCHEMAS: dict = {
         # were the widest arbitrary-content channel into the archive.
         "exit": Field("int"),
         "timeout_seconds": Field("int"),
+        "duration_ms": Field("number"),
     },
     ("eval", "outcome"): {
         "egress_id": Field("int", required=True),

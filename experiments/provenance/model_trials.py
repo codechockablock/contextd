@@ -64,6 +64,8 @@ from contextd import home, load_config  # noqa: E402
 from contextd.db import append_event, connect, now_iso  # noqa: E402
 from contextd.experiment import (_sha, perm_test, p_floor, score_output,  # noqa: E402
                                  validate_rubric)
+from contextd.capability import issue as issue_capability  # noqa: E402
+from contextd.capability import token as capability_token  # noqa: E402
 from contextd.gate import disclose, est_tokens, record_dispatch_outcome  # noqa: E402
 from contextd.provenance import closure, disclosure_segments  # noqa: E402
 from experiments.provenance import cases  # noqa: E402
@@ -188,7 +190,7 @@ def cmd_probe(_args):
     print(json.dumps({"env_inheritance_reaches_mcp_server": inherited,
                       "exit": r.returncode}, indent=2))
     if not inherited:
-        print("WARNING: the production reconciler's CONTEXTD_DERIVATION_SOURCE "
+        print("WARNING: the production reconciler's dispatch-capability "
               "binding would silently no-op (notes fall back to unbound, "
               "never mis-bound).", file=sys.stderr)
     shutil.rmtree(tmp, ignore_errors=True)
@@ -408,8 +410,16 @@ def run_p1(args):
                 mcp_env = {"CONTEXTD_HOME": str(root),
                            "CONTEXTD_CLIENT": "reconciler"}
                 if arm == "anchored":
-                    mcp_env["CONTEXTD_DERIVATION_SOURCE"] = \
-                        str(disclosure["egress_id"])
+                    # The ARM still decides whether lineage is bound at all —
+                    # that contrast is the measurement. What changed is the
+                    # mechanism: an opaque, single-use, session-bound dispatch
+                    # capability instead of a guessable event id
+                    # (contextd/capability.py).
+                    _cap = issue_capability(conn, disclosure["egress_id"],
+                                            os.getuid(), "provenance-trial")
+                    mcp_env["CONTEXTD_DISPATCH_CAPABILITY"] = \
+                        capability_token(_cap)
+                    mcp_env["CONTEXTD_DISPATCH_SESSION"] = "provenance-trial"
                 r = dispatch_note_writer(disclosure["content"], mcp_env)
                 record_dispatch_outcome(conn, disclosure["egress_id"],
                                         r["dispatch_status"], exit=r["exit"],

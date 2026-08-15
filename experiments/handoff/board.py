@@ -24,7 +24,7 @@ the opening episode, or COMPACTION LOSS across rewrites — the recursive-
 distillation decay P3 measured, now on a working artifact.
 
 Provenance is preserved recursively with existing machinery: each board
-update is one note written under CONTEXTD_DERIVATION_SOURCE, whose
+update is one note written under a dispatch capability, whose
 disclosure items include the episode's dialogue ids, the previous board's
 note id, AND the previous board's kernel-recorded anchors — so an anchor
 carried forward through N rewrites still verifies, and an invented one is
@@ -46,6 +46,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from contextd.capability import issue as issue_capability  # noqa: E402
+from contextd.capability import token as capability_token  # noqa: E402
 from contextd.experiment import p_floor, perm_test, score_output, verdict  # noqa: E402
 from experiments.handoff.bench import TASK_TEMPLATE, _mean, _sd  # noqa: E402
 from experiments.handoff.cases import CASES  # noqa: E402
@@ -125,7 +127,15 @@ def run_pass(view_home: Path, cutoff: int) -> dict:
             import os
             env = os.environ.copy()
             env["CONTEXTD_HOME"] = str(Path(view_home).resolve())
-            env["CONTEXTD_DERIVATION_SOURCE"] = str(disclosure["egress_id"])
+            # a dispatch capability, not an event id: opaque, bound to this
+            # disclosure's exact bytes and this session, single-use and
+            # expiring (contextd/capability.py). The bare integer binding is
+            # retired and now refuses rather than silently mis-binding.
+            _cap = issue_capability(conn, disclosure["egress_id"],
+                                    os.getuid(), "board")
+            env["CONTEXTD_DISPATCH_CAPABILITY"] = capability_token(_cap)
+            env["CONTEXTD_DISPATCH_SESSION"] = "board"
+            env.pop("CONTEXTD_DERIVATION_SOURCE", None)
             env["CONTEXTD_CLIENT"] = CLIENT
             before = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE kind='note'").fetchone()[0]

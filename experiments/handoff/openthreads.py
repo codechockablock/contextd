@@ -15,7 +15,7 @@ any surface lexicon.
 
 The pass mirrors hooks/reconcile.py exactly where it matters: the episode
 dialogue is a gated, receipted disclosure; the note-writing model runs under
-CONTEXTD_DERIVATION_SOURCE, so every note's anchors are verified by the
+a single-use dispatch capability, so every note's anchors are verified by the
 kernel against the disclosed bytes and invalid anchors are refused. Notes
 land in the FROZEN VIEW (never the live archive) with actor =
 CONTEXTD_CLIENT = 'openthreads', which is how the compiler stratum — and the
@@ -45,6 +45,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from contextd.capability import issue as issue_capability  # noqa: E402
+from contextd.capability import token as capability_token  # noqa: E402
 from contextd.experiment import p_floor, perm_test, score_output, verdict  # noqa: E402
 from experiments.handoff.bench import TASK_TEMPLATE, _mean, _sd  # noqa: E402
 from experiments.handoff.cases import CASES  # noqa: E402
@@ -140,7 +142,15 @@ def run_pass(view_home: Path, cutoff: int) -> dict:
             import os
             env = os.environ.copy()
             env["CONTEXTD_HOME"] = str(Path(view_home).resolve())
-            env["CONTEXTD_DERIVATION_SOURCE"] = str(disclosure["egress_id"])
+            # a dispatch capability, not an event id: opaque, bound to this
+            # disclosure's exact bytes and this session, single-use and
+            # expiring (contextd/capability.py). The bare integer binding is
+            # retired and now refuses rather than silently mis-binding.
+            _cap = issue_capability(conn, disclosure["egress_id"],
+                                    os.getuid(), "openthreads")
+            env["CONTEXTD_DISPATCH_CAPABILITY"] = capability_token(_cap)
+            env["CONTEXTD_DISPATCH_SESSION"] = "openthreads"
+            env.pop("CONTEXTD_DERIVATION_SOURCE", None)
             env["CONTEXTD_CLIENT"] = CLIENT
             before = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE kind='note'").fetchone()[0]

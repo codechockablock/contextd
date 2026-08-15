@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -355,3 +356,46 @@ def test_capability_secret_never_reaches_the_archive():
     rows = conn.execute("SELECT content, meta, uri FROM events").fetchall()
     blob = json.dumps([[r["content"], r["meta"], r["uri"]] for r in rows])
     assert cap["secret"] not in blob
+
+
+# --- no dispatcher may regress to the retired binding -----------------------
+
+def test_no_dispatcher_sets_the_retired_environment_variable():
+    """Every process that hands a model a disclosure must issue a capability.
+
+    This is a source-level guard because the harnesses it protects dispatch
+    real models and are not otherwise exercised by the suite. Setting
+    CONTEXTD_DERIVATION_SOURCE is not merely legacy — the MCP surface now
+    REFUSES when it is present, so a regression here silently disables a
+    harness rather than quietly weakening it.
+    """
+    import re
+    root = Path(__file__).resolve().parent.parent
+    offenders = []
+    for directory in ("contextd", "hooks", "experiments"):
+        for path in (root / directory).rglob("*.py"):
+            for i, line in enumerate(path.read_text().splitlines(), 1):
+                if re.search(r'\[\s*["\']CONTEXTD_DERIVATION_SOURCE["\']\s*\]\s*=', line):
+                    offenders.append(f"{path.relative_to(root)}:{i}")
+    assert not offenders, (
+        "these set the retired binding, which the MCP surface refuses: "
+        + ", ".join(offenders)
+    )
+
+
+def test_every_model_dispatcher_issues_a_capability():
+    """A dispatcher that builds an env for a note-writing model must put a
+    capability in it. Pairs with the test above: one forbids the old
+    mechanism, this one requires the new."""
+    root = Path(__file__).resolve().parent.parent
+    dispatchers = [
+        "hooks/reconcile.py", "hooks/loop_scan.py",
+        "experiments/handoff/board.py", "experiments/handoff/livethreads.py",
+        "experiments/handoff/openthreads.py",
+        "experiments/provenance/model_trials.py",
+    ]
+    for relative in dispatchers:
+        source = (root / relative).read_text()
+        assert "issue_capability(" in source, f"{relative} issues no capability"
+        assert "CONTEXTD_DISPATCH_CAPABILITY" in source, relative
+        assert "CONTEXTD_DISPATCH_SESSION" in source, relative

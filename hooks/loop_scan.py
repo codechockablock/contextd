@@ -9,7 +9,7 @@ server pointed at the same archive:
 
 - the spawned server's registry contains loop_candidate alone, so promotion
   is mechanically impossible whatever the model outputs;
-- CONTEXTD_DERIVATION_SOURCE binds every candidate to the exact disclosed
+- a single-use dispatch capability binds every candidate to the exact disclosed
   bytes — bracketed anchors are kernel-verified, invalid ones refused;
 - CONTEXTD_LOOP_SCOPE pins the scope server-side;
 - kernel dedupe suppresses re-proposal of live, closed, and dismissed loops
