@@ -178,6 +178,13 @@ problem than the raw 257 suggested.
 
 ### Option C — rewrite history
 
+**A concrete, unexecuted runbook now exists:
+[`docs/HISTORY_REWRITE_RUNBOOK.md`](HISTORY_REWRITE_RUNBOOK.md).** It scopes the
+work to exactly four blobs (none in `HEAD`, each with a sanitized successor
+already committed), gives the `git filter-repo --blob-callback` invocation,
+a mandatory rehearsal on a throwaway clone, objective pass/fail numbers for
+verification, and a rollback path. It has not been run.
+
 `git filter-repo` over the affected paths, then force-push.
 
 Costs, all of which land on the operator:
