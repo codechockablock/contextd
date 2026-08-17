@@ -30,6 +30,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import db as db_module
 from . import home
+from .ledger_sig import CLASSICAL_ALG
 
 BUNDLE_FORMAT = "contextd-backup"
 BUNDLE_VERSION = 1
@@ -109,10 +110,23 @@ class ManifestTrustStore:
 
     @classmethod
     def from_connection(cls, conn: sqlite3.Connection) -> ManifestTrustStore:
-        """Pin keys from an already-trusted live archive, never a bundle DB."""
+        """Pin keys from an already-trusted live archive, never a bundle DB.
+
+        Only classical keys are pinned, because the manifest signature is and
+        stays ECDSA (`_sign_manifest`). Post-quantum checkpoint keys live in the
+        same registry, so pinning every row meant that the first ML-DSA
+        checkpoint key an archive minted made every subsequent backup fail on
+        the P-256 assertion below — silently disabling the weekly restore drill
+        at the moment the archive gained its strongest signature. The registered
+        ``alg`` is the discriminator: a key id resolves to exactly one scheme, so
+        selecting on it here cannot mispin. ``alg IS NULL`` covers rows written
+        before the column existed, which were all P-256 by construction.
+        """
         try:
             rows = conn.execute(
-                "SELECT key_id, public_pem FROM service_keys ORDER BY key_id"
+                "SELECT key_id, public_pem FROM service_keys "
+                "WHERE alg = ? OR alg IS NULL ORDER BY key_id",
+                (CLASSICAL_ALG,),
             ).fetchall()
         except sqlite3.DatabaseError as exc:
             raise BackupError("trusted archive has no service signing keys") from exc

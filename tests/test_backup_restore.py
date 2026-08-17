@@ -977,3 +977,40 @@ def test_restore_enforces_manifest_digest_bound_by_prior_authorization(tmp_path)
             expected_manifest_sha256=first_identity["manifest_sha256"],
         )
     assert not (tmp_path / "restored").exists()
+
+
+def test_backup_survives_a_post_quantum_checkpoint_key(tmp_path):
+    """A PQ checkpoint key must not disable backups.
+
+    Post-quantum checkpoint keys share ``service_keys`` with the classical
+    signing key, but the backup manifest is signed with ECDSA and its trust
+    store asserts every pin is P-256. Pinning the whole registry meant the first
+    ML-DSA key an archive minted made every later ``create_backup`` raise — so
+    turning on the strongest signature the ledger offers silently disabled the
+    weekly restore drill. Caught only in the merged tree: the lane that added PQ
+    keys and the lane that wrote this trust store never ran together.
+    """
+    from contextd import ledger_sig
+
+    archive, conn, _digest, _blob = _seed_archive()
+    ledger_sig._load_or_create_key(conn)
+    ledger_sig._load_or_create_key(conn, ledger_sig.ALG_MLDSA_44)
+    algs = {row[0] for row in conn.execute("SELECT alg FROM service_keys")}
+    assert ledger_sig.ALG_MLDSA_44 in algs and ledger_sig.CLASSICAL_ALG in algs
+
+    # The trust store pins the classical key and ignores the PQ one...
+    store = ManifestTrustStore.from_connection(conn)
+    pinned = set(store.pem_map)
+    pq_ids = {
+        row[0]
+        for row in conn.execute(
+            "SELECT key_id FROM service_keys WHERE alg = ?",
+            (ledger_sig.ALG_MLDSA_44,),
+        )
+    }
+    assert pinned and not (pinned & pq_ids)
+
+    # ...and a real backup still completes and validates.
+    result = create_backup(conn, archive, tmp_path / "backups")
+    conn.close()
+    validate_bundle(Path(result["bundle"]), trust_store=store)
