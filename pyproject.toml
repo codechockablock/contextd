@@ -4,7 +4,15 @@ version = "0.0.1"
 description = "Personal context daemon: append-only life log + index + gate, served over MCP."
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
-dependencies = ["mcp>=2"]
+# `cryptography` is imported unguarded at module scope by attest.py, ledger_sig.py,
+# backup.py, export_crypto.py, and cli.py — it is what signs operator actions, the
+# event chain, and sealed exports. It was previously undeclared and arrived only
+# because mcp depends on pyjwt[crypto]. That worked, but it made the archive's
+# cryptographic identity a side effect of the MCP transport's JWT handling: drop
+# the transport, or drop its extra, and signing fails at import. The inherited
+# floor was also whatever pyjwt accepts (>=3.4.0, 2021), which is not a floor this
+# project should sign under.
+dependencies = ["mcp>=2", "cryptography>=42"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.12"]
