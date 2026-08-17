@@ -26,6 +26,10 @@ dev = ["pytest>=8", "ruff>=0.12"]
 # implemented by the linked OpenSSL, so ledger_sig.pq_available() probes for
 # the capability instead of inferring it from a version number.
 pqc = ["cryptography>=47"]
+# Multi-host archives only. SQLite remains the default and requires nothing
+# extra, so an existing single-host install is unaffected by this extra
+# existing and is never migrated by installing it.
+postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
 ctx = "contextd.cli:main"
@@ -35,7 +39,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["contextd"]
+# Subpackages are not implied by the parent: without `contextd.backends` listed
+# here an installed wheel imports `contextd` fine and then fails on the first
+# `connect()`, which the test suite would not catch because it runs from the
+# source tree.
+packages = ["contextd", "contextd.backends"]
 
 [tool.pytest.ini_options]
 # experiments/ and hooks/ are harness-side scripts deliberately outside the

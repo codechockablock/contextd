@@ -25,3 +25,42 @@ def isolated_contextd_home(tmp_path, monkeypatch):
     archive = tmp_path / "contextd-home"
     monkeypatch.setenv("CONTEXTD_HOME", str(archive))
     return archive
+
+
+def pytest_addoption(parser):
+    """Opt in to the Postgres backend tests by pointing at a test server.
+
+    Deliberately **not** a ``--backend=postgres`` switch that reroutes the whole
+    suite. The autouse fixture above is a security control — it is what makes
+    `attest._assert_test_mode_ok` accept the test signer — and a global backend
+    switch would quietly change what every test in the suite is exercising while
+    leaving that control's assumptions unexamined.
+
+    The multi-host tests do need two archive roots sharing one database, which
+    is a real weakening of that isolation. They do it explicitly, per test, in
+    `test_postgres_backend.py`, where it is visible in the test body rather than
+    applied to 685 tests that never asked for it.
+    """
+    parser.addoption(
+        "--postgres-url",
+        action="store",
+        default=None,
+        help="Postgres URL for backend tests (also CONTEXTD_TEST_POSTGRES_URL). "
+             "The tests create and drop a fresh database per test, so this must "
+             "point at a throwaway server, never a real archive.",
+    )
+
+
+@pytest.fixture(scope="session")
+def postgres_url(request):
+    """A Postgres server to test against, or skip."""
+    url = request.config.getoption("--postgres-url") or os.environ.get(
+        "CONTEXTD_TEST_POSTGRES_URL"
+    )
+    if not url:
+        pytest.skip(
+            "no Postgres server configured (--postgres-url or "
+            "CONTEXTD_TEST_POSTGRES_URL)"
+        )
+    pytest.importorskip("psycopg")
+    return url

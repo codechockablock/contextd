@@ -21,8 +21,26 @@ def _epoch(s):
     return dt.timestamp()
 
 
+class SearchUnsupported(RuntimeError):
+    """This archive's backend has no full-text index."""
+
+
 def search(conn, query: str, limit: int = 20, highlight: bool = True,
            since=None, until=None):
+    # FTS5 has no Postgres equivalent, and `ts_rank` is not `bm25`: swapping the
+    # backend would silently change ranking and snippet output. Lexical search
+    # is therefore declared out of scope for non-SQLite archives and refuses
+    # here, rather than returning differently-ordered results that look like the
+    # same feature. `timeline` below is portable and keeps working.
+    from .backends import backend_for
+
+    if not backend_for(conn).supports_search:
+        raise SearchUnsupported(
+            "full-text search requires the SQLite backend: FTS5 has no "
+            "Postgres equivalent and ts_rank is not bm25, so results would be "
+            "ranked differently while appearing to be the same feature. Use "
+            "`timeline` for backend-independent reads."
+        )
     q = fts_escape(query)
     if not q:
         return []
