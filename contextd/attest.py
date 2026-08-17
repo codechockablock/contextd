@@ -51,11 +51,25 @@ from .canonical import CanonicalError, canonical_bytes, canonical_digest
 DOMAIN = "contextd.OperatorActionV1"
 PROTOCOL_VERSION = 1
 
+#: Domain separator for the intent-only digest. It is deliberately NOT
+#: :data:`DOMAIN`: the two digests answer different questions and must never be
+#: substitutable for one another.
+INTENT_DOMAIN = "contextd.OperatorActIntentV1"
+
 #: Exactly these twelve keys, all required. Unknown keys are refused.
 ACTION_FIELDS = (
     "domain", "version", "archive_uuid", "key_id", "nonce", "sequence",
     "issued_at", "expires_at", "action", "scope", "arguments",
     "content_digest", "reason_digest",
+)
+
+#: The fields that describe *what is being done*, and nothing about *which
+#: authorization is doing it*. Everything in ``ACTION_FIELDS`` outside this set
+#: is envelope — ``nonce``, ``sequence``, ``issued_at``, ``expires_at``,
+#: ``archive_uuid``, ``key_id``, ``domain``, ``version`` — and is excluded on
+#: purpose. See :func:`intent_digest`.
+INTENT_FIELDS = (
+    "action", "scope", "arguments", "content_digest", "reason_digest",
 )
 ATTESTATION_FIELDS = (
     "action", "signature", "key_id", "signer", "verified_at",
@@ -86,6 +100,22 @@ TEST_MODE_ENV = "CONTEXTD_INSECURE_TEST_SIGNER"
 
 class AttestationError(RuntimeError):
     """An operator action could not be prepared, signed, or verified."""
+
+
+class ActMismatchError(AttestationError):
+    """The authorization does not cover the exact act being attempted."""
+
+
+class AlreadyConsumedError(AttestationError):
+    """The authorization was already spent. One signature, one append."""
+
+
+class ReplayExpired(AttestationError):
+    """A recorded outcome is past its replay TTL; re-authorize instead."""
+
+
+class IntentMismatch(AttestationError):
+    """A bound mandate was presented again with a different act."""
 
 
 class _FrozenDict(dict):
@@ -504,6 +534,49 @@ def _normalize_arguments(arguments: dict | None) -> dict:
     return out
 
 
+def intent_digest(action: str, scope: str = "global",
+                  arguments: dict | None = None, content: str | None = None,
+                  reason: str | None = None) -> str:
+    """A digest of *what is being done*, stable across independent retries.
+
+    This is not, and cannot be, ``prepare_action``'s digest. That one covers
+    the whole signed action map — including ``nonce``, ``sequence``,
+    ``issued_at``, ``expires_at``, ``archive_uuid`` and ``key_id`` — so it
+    differs on every retry **by construction**, which is exactly what makes an
+    authorization single-use. Replay detection needs the opposite property:
+    two honest retries of the same act must produce the same value. One digest
+    cannot do both, so there are two, under two domain separators.
+
+    The five fields below are precisely the ones ``Authorization.matches``
+    already compares as a boolean; this turns that comparison into something
+    that can be persisted, indexed and adjudicated later.
+    """
+    if action not in ACTION_CLASSES:
+        raise AttestationError(
+            f"unknown action class {action!r}; registry: "
+            f"{', '.join(sorted(ACTION_CLASSES))}"
+        )
+    return canonical_digest(INTENT_DOMAIN, {
+        "action": action,
+        "scope": canonical_scope(scope),
+        "arguments": _normalize_arguments(arguments),
+        "content_digest": _digest(content),
+        "reason_digest": _digest(reason),
+    })
+
+
+def action_intent_digest(act: dict) -> str:
+    """The intent digest of an already-canonical signed action map."""
+    missing = set(INTENT_FIELDS) - set(act)
+    if missing:
+        raise AttestationError(
+            f"action is missing field(s): {', '.join(sorted(missing))}"
+        )
+    return canonical_digest(
+        INTENT_DOMAIN, {field: act[field] for field in INTENT_FIELDS}
+    )
+
+
 def prepare_action(
     key_id: str,
     action: str,
@@ -641,6 +714,11 @@ class Authorization:
         return canonical_digest(DOMAIN, self.action)
 
     @property
+    def intent_digest(self) -> str:
+        """What this authorizes, with the single-use envelope stripped out."""
+        return action_intent_digest(self.action)
+
+    @property
     def nonce(self) -> str:
         return self.action["nonce"]
 
@@ -740,6 +818,33 @@ def verify_action(action: dict, signature: bytes, conn=None,
     supplied by the caller is never trusted, because trusting it would let a
     caller present one action and have another verified.
     """
+    return _verify_action(action, signature, conn, now, single_use=True)
+
+
+def verify_replay(conn, action: dict, signature: bytes) -> Authorization:
+    """Verify a *replayed* authorization: everything except single-use state.
+
+    Two checks are deliberately skipped, and only these two, because both are
+    guaranteed to fail on a legitimate replay rather than indicating an attack:
+    the nonce's consumption (the original redemption spent it, which is the
+    whole point) and the action's own expiry (the signing TTL is minutes, while
+    the replay window is a separate, configurable clock).
+
+    Every other check `verify_action` makes still runs: the archive binding,
+    the key's registration and revocation state, that this archive issued the
+    nonce at all, the digest the nonce was issued for, and the signature.
+
+    What makes this safe rather than a bypass is that an Authorization returned
+    here **cannot be spent**. ``consume_nonce``'s conditional UPDATE requires
+    ``consumed_event IS NULL``, and this path only ever returns for a nonce
+    that is already consumed. It is a receipt-lookup credential, never a
+    spending one.
+    """
+    return _verify_action(action, signature, conn, None, single_use=False)
+
+
+def _verify_action(action: dict, signature: bytes, conn, now: int | None, *,
+                   single_use: bool) -> Authorization:
     own = conn is None
     conn = conn or state()
     try:
@@ -753,7 +858,7 @@ def verify_action(action: dict, signature: bytes, conn=None,
             )
         if now < action["issued_at"] - 5:
             raise AttestationError("action is issued in the future")
-        if now >= action["expires_at"]:
+        if single_use and now >= action["expires_at"]:
             raise AttestationError("authorization has expired")
 
         row = _lookup_key(conn, action["key_id"])
@@ -765,9 +870,14 @@ def verify_action(action: dict, signature: bytes, conn=None,
                 "nonce was not issued by this archive; an operator action "
                 "cannot be self-minted"
             )
-        if nonce_row["consumed_event"] is not None:
-            raise AttestationError(
+        if single_use and nonce_row["consumed_event"] is not None:
+            raise AlreadyConsumedError(
                 f"nonce already consumed by event #{nonce_row['consumed_event']}"
+            )
+        if not single_use and nonce_row["consumed_event"] is None:
+            raise AttestationError(
+                "this authorization has never been redeemed; there is no "
+                "receipt to replay"
             )
         if nonce_row["key_id"] != action["key_id"] or \
                 nonce_row["sequence"] != action["sequence"]:
@@ -818,7 +928,7 @@ def reverify_for_use(conn: sqlite3.Connection, authorization: Authorization, *,
         dict(authorization.action), authorization.signature, conn=conn, now=now
     )
     if not verified.matches(action, scope, arguments, content, reason):
-        raise AttestationError(
+        raise ActMismatchError(
             "the authorization does not cover this exact act (action, scope, "
             "arguments, content digest, and reason digest must all match)"
         )
@@ -850,7 +960,7 @@ def consume_nonce(conn, authorization: Authorization, event_id: int) -> None:
          current.digest, current.action["expires_at"], current.key_id),
     )
     if cursor.rowcount != 1:
-        raise AttestationError(
+        raise AlreadyConsumedError(
             "authorization was already consumed; one signature authorizes "
             "exactly one append"
         )
@@ -916,6 +1026,68 @@ def test_mode_authorization(conn, action: str, scope: str = "global",
     return verify_action(prepared["action"], signature, conn=conn)
 
 
+#: Where the core writes its own refusals. Registered in
+#: contextd/schemas.py so the row is schema-bounded like any other event.
+REFUSAL_SOURCE = "tx"
+REFUSAL_KIND = "refuse"
+
+#: The refusals an in-transaction redemption can produce. Every one of them
+#: must be enumerable *here*, before the transaction opens, because the
+#: recovery journal names the exact chain hash of each permissible outcome.
+BIND_REFUSAL_REASONS = ("act_mismatch", "already_consumed", "unverifiable")
+
+
+def refusal_reason(exc: BaseException) -> str:
+    """Map a refusal to its closed reason label.
+
+    Typed, not string-matched: the reason ends up in a signed, chained ledger
+    row, and deriving it by parsing an error message would make the durable
+    record hostage to error-string edits.
+    """
+    if isinstance(exc, ActMismatchError):
+        return "act_mismatch"
+    if isinstance(exc, AlreadyConsumedError):
+        return "already_consumed"
+    if isinstance(exc, IntentMismatch):
+        return "intent_mismatch"
+    if isinstance(exc, ReplayExpired):
+        return "replay_expired"
+    return "unverifiable"
+
+
+def _refusal_event(authorization: Authorization, reason: str, **extra) -> dict:
+    """The exact bytes of one pre-declared refusal outcome.
+
+    Everything here comes from the *authorization*, never from the caller's
+    requested act: the authorization's fields were normalized and floor-checked
+    at preparation time, so this can neither raise nor smuggle caller text into
+    the ledger. What the caller attempted is described by the reason label, not
+    reproduced.
+    """
+    act = authorization.action
+    return {
+        "source": REFUSAL_SOURCE,
+        "kind": REFUSAL_KIND,
+        "meta": {
+            "reason": reason,
+            "intent_digest": action_intent_digest(act),
+            "nonce": act["nonce"],
+            "key_id": act["key_id"],
+            "action": act["action"],
+            "scope": act["scope"],
+            **extra,
+        },
+    }
+
+
+def declared_refusals(authorization: Authorization, reasons=BIND_REFUSAL_REASONS,
+                      **extra) -> dict:
+    return {
+        reason: _refusal_event(authorization, reason, **extra)
+        for reason in reasons
+    }
+
+
 def authorized_append(conn, source: str, kind: str, authorization: Authorization,
                       action: str, scope: str = "global",
                       arguments: dict | None = None, content: str | None = None,
@@ -931,14 +1103,17 @@ def authorized_append(conn, source: str, kind: str, authorization: Authorization
        against another.
     2. The nonce is consumed inside the same transaction as the insert, so a
        crash cannot separate them and a concurrent replay cannot double-spend.
-    """
-    from .db import append_event_checked
 
-    if not authorization.matches(action, scope, arguments, content, reason):
-        raise AttestationError(
-            "the authorization does not cover this exact act (action, scope, "
-            "arguments, content digest, and reason digest must all match)"
-        )
+    Both checks now happen in one place — inside the transaction — and both
+    refusals are recorded there by the core. There used to be a redundant
+    ``matches()`` pre-check out here; it produced the same error one lock
+    earlier, and its only lasting effect was that an act-mismatch refusal
+    landed *outside* any transaction and therefore left no durable trace unless
+    the caller volunteered to write one. Refusing where the evidence can be
+    written is the point.
+    """
+    from .db import Refusal, append_event_checked
+
     meta = {
         **(meta or {}),
         "assurance": authorization.assurance,
@@ -946,14 +1121,397 @@ def authorized_append(conn, source: str, kind: str, authorization: Authorization
     }
 
     def bind(locked_conn, _ts, event_id):
-        verified = reverify_for_use(
-            locked_conn, authorization, action=action, scope=scope,
-            arguments=arguments, content=content, reason=reason,
-        )
-        consume_nonce(locked_conn, verified, event_id)
+        try:
+            verified = reverify_for_use(
+                locked_conn, authorization, action=action, scope=scope,
+                arguments=arguments, content=content, reason=reason,
+            )
+            consume_nonce(locked_conn, verified, event_id)
+        except AttestationError as exc:
+            raise Refusal(refusal_reason(exc), exc) from exc
 
     return append_event_checked(
         conn, source, kind, uri=uri, content=content, meta=meta, bind=bind,
+        refusals=declared_refusals(authorization),
+    )
+
+
+# --- three-state redemption ---------------------------------------------
+#
+# `authorized_append` answers one question: may this act become a ledger row,
+# exactly once? A transaction path has to answer a harder one, because the act
+# it authorizes happens *outside* the ledger and the caller may legitimately ask
+# again. "Was it consumed?" is not enough — a boolean forces a retry to be
+# treated either as a fresh act (double-spend) or as an attack (a lost receipt).
+#
+# So the answer is three-state:
+#
+#   unconsumed                  -> bind the mandate, perform, record, return
+#   consumed, same intent       -> return the stored outcome (benign replay)
+#   consumed, different intent  -> refuse, and the core records the refusal
+#   consumed, outcome unknown   -> in-flight; never guess, never re-execute
+#
+# The fourth state is the one that only exists because the act is external. A
+# process killed between `perform()` and the outcome append leaves a bound
+# mandate with no result, and the honest report is "I do not know", because the
+# act may have taken effect out in the world. Re-running it would be a
+# double-spend; reporting success would be a phantom.
+
+#: How long a recorded outcome stays replayable. Configurable per call; after it
+#: lapses a retry must be re-authorized rather than served a stale receipt.
+DEFAULT_REPLAY_TTL_SECONDS = 900
+MAX_REPLAY_TTL_SECONDS = 86_400
+#: A receipt is a receipt, not a payload channel.
+MAX_OUTCOME_CHARS = 8192
+
+REDEEM_EXECUTED = "executed"
+REDEEM_REPLAYED = "replayed"
+REDEEM_INFLIGHT = "inflight"
+
+MANDATE_SOURCE = "mandate"
+MANDATE_KIND = "bind"
+
+
+class ActFailed(AttestationError):
+    """The external act definitively did not happen, and the caller knows it.
+
+    Raise this from ``perform`` when — and only when — the failure is
+    conclusive, and pass the receipt that says so. Any *other* exception leaves
+    the mandate in flight, because a timeout, a dropped connection or a killed
+    process is not evidence that nothing happened.
+    """
+
+    def __init__(self, outcome: dict, message: str = "the authorized act failed"):
+        super().__init__(message)
+        self.outcome = outcome
+
+
+class _AlreadyBound(Exception):
+    """Internal: this nonce already has a mandate, so nothing may be appended."""
+
+
+class _StateMoved(Exception):
+    """Internal: the redemption row changed under us; resolve it again."""
+
+
+@dataclass(frozen=True)
+class Redemption:
+    """The outcome of one redemption attempt, and which of the three it was."""
+
+    state: str
+    outcome: dict | None
+    intent_digest: str
+    mandate_event: int
+    outcome_event: int | None = None
+    inflight_event: int | None = None
+
+    @property
+    def resolved(self) -> bool:
+        """True when an outcome is known — whether just now or on replay."""
+        return self.state in (REDEEM_EXECUTED, REDEEM_REPLAYED)
+
+
+def _encode_outcome(outcome) -> tuple[str, str]:
+    """The exact receipt bytes that get chained, and their digest."""
+    if not isinstance(outcome, dict):
+        raise AttestationError("a redemption outcome must be a mapping")
+    try:
+        text = json.dumps(
+            outcome, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise AttestationError(
+            "a redemption outcome must be JSON-encodable"
+        ) from exc
+    if len(text) > MAX_OUTCOME_CHARS:
+        raise AttestationError("redemption outcome exceeds its bound")
+    # The same capture-side floor every other archive write passes. Redaction
+    # can rewrite bytes inside a string, so re-parse: a receipt that no longer
+    # decodes is refused rather than persisted as an unreadable replay answer.
+    text = _normalized_content(text)
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AttestationError(
+            "redemption outcome did not survive the privacy floor"
+        ) from exc
+    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _redemption_row(conn: sqlite3.Connection, nonce: str):
+    return conn.execute(
+        "SELECT * FROM redemptions WHERE nonce = ?", (nonce,)
+    ).fetchone()
+
+
+def _instant(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(
+        timespec="seconds"
+    )
+
+
+def _bind_mandate(conn, authorization: Authorization, *, action: str, scope: str,
+                  arguments, content, reason, intent: str, replay_until: int,
+                  now: int, fault=None) -> int:
+    """Consume the authorization and record the mandate, atomically.
+
+    The nonce consumption, the ``mandate.bind`` row and the ``redemptions`` row
+    are one transaction. There is no representable state in which the
+    authorization is spent but the mandate is unrecorded, which is what lets the
+    replay path trust that a consumed nonce with no mandate row was spent by
+    something else entirely — and refuse it.
+    """
+    from .db import Refusal, append_event_checked
+
+    def bind(locked_conn, _ts, event_id):
+        # Serialized by the exclusive chain lock and BEGIN IMMEDIATE: if a
+        # racing process bound this mandate, its row is visible here. That is a
+        # benign concurrent replay, not a refusal, so nothing is appended.
+        if _redemption_row(locked_conn, authorization.nonce) is not None:
+            raise _AlreadyBound()
+        try:
+            verified = reverify_for_use(
+                locked_conn, authorization, action=action, scope=scope,
+                arguments=arguments, content=content, reason=reason,
+            )
+            consume_nonce(locked_conn, verified, event_id)
+        except AttestationError as exc:
+            raise Refusal(refusal_reason(exc), exc) from exc
+        locked_conn.execute(
+            "INSERT INTO redemptions(nonce, intent_digest, mandate_event, "
+            "bound_at, replay_until, state) VALUES (?,?,?,?,?, 'inflight')",
+            (authorization.nonce, intent, event_id, now, replay_until),
+        )
+
+    return append_event_checked(
+        conn, MANDATE_SOURCE, MANDATE_KIND, content=content,
+        meta={
+            "assurance": authorization.assurance,
+            "attestation": authorization.stored_block(),
+            "intent_digest": intent,
+            "nonce": authorization.nonce,
+            "replay_until": _instant(replay_until),
+        },
+        bind=bind,
+        fault=fault,
+        refusals=declared_refusals(authorization),
+    )
+
+
+def _record_outcome(conn, authorization: Authorization, *, intent: str,
+                    mandate_event: int, outcome: dict, status: str,
+                    duration_ms: float, fault=None) -> tuple[int, dict]:
+    """Persist the receipt itself, not merely a pointer to an event."""
+    from .db import append_event_checked
+
+    text, digest = _encode_outcome(outcome)
+
+    def bind(locked_conn, _ts, event_id):
+        cursor = locked_conn.execute(
+            "UPDATE redemptions SET state = 'executed', outcome = ?, "
+            "outcome_event = ? WHERE nonce = ? AND state = 'inflight'",
+            (text, event_id, authorization.nonce),
+        )
+        if cursor.rowcount != 1:
+            raise AttestationError(
+                "this mandate is no longer in flight; its outcome was already "
+                "recorded and an outcome is written exactly once"
+            )
+
+    event_id = append_event_checked(
+        conn, "tx", "execute", content=text,
+        meta={
+            "intent_digest": intent,
+            "nonce": authorization.nonce,
+            "mandate_event": mandate_event,
+            "status": status,
+            "outcome_digest": digest,
+            "duration_ms": round(duration_ms, 3),
+        },
+        bind=bind,
+        fault=fault,
+    )
+    return event_id, json.loads(text)
+
+
+def _note_inflight(conn, authorization: Authorization, row, intent: str) -> int:
+    """Record, at most once, that an unresolved mandate was observed.
+
+    This is the durable trace of the crash window. It is written by the core
+    when something asks about a mandate whose outcome is unknown; it never
+    resolves the mandate, and it never claims what the outcome was.
+    """
+    from .db import append_event_checked
+
+    if row["inflight_event"] is not None:
+        return row["inflight_event"]
+
+    def bind(locked_conn, _ts, event_id):
+        cursor = locked_conn.execute(
+            "UPDATE redemptions SET inflight_event = ? WHERE nonce = ? "
+            "AND state = 'inflight' AND inflight_event IS NULL",
+            (event_id, authorization.nonce),
+        )
+        if cursor.rowcount != 1:
+            raise _StateMoved()
+
+    return append_event_checked(
+        conn, "tx", "inflight",
+        meta={
+            "intent_digest": intent,
+            "nonce": authorization.nonce,
+            "mandate_event": row["mandate_event"],
+        },
+        bind=bind,
+    )
+
+
+def _refuse_redemption(conn, authorization: Authorization, reason: str,
+                       cause: AttestationError, **extra) -> None:
+    """Append the core's refusal row, then raise.
+
+    Unlike the in-transaction refusals of the bind path, these two reasons —
+    a bound mandate presented with a different act, and a lapsed replay
+    window — are decided from **monotone** state: a mandate's intent digest is
+    written once and never updated, and a deadline only lapses forward. Nothing
+    can vacate them between the read and this append, so re-deriving them inside
+    the transaction would be a tautology rather than a check. What matters is
+    unchanged: the row is written by the core, in a transaction, and the caller
+    never cooperated.
+    """
+    spec = _refusal_event(authorization, reason, **extra)
+    from .db import append_event_checked
+    append_event_checked(
+        conn, spec["source"], spec["kind"], meta=spec["meta"],
+    )
+    raise cause
+
+
+def _resolve_mandate(conn, authorization: Authorization, intent: str,
+                     now: int, row) -> Redemption:
+    for _attempt in range(3):
+        if row is None:
+            raise AttestationError(
+                "this authorization was consumed by something that is not a "
+                "redemption; there is no mandate to replay"
+            )
+        bound_intent = row["intent_digest"]
+        if bound_intent != intent:
+            _refuse_redemption(
+                conn, authorization, "intent_mismatch",
+                IntentMismatch(
+                    "this authorization is bound to a different act; a mandate "
+                    "covers exactly the intent it was bound to"
+                ),
+                intent_digest=bound_intent,
+                mandate_event=row["mandate_event"],
+            )
+        if row["state"] == "inflight":
+            try:
+                noted = _note_inflight(conn, authorization, row, intent)
+            except _StateMoved:
+                row = _redemption_row(conn, authorization.nonce)
+                continue
+            return Redemption(
+                REDEEM_INFLIGHT, None, intent, row["mandate_event"],
+                inflight_event=noted,
+            )
+        if now >= row["replay_until"]:
+            # The evidence rows stay; only the right to be handed the recorded
+            # result again lapses. A caller past the window must re-authorize.
+            _refuse_redemption(
+                conn, authorization, "replay_expired",
+                ReplayExpired(
+                    "the replay window for this outcome has lapsed; "
+                    "re-authorize the act instead of replaying a stale receipt"
+                ),
+                intent_digest=bound_intent,
+                mandate_event=row["mandate_event"],
+            )
+        return Redemption(
+            REDEEM_REPLAYED, json.loads(row["outcome"]), intent,
+            row["mandate_event"], outcome_event=row["outcome_event"],
+        )
+    raise AttestationError("redemption state did not settle; retry")
+
+
+def redeem(conn, authorization: Authorization, *, action: str,
+           scope: str = "global", arguments: dict | None = None,
+           content: str | None = None, reason: str | None = None,
+           perform, replay_ttl_seconds: int | None = None,
+           now: int | None = None, fault=None) -> Redemption:
+    """Redeem an authorization for an act that happens outside the ledger.
+
+    ``perform`` is called at most once per authorization, ever, and only after
+    the mandate is durably bound. It must return the outcome as a mapping, or
+    raise :class:`ActFailed` carrying the receipt when the act conclusively did
+    not happen. Any other exception leaves the mandate in flight — see the
+    module comment above; that is a state, not a bug.
+
+    ``replay_ttl_seconds`` is how long the recorded outcome stays replayable.
+
+    ``fault`` is the same explicit deterministic test hook
+    ``db.append_event_checked`` documents, forwarded to both appends this makes.
+    It exists so a crash between the external act and the outcome record can be
+    exercised at the exact phase a killed process would die at, rather than
+    approximated. It is test-only; production callers leave it None.
+    """
+    if not callable(perform):
+        raise AttestationError("redeem requires a callable to perform the act")
+    ttl = (
+        DEFAULT_REPLAY_TTL_SECONDS if replay_ttl_seconds is None
+        else int(replay_ttl_seconds)
+    )
+    if not 0 < ttl <= MAX_REPLAY_TTL_SECONDS:
+        raise AttestationError(
+            f"replay ttl must be in (0, {MAX_REPLAY_TTL_SECONDS}]; an outcome "
+            f"that is replayable forever is a standing receipt"
+        )
+    now = now if now is not None else int(time.time())
+    intent = intent_digest(action, scope, arguments, content, reason)
+
+    existing = _redemption_row(conn, authorization.nonce)
+    if existing is not None:
+        return _resolve_mandate(conn, authorization, intent, now, existing)
+
+    try:
+        mandate_event = _bind_mandate(
+            conn, authorization, action=action, scope=scope,
+            arguments=arguments, content=content, reason=reason, intent=intent,
+            replay_until=now + ttl, now=now, fault=fault,
+        )
+    except _AlreadyBound:
+        # Lost the race to bind, having read no row a moment earlier. Nothing
+        # was appended; this is the same benign replay the fast path serves.
+        return _resolve_mandate(
+            conn, authorization, intent, now,
+            _redemption_row(conn, authorization.nonce),
+        )
+
+    # --- outside the transaction, on purpose --------------------------------
+    # The mandate is durable before the act begins, and the authorization can
+    # never be spent again. A process that dies anywhere below leaves exactly
+    # the in-flight state.
+    started = time.monotonic()
+    try:
+        outcome = perform()
+        status = "succeeded"
+    except ActFailed as failure:
+        outcome, status = failure.outcome, "failed"
+        outcome_event, recorded = _record_outcome(
+            conn, authorization, intent=intent, mandate_event=mandate_event,
+            outcome=outcome, status=status,
+            duration_ms=(time.monotonic() - started) * 1000.0, fault=fault,
+        )
+        raise
+    outcome_event, recorded = _record_outcome(
+        conn, authorization, intent=intent, mandate_event=mandate_event,
+        outcome=outcome, status=status,
+        duration_ms=(time.monotonic() - started) * 1000.0, fault=fault,
+    )
+    return Redemption(
+        REDEEM_EXECUTED, recorded, intent, mandate_event,
+        outcome_event=outcome_event,
     )
 
 

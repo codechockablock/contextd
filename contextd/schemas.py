@@ -232,6 +232,30 @@ _AUTHORITY = {
     "attestation": Field("attestation"),
 }
 
+#: Why the core refused a redemption. Closed and enumerated because the refusal
+#: event's exact bytes have to be computable *before* the append transaction
+#: opens — the recovery journal names the chain hash of every outcome the
+#: append may leave behind (contextd/db.py ``_recovery_outcomes``). A free-text
+#: reason would make that impossible, and would also be the widest
+#: arbitrary-content channel in the ledger.
+REFUSAL_REASONS = (
+    "act_mismatch",      # the authorization does not cover this exact act
+    "already_consumed",  # one signature authorizes exactly one append
+    "unverifiable",      # key, nonce, archive, expiry or signature state refused it
+    "intent_mismatch",   # a bound mandate was presented with a different act
+    "replay_expired",    # the replayable outcome's TTL lapsed
+)
+
+#: Shared by every commerce event: which act, under which authorization.
+#: `intent_digest` is the *intent-only* digest (contextd/attest.py
+#: ``intent_digest``), not the nonce-bound action digest — two honest retries
+#: of the same act share this value, which is exactly what makes replay
+#: detection possible.
+_MANDATE = {
+    "intent_digest": Field("digest", required=True),
+    "nonce": Field("digest"),
+}
+
 EVENT_SCHEMAS: dict = {
     ("gate", "egress_outcome"): {
         "egress_id": Field("int", required=True),
@@ -284,6 +308,53 @@ EVENT_SCHEMAS: dict = {
         "new": Field("int", required=True),
         "grant": Field("int"),
         "grant_digest": Field("digest"),
+    },
+    # --- commerce vocabulary (contextd/attest.py, three-state redemption) ---
+    #
+    # A transaction path needs four words the note/loop/grant vocabulary does
+    # not have: the authorization is *bound* to an intent, the external act is
+    # *in flight*, it *executed* with a recorded outcome, or it was *refused*.
+    # All four are ordinary chained events under the closed registry — adding
+    # them here is what makes them writable at all.
+    #
+    # `mandate.bind` is the only one of the four that carries an attestation
+    # block, and deliberately so: it is the event that consumes the nonce, so
+    # it is the one place the signed action legitimately becomes durable.
+    ("mandate", "bind"): {
+        **_AUTHORITY,
+        **_MANDATE,
+        # the deadline after which the recorded outcome stops being replayable
+        "replay_until": Field("instant", required=True),
+    },
+    # Observed-unresolved: the process that bound the mandate did not live to
+    # record an outcome. Written at most once per mandate, by the core, when
+    # something asks about it — never by guessing what the outcome was.
+    ("tx", "inflight"): {
+        **_MANDATE,
+        "mandate_event": Field("int", required=True),
+    },
+    ("tx", "execute"): {
+        **_MANDATE,
+        "mandate_event": Field("int", required=True),
+        "status": Field("enum", required=True, choices=("succeeded", "failed")),
+        # the outcome itself is the event's content, chained and witnessed;
+        # this is its digest, so a replay can be checked against the row
+        "outcome_digest": Field("digest", required=True),
+        "duration_ms": Field("number"),
+    },
+    # A refusal carries digests and a bounded reason, never the attestation
+    # block: the signature was NOT honored, and a refusal row that reproduced
+    # a live signed action would put an unconsumed authorization into the
+    # ledger's permanent record.
+    ("tx", "refuse"): {
+        "reason": Field("enum", required=True, choices=REFUSAL_REASONS),
+        "intent_digest": Field("digest", required=True),
+        "nonce": Field("digest"),
+        "key_id": Field("digest"),
+        "mandate_event": Field("int"),
+        "consumed_event": Field("int"),
+        "action": Field("ident", max_len=MAX_LABEL),
+        "scope": Field("scope"),
     },
 }
 

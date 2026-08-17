@@ -899,7 +899,7 @@ def _validate_chain_state(root: Path, snapshot: dict[str, Any]) -> None:
         raise BackupError("chain witness is malformed")
     if (
         type(witness.get("version")) is not int
-        or witness["version"] != db_module.WITNESS_VERSION
+        or witness["version"] not in db_module.SUPPORTED_STATE_VERSIONS
     ):
         raise BackupError("chain witness has an unsupported version")
     witnessed = {
@@ -916,25 +916,40 @@ def _validate_chain_state(root: Path, snapshot: dict[str, Any]) -> None:
         recovery = json.loads(recovery_path.read_text())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BackupError("chain recovery journal is invalid") from exc
-    if not isinstance(recovery, dict) or set(recovery) != {
-        "version",
-        "previous",
-        "target",
-    }:
+    if not isinstance(recovery, dict):
         raise BackupError("chain recovery journal is malformed")
+    version = recovery.get("version")
     if (
-        type(recovery.get("version")) is not int
-        or recovery["version"] != db_module.WITNESS_VERSION
+        type(version) is not int
+        or version not in db_module.SUPPORTED_STATE_VERSIONS
     ):
         raise BackupError("chain recovery journal has an unsupported version")
-    previous, target = recovery.get("previous"), recovery.get("target")
+    # v1 named one ``target``; v2 enumerates every outcome the interrupted
+    # append was permitted to commit (contextd/db.py ``_recovery_outcomes``).
+    # A bundle may legitimately contain either, so both shapes are read here.
+    if version == 1:
+        if set(recovery) != {"version", "previous", "target"}:
+            raise BackupError("chain recovery journal is malformed")
+        targets = [recovery.get("target")]
+    else:
+        if set(recovery) != {"version", "previous", "outcomes"}:
+            raise BackupError("chain recovery journal is malformed")
+        targets = recovery.get("outcomes")
+        if not isinstance(targets, list) or not (
+            1 <= len(targets) <= db_module.MAX_RECOVERY_OUTCOMES
+        ):
+            raise BackupError("chain recovery journal is malformed")
+    previous = recovery.get("previous")
     _validate_tip(previous, "chain recovery previous tip")
-    _validate_tip(target, "chain recovery target tip")
-    if target["id"] != previous["id"] + 1:
-        raise BackupError("chain recovery journal does not describe one append")
-    recoverable = (previous == witnessed and current in (previous, target)) or (
-        target == witnessed and current == witnessed
-    )
+    for target in targets:
+        _validate_tip(target, "chain recovery target tip")
+        if target["id"] != previous["id"] + 1:
+            raise BackupError(
+                "chain recovery journal does not describe one append"
+            )
+    recoverable = (
+        previous == witnessed and (current == previous or current in targets)
+    ) or (witnessed in targets and current == witnessed)
     if not recoverable:
         raise BackupError("snapshot, witness, and recovery journal cannot reconcile")
 

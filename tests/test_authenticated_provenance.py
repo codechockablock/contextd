@@ -49,6 +49,30 @@ def _events(conn):
     return conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 
 
+def _acts(conn):
+    """Events that are not the core's own refusal records."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM events WHERE NOT (source='tx' AND kind='refuse')"
+    ).fetchone()[0]
+
+
+def _refusals(conn):
+    """(reason, intent_digest) of every refusal the CORE appended.
+
+    Nothing in these tests ever writes a `tx/refuse` row, so anything this
+    returns was written by contextd itself, inside the transaction that
+    refused — which is the property under test.
+    """
+    return [
+        (json.loads(row["meta"])["reason"],
+         json.loads(row["meta"])["intent_digest"])
+        for row in conn.execute(
+            "SELECT meta FROM events WHERE source='tx' AND kind='refuse' "
+            "ORDER BY id"
+        )
+    ]
+
+
 # --- caller strings establish nothing --------------------------------------
 
 @pytest.mark.parametrize("label", ["human", "operator", "user", "owner", "admin"])
@@ -236,13 +260,16 @@ def test_authorization_for_one_act_is_not_redeemable_against_another():
     conn = connect()
     op = operator(conn)
     auth = op.authorize("note.deliberate", "global", content="the approved text")
-    before = _events(conn)
+    before = _acts(conn)
     with pytest.raises(attest.AttestationError):
         attest.authorized_append(
             conn, "note", "note", auth, "note.deliberate", "global",
             content="a DIFFERENT text",
         )
-    assert _events(conn) == before
+    # No act of any kind became durable...
+    assert _acts(conn) == before
+    # ...and the core, not this test, wrote the evidence that it refused.
+    assert _refusals(conn) == [("act_mismatch", auth.intent_digest)]
 
 
 def test_verified_authorization_is_deeply_immutable():
@@ -281,13 +308,14 @@ def test_replay_of_one_authorization_appends_once():
         content="once only",
     )
     assert first
-    before = _events(conn)
+    before = _acts(conn)
     with pytest.raises(attest.AttestationError):
         attest.authorized_append(
             conn, "note", "note", auth, "note.deliberate", "global",
             content="once only",
         )
-    assert _events(conn) == before
+    assert _acts(conn) == before
+    assert _refusals(conn) == [("already_consumed", auth.intent_digest)]
 
 
 def test_concurrent_replay_yields_exactly_one_success():

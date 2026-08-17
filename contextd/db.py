@@ -85,6 +85,29 @@ CREATE TABLE IF NOT EXISTS operator_sequence (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   value     INTEGER NOT NULL
 );
+-- Replay state for the transaction path (contextd/attest.py ``redeem``). It
+-- lives in THIS database for the same reason the nonce table does: binding a
+-- mandate and consuming the authorization it binds must be one transaction.
+--
+-- `state` is monotone: 'inflight' -> 'executed', never back. An unresolved row
+-- is the honest record of a process that died between the external act and the
+-- outcome — it is deliberately NOT resolvable by guessing, and the replay path
+-- reports it as in-flight rather than inventing either answer.
+--
+-- `outcome` is the replayable receipt and it expires at `replay_until`. The
+-- ledger rows this table points at are permanent regardless; only the right to
+-- be served a stale receipt lapses.
+CREATE TABLE IF NOT EXISTS redemptions (
+  nonce          TEXT PRIMARY KEY,
+  intent_digest  TEXT NOT NULL,
+  mandate_event  INTEGER NOT NULL,
+  bound_at       INTEGER NOT NULL,
+  replay_until   INTEGER NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('inflight', 'executed')),
+  outcome        TEXT,
+  outcome_event  INTEGER,
+  inflight_event INTEGER
+);
 CREATE TABLE IF NOT EXISTS archive_identity (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   uuid      TEXT NOT NULL
@@ -112,7 +135,17 @@ CREATE TABLE IF NOT EXISTS service_tips (
 );
 """
 
-WITNESS_VERSION = 1
+#: Version 2 changed the recovery journal from a single ``target`` to an
+#: ``outcomes`` list, so an append that may commit either the act or a refusal
+#: in its place can name both before it opens the transaction. The witness file
+#: itself is unchanged in shape; its stamp moves with the protocol so an older
+#: build refuses an archive whose journals it could not interpret.
+WITNESS_VERSION = 2
+#: Journals and witnesses an older process may have left behind are still read.
+SUPPORTED_STATE_VERSIONS = (1, 2)
+#: A journal enumerating more outcomes than this is treated as malformed; the
+#: bound exists so a corrupt file cannot make recovery accept an open set.
+MAX_RECOVERY_OUTCOMES = 16
 SCHEMA_VERSION = 2
 _PROCESS_CHAIN_LOCK = threading.RLock()
 
@@ -123,6 +156,23 @@ class ChainStateError(RuntimeError):
 
 class InjectedCrash(BaseException):
     """Deterministic test-only interruption that deliberately skips cleanup."""
+
+
+class Refusal(Exception):
+    """Raised by ``check``/``bind`` to commit a pre-declared refusal instead.
+
+    The append machinery cannot invent a refusal row: every outcome it is
+    willing to commit had to be declared in ``append_event_checked``'s
+    ``refusals`` mapping *before* the transaction opened, because the recovery
+    journal names the exact chain hash of each one. ``reason`` selects one of
+    those declared outcomes; ``cause`` is the exception re-raised to the caller
+    once the refusal row is durable.
+    """
+
+    def __init__(self, reason: str, cause: BaseException):
+        super().__init__(reason)
+        self.reason = reason
+        self.cause = cause
 
 
 def now_iso() -> str:
@@ -377,7 +427,8 @@ def _db_tip(conn: sqlite3.Connection) -> dict:
     )
 
 
-def _read_state(path: Path, label: str) -> dict | None:
+def _read_state(path: Path, label: str,
+                versions=SUPPORTED_STATE_VERSIONS) -> dict | None:
     if not path.exists():
         return None
     if path.is_symlink():
@@ -399,7 +450,8 @@ def _read_state(path: Path, label: str) -> dict | None:
         raise ChainStateError(f"invalid {label}: {exc}") from exc
     if not isinstance(value, dict):
         raise ChainStateError(f"malformed {label}")
-    if value.get("version") != WITNESS_VERSION:
+    version = value.get("version")
+    if isinstance(version, bool) or version not in versions:
         raise ChainStateError(f"unsupported {label} version")
     return value
 
@@ -440,6 +492,7 @@ def _bootstrap_witness(conn: sqlite3.Connection) -> None:
                     "VALUES (1, 1)"
                 )
                 conn.commit()
+            _restamp_witness_version(paths)
             return
         if marked:
             raise ChainStateError("chain witness is missing after initialization")
@@ -450,6 +503,64 @@ def _bootstrap_witness(conn: sqlite3.Connection) -> None:
             "INSERT INTO chain_state(singleton, witness_initialized) VALUES (1, 1)"
         )
         conn.commit()
+
+
+def _restamp_witness_version(paths: dict[str, Path]) -> None:
+    """Carry an older witness stamp forward without moving the tip it names.
+
+    The witness file's shape never changed, only the protocol stamp it shares
+    with the recovery journal. Rewriting the same ``(id, chain_hash)`` under
+    the current version is what keeps an archive that was last touched by an
+    older build usable by every consumer that pins the current one — backup's
+    bundle validation in particular. It is deliberately a no-op when the stamp
+    already matches, and it never invents or moves a tip.
+    """
+    witness = _read_state(paths["witness"], "chain witness")
+    if witness is None or witness.get("version") == WITNESS_VERSION:
+        return
+    if set(witness) != {"version", "id", "chain_hash"}:
+        raise ChainStateError("malformed chain witness")
+    tip = _read_tip(
+        {"id": witness.get("id"), "chain_hash": witness.get("chain_hash")},
+        "chain witness",
+    )
+    _atomic_json(paths["witness"], _witness_value(tip))
+
+
+def _recovery_outcomes(recovery: dict) -> tuple[dict, list[dict]]:
+    """The previous tip, and every tip this append was permitted to commit.
+
+    A v1 journal names one ``target``. A v2 journal enumerates the act *and*
+    every refusal the appender had already decided it might commit in the act's
+    place; all of their bytes were fixed before ``BEGIN``, so their chain
+    hashes were computable then.
+
+    This does not weaken the tamper check. The enumerated set contains only
+    outcomes this process itself was prepared to write, and a committed tip
+    outside ``{previous} | outcomes`` still raises. What it removes is a false
+    alarm: under v1, committing a refusal under the act's journal left a tip
+    matching neither side, and a benign crash was reported as ledger tampering.
+    """
+    version = recovery.get("version")
+    if version == 1:
+        if set(recovery) != {"version", "previous", "target"}:
+            raise ChainStateError("malformed chain recovery journal")
+        raw = [recovery.get("target")]
+    elif version == 2:
+        if set(recovery) != {"version", "previous", "outcomes"}:
+            raise ChainStateError("malformed chain recovery journal")
+        raw = recovery.get("outcomes")
+        if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_RECOVERY_OUTCOMES:
+            raise ChainStateError("malformed chain recovery journal")
+    else:  # pragma: no cover - _read_state already bounds the version
+        raise ChainStateError("unsupported chain recovery journal version")
+    previous = _read_tip(recovery.get("previous"), "recovery previous tip")
+    outcomes = [_read_tip(value, "recovery target tip") for value in raw]
+    if any(tip["id"] != previous["id"] + 1 for tip in outcomes):
+        raise ChainStateError("recovery journal does not describe one append")
+    if len({tip["chain_hash"] for tip in outcomes}) != len(outcomes):
+        raise ChainStateError("recovery journal enumerates one outcome twice")
+    return previous, outcomes
 
 
 def _recover_locked(conn: sqlite3.Connection, paths: dict[str, Path]) -> dict:
@@ -473,14 +584,9 @@ def _recover_locked(conn: sqlite3.Connection, paths: dict[str, Path]) -> dict:
             )
         return current
 
-    if set(recovery) != {"version", "previous", "target"}:
-        raise ChainStateError("malformed chain recovery journal")
-    previous = _read_tip(recovery.get("previous"), "recovery previous tip")
-    target = _read_tip(recovery.get("target"), "recovery target tip")
-    if target["id"] != previous["id"] + 1:
-        raise ChainStateError("recovery journal does not describe one append")
+    previous, outcomes = _recovery_outcomes(recovery)
     if previous != witnessed:
-        if target == witnessed and current == witnessed:
+        if witnessed in outcomes and current == witnessed:
             _unlink_durable(paths["recovery"])
             return current
         raise ChainStateError("recovery journal does not extend the witnessed tip")
@@ -490,9 +596,10 @@ def _recover_locked(conn: sqlite3.Connection, paths: dict[str, Path]) -> dict:
         # back the row. The append has zero durable effect.
         _unlink_durable(paths["recovery"])
         return current
-    if current == target:
-        # SQLite committed but the witness was not finalized. Complete exactly
-        # that already-durable append; never insert it again.
+    if current in outcomes:
+        # SQLite committed one of the outcomes this append had declared, but
+        # the witness was not finalized. Complete exactly the one that is
+        # already durable; never insert anything again.
         _atomic_json(paths["witness"], _witness_value(current))
         _unlink_durable(paths["recovery"])
         return current
@@ -677,6 +784,94 @@ def verify_chain_read_only(conn, root: Path | None = None) -> dict:
     return result
 
 
+def _prepare_row(cfg, source, kind, uri, content, content_hash, meta) -> dict:
+    """Sanitize and validate one event's bytes; return exactly what is stored.
+
+    Shared by the act and by every pre-declared refusal outcome, so a
+    core-recorded refusal passes the same capture-side privacy floor and the
+    same closed metadata schema as anything else. There is no cheaper path into
+    the archive for a row the core writes about itself.
+    """
+    for routing_value in (source, kind):
+        if (
+            not isinstance(routing_value, str)
+            or not routing_value
+            or len(routing_value) > 64
+            or sanitize_label(cfg, routing_value) != routing_value
+        ):
+            # Routing columns are outside the closed metadata schemas, so they
+            # must not become tiny arbitrary-content channels of their own.
+            # The error deliberately does not echo the rejected value.
+            raise SchemaError("event routing label is invalid")
+    try:
+        if content is not None:
+            content = sanitize_content(cfg, content)
+        if uri is not None:
+            uri = sanitize_content(cfg, uri)
+    except (TypeError, ValueError) as exc:
+        raise SchemaError("event content field is invalid") from exc
+    if kind == "egress":
+        meta = validate_egress_meta(cfg, meta)
+    else:
+        meta = validate_event_meta(cfg, source, kind, meta)
+    if content is not None:
+        # A caller-supplied digest of pre-sanitization bytes would make the
+        # archive claim to contain bytes it does not.  The stored digest is
+        # always derived here from the exact stored content instead.
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+    elif content_hash is not None and not (
+        isinstance(content_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", content_hash)
+    ):
+        raise SchemaError("event content digest is invalid")
+    return {
+        "source": source,
+        "kind": kind,
+        "uri": uri,
+        "content": content,
+        "content_hash": content_hash,
+        "meta": meta,
+        "meta_json": json.dumps(meta) if meta else None,
+    }
+
+
+def _insert_row(conn, eid: int, ts: str, row: dict, prev_hash: str,
+                chain: str, signing) -> None:
+    conn.execute(
+        "INSERT INTO events (id, ts, source, kind, uri, content, "
+        "content_hash, meta, prev_hash, chain_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            eid,
+            ts,
+            row["source"],
+            row["kind"],
+            row["uri"],
+            row["content"],
+            row["content_hash"],
+            row["meta_json"],
+            prev_hash,
+            chain,
+        ),
+    )
+    if signing is not None:
+        from .ledger_sig import sign_accepted_append
+        sign_accepted_append(
+            conn,
+            {
+                "id": eid,
+                "ts": ts,
+                "source": row["source"],
+                "kind": row["kind"],
+                "uri": row["uri"],
+                "content_hash": row["content_hash"],
+                "meta": row["meta_json"],
+            },
+            chain,
+            signing,
+        )
+
+
 def append_event_checked(
     conn,
     source,
@@ -689,6 +884,7 @@ def append_event_checked(
     prepare: Callable[[sqlite3.Connection, str], dict] | None = None,
     bind: Callable[[sqlite3.Connection, str, int], None] | None = None,
     fault: Callable[[str], None] | None = None,
+    refusals: dict | None = None,
 ) -> int:
     """Append under one witness-first lock/transaction with crash recovery.
 
@@ -713,6 +909,19 @@ def append_event_checked(
     ``fault`` is an explicit deterministic test hook; raising
     :class:`InjectedCrash` leaves the journal in the state a killed process
     would leave behind.
+
+    ``refusals`` maps a reason label to an alternate event
+    (``{"source", "kind", "uri", "content", "meta"}``) that this append may
+    commit **instead of** the act, when ``check`` or ``bind`` raises
+    :class:`Refusal` naming that label. The refusal is not the caller's second
+    append: it is committed by the same transaction that detected it, after a
+    ``ROLLBACK TO SAVEPOINT`` has undone everything the refused act touched, so
+    exactly one of {act, refusal} is ever durable. Their bytes are fixed here,
+    before ``BEGIN``, because the recovery journal has to name the chain hash
+    of every outcome this append is permitted to leave behind — otherwise a
+    crash between commit and witness-finalize would present a tip matching
+    neither side of the journal, and a benign crash would be reported as
+    tampering of the whole ledger.
     """
     # append_event historically committed any caller transaction. End it before
     # taking the witness lock so every writer observes the one global lock
@@ -726,63 +935,51 @@ def append_event_checked(
     # to remember (docs/SECURITY.md §6). Historical rows are never touched:
     # this runs only on the bytes of a new append.
     cfg = _append_config()
-    for routing_value in (source, kind):
-        if (
-            not isinstance(routing_value, str)
-            or not routing_value
-            or len(routing_value) > 64
-            or sanitize_label(cfg, routing_value) != routing_value
-        ):
-            # Routing columns are outside the closed metadata schemas, so they
-            # must not become tiny arbitrary-content channels of their own.
-            # The error deliberately does not echo the rejected value.
-            raise SchemaError("event routing label is invalid")
-    try:
-        if content is not None:
-            content = sanitize_content(cfg, content)
-        if uri is not None:
-            uri = sanitize_content(cfg, uri)
-    except (TypeError, ValueError) as exc:
-        raise SchemaError("event content field is invalid") from exc
-
-    def _validated(raw):
-        if kind == "egress":
-            return validate_egress_meta(cfg, raw)
-        return validate_event_meta(cfg, source, kind, raw)
-
     raw_meta = meta
-    meta = _validated(meta)
-    if content is not None:
-        # A caller-supplied digest of pre-sanitization bytes would make the
-        # archive claim to contain bytes it does not.  The stored digest is
-        # always derived here from the exact stored content instead.
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-    elif content_hash is not None and not (
-        isinstance(content_hash, str)
-        and re.fullmatch(r"[0-9a-f]{64}", content_hash)
-    ):
-        raise SchemaError("event content digest is invalid")
-    meta_json = json.dumps(meta) if meta else None
+    row = _prepare_row(cfg, source, kind, uri, content, content_hash, meta)
+    # Every declared refusal is sanitized and schema-checked here too, so a
+    # malformed refusal is refused at the caller rather than discovered inside
+    # the transaction it was supposed to rescue.
+    alternates = {
+        reason: _prepare_row(
+            cfg,
+            spec.get("source"),
+            spec.get("kind"),
+            spec.get("uri"),
+            spec.get("content"),
+            spec.get("content_hash"),
+            spec.get("meta"),
+        )
+        for reason, spec in sorted((refusals or {}).items())
+    }
+    if len(alternates) > MAX_RECOVERY_OUTCOMES - 1:
+        raise SchemaError("an append may declare only a bounded set of refusals")
     fault = fault or (lambda _phase: None)
     with _chain_lock(_connection_root(conn)) as paths:
         previous = _recover_locked(conn, paths)
         ts = now_iso()
         if prepare is not None:
             extra = prepare(conn, ts) or {}
-            meta = _validated({**(raw_meta or {}), **extra})
-            meta_json = json.dumps(meta) if meta else None
+            row = _prepare_row(
+                cfg, source, kind, uri, content, content_hash,
+                {**(raw_meta or {}), **extra},
+            )
         eid = previous["id"] + 1
-        chain = _chain_hash(
-            previous["chain_hash"],
-            eid,
-            ts,
-            source,
-            kind,
-            uri,
-            content,
-            content_hash,
-            meta_json,
-        )
+
+        def _tip_of(candidate: dict) -> str:
+            return _chain_hash(
+                previous["chain_hash"],
+                eid,
+                ts,
+                candidate["source"],
+                candidate["kind"],
+                candidate["uri"],
+                candidate["content"],
+                candidate["content_hash"],
+                candidate["meta_json"],
+            )
+
+        chain = _tip_of(row)
         # The cutover defines complete signature coverage.  Load/create the key
         # before BEGIN (the key registry may need one setup commit), then insert
         # both the event and its service signatures in the single append
@@ -791,62 +988,53 @@ def append_event_checked(
         from .ledger_sig import prepare_append_signing
         signing = prepare_append_signing(conn)
         target = {"id": eid, "chain_hash": chain}
+        refusal_tips = {
+            reason: {"id": eid, "chain_hash": _tip_of(candidate)}
+            for reason, candidate in alternates.items()
+        }
         _atomic_json(
             paths["recovery"],
             {
                 "version": WITNESS_VERSION,
                 "previous": previous,
-                "target": target,
+                "outcomes": [target, *refusal_tips.values()],
             },
         )
         committed = False
+        refused: Refusal | None = None
+        finalized = target
         try:
             conn.execute("BEGIN IMMEDIATE")
-            if check is not None:
-                check(conn, ts)
-            if bind is not None:
-                bind(conn, ts, eid)
-            conn.execute(
-                "INSERT INTO events (id, ts, source, kind, uri, content, "
-                "content_hash, meta, prev_hash, chain_hash) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    eid,
-                    ts,
-                    source,
-                    kind,
-                    uri,
-                    content,
-                    content_hash,
-                    meta_json,
-                    previous["chain_hash"],
-                    chain,
-                ),
-            )
-            if signing is not None:
-                from .ledger_sig import sign_accepted_append
-                sign_accepted_append(
-                    conn,
-                    {
-                        "id": eid,
-                        "ts": ts,
-                        "source": source,
-                        "kind": kind,
-                        "uri": uri,
-                        "content_hash": content_hash,
-                        "meta": meta_json,
-                    },
-                    chain,
-                    signing,
+            try:
+                # Everything the act touches is undoable without ending the
+                # transaction, so a refusal detected here can still commit in
+                # the act's place rather than losing the whole critical section.
+                conn.execute("SAVEPOINT contextd_act")
+                if check is not None:
+                    check(conn, ts)
+                if bind is not None:
+                    bind(conn, ts, eid)
+                _insert_row(conn, eid, ts, row, previous["chain_hash"], chain,
+                            signing)
+                conn.execute("RELEASE SAVEPOINT contextd_act")
+            except Refusal as exc:
+                if exc.reason not in alternates:
+                    raise
+                conn.execute("ROLLBACK TO SAVEPOINT contextd_act")
+                conn.execute("RELEASE SAVEPOINT contextd_act")
+                finalized = refusal_tips[exc.reason]
+                _insert_row(
+                    conn, eid, ts, alternates[exc.reason],
+                    previous["chain_hash"], finalized["chain_hash"], signing,
                 )
+                refused = exc
             fault("before_db_commit")
             conn.commit()
             committed = True
             fault("after_db_commit")
             fault("before_witness_finalize")
-            _atomic_json(paths["witness"], _witness_value(target))
+            _atomic_json(paths["witness"], _witness_value(finalized))
             _unlink_durable(paths["recovery"])
-            return eid
         except InjectedCrash:
             # Deliberately mirror abrupt process death. An uncommitted row is
             # rolled back when the test closes the connection; durable state is
@@ -861,6 +1049,11 @@ def append_event_checked(
             # future connect can finish the already-committed append exactly
             # once instead of mistaking a stale witness for tampering.
             raise
+    if refused is not None:
+        # The refusal row is durable and witnessed before the caller is told
+        # anything. It never had to cooperate to get evidence written.
+        raise refused.cause
+    return eid
 
 
 def append_event(
