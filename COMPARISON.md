@@ -188,7 +188,11 @@ rather than observability exhaust.
 - You want **one local binary rather than three hosted platforms**: a
   single-operator, single-host ledger with hardware-backed operator
   signatures, delegation grants, and integrity verification, with no network
-  dependency in the trust path.
+  dependency in the trust path. That last clause is true of the **default
+  SQLite backend only**. A PostgreSQL archive puts a database — and, if it is
+  not on loopback, a network — inside the trust path, and moves the tip into
+  the same system being attested. Choose the backend accordingly; the
+  single-host default is the one this bullet describes.
 
 ## 6. Known gaps
 
