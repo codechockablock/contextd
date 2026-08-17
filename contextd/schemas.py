@@ -67,6 +67,13 @@ class Field:
                     floor-redacted and bounded. Declared, not arbitrary.
       ``derivation``  kernel-stamped lineage record (fixed shape)
       ``attestation`` authority-plane authorization block (fixed shape)
+      ``artifact``  an instruction-position artifact's name: bounded text that
+                    is *refused* rather than rewritten if the privacy floor
+                    would change it (a pin whose subject was silently renamed
+                    pins nothing)
+      ``pins``      bounded list of (kind, name, digest) artifact triples
+      ``provenance``  what was in the context that produced one act (fixed
+                    shape; contextd/pinning.py)
     """
 
     kind: str
@@ -256,6 +263,26 @@ _MANDATE = {
     "nonce": Field("digest"),
 }
 
+#: What may occupy the instruction position. Closed, like every other
+#: vocabulary here: a kind not listed cannot be pinned at all.
+PIN_ARTIFACT_KINDS = ("skill", "tool", "prompt_fragment")
+
+#: How one artifact resolved against the pin registry at act time.
+#: ``pinned`` = trust-on-first-sight, this act established the pin;
+#: ``matched`` = the live pin and the presented bytes agree;
+#: ``diverged`` = they do not, and that is the whole point of the mechanism.
+PIN_STATUSES = ("pinned", "matched", "diverged")
+
+#: Why gate mode refused. ``pin_unknown`` is first sight — permitted in record
+#: mode by design (zero setup) and refused in a transaction path, because TOFU
+#: on a path that moves money is just trust.
+PIN_REFUSAL_REASONS = ("pin_unknown", "pin_diverged")
+
+MAX_ARTIFACT_NAME = 512
+MAX_SOURCE_LABEL = 256
+MAX_PIN_ARTIFACTS = 64
+MAX_UNTRUSTED_SOURCES = 64
+
 EVENT_SCHEMAS: dict = {
     ("gate", "egress_outcome"): {
         "egress_id": Field("int", required=True),
@@ -355,6 +382,66 @@ EVENT_SCHEMAS: dict = {
         "consumed_event": Field("int"),
         "action": Field("ident", max_len=MAX_LABEL),
         "scope": Field("scope"),
+    },
+    # --- instruction-position pinning (contextd/pinning.py) -----------------
+    #
+    # The mechanism is Microsoft's, deliberately. `agent-governance-rust/
+    # agentmesh-mcp/src/mcp/security.rs` digests a tool's description and input
+    # schema at registration and `check_rug_pull` compares them later; the
+    # Python control plane's `tool_registry.verify_tool_integrity` re-hashes a
+    # handler's source *before execution* and blocks on mismatch. Convergence
+    # with an independent implementation is evidence the shape is right, and
+    # nothing about digest-pinning an instruction-position artifact is new here.
+    #
+    # What is different is only where the pin lives. Theirs is a per-process
+    # `Mutex<HashMap>` — entirely reasonable for a per-session MCP scanner, and
+    # not a defect in that scope. Registering the vocabulary *here* makes a pin
+    # an ordinary chained, witnessed ledger event instead, so it outlives the
+    # process that took it and a divergence is evidence rather than a log line.
+    ("pin", "pin"): {
+        **_AUTHORITY,
+        # observe: trust on first sight. diverge: the artifact's bytes changed
+        # under a live pin. adopt: the operator signed off on the new bytes —
+        # the ONLY op that may move a pin, and the only one carrying an
+        # attestation block.
+        "op": Field("enum", required=True,
+                    choices=("observe", "diverge", "adopt")),
+        "artifact_kind": Field("enum", required=True,
+                               choices=PIN_ARTIFACT_KINDS),
+        "artifact": Field("artifact", required=True),
+        "digest": Field("digest", required=True),
+        "pinned_digest": Field("digest"),
+        "pin_event": Field("int"),
+        "session": Field("ident", max_len=128, stored_as="session_id"),
+        "session_id": Field("ident", max_len=128),
+    },
+    # Gate mode's refusal. Like ("tx", "refuse") it carries no attestation and
+    # no free text: the presented context is reproduced as digests, and which
+    # artifact diverged is recovered by folding the pin registry up to this
+    # event — deterministic, and not something the refused caller supplied.
+    ("pin", "refuse"): {
+        "reason": Field("enum", required=True, choices=PIN_REFUSAL_REASONS),
+        "context": Field("pins", required=True),
+        "context_digest": Field("digest", required=True),
+        "session": Field("ident", max_len=128, stored_as="session_id"),
+        "session_id": Field("ident", max_len=128),
+    },
+    # One act, labeled with the instruction-position digests and untrusted
+    # content sources that were in the context that produced it. Record mode
+    # and gate mode write this same row; the mode decides only whether a
+    # divergence also refuses.
+    ("act", "act"): {
+        "label": Field("ident", max_len=MAX_LABEL),
+        "provenance": Field("provenance", required=True),
+        "session": Field("ident", max_len=128, stored_as="session_id"),
+        "session_id": Field("ident", max_len=128),
+    },
+    # The explicit break in the transitive chain. Operator-authorized, because
+    # a chain break the model can write itself is a laundering primitive.
+    ("act", "barrier"): {
+        **_AUTHORITY,
+        "session": Field("ident", max_len=128, stored_as="session_id"),
+        "session_id": Field("ident", max_len=128),
     },
 }
 
@@ -656,6 +743,118 @@ def _check_derivation(cfg, name, value):
     return out
 
 
+def _check_artifact_name(cfg, name, value, max_len=MAX_ARTIFACT_NAME):
+    """An instruction-position artifact's name, refused rather than rewritten.
+
+    Every other free-text field here is sanitized in place, which is right for
+    a diagnostic label. It is wrong for this one: the name is half of what the
+    digest is a pin *on*, so silently renaming ``skills/deploy.md`` to something
+    the floor liked better would move the pin to a different subject without
+    anyone appending an event about it. Same reasoning as
+    ``attest.canonical_scope``.
+    """
+    if not isinstance(value, str) or not value or len(value) > max_len:
+        raise SchemaError(f"field {name!r} must be bounded, non-empty text")
+    if sanitize_text(cfg, value, max_len) != value:
+        raise SchemaError(
+            f"field {name!r} is rejected by the privacy floor; an artifact "
+            f"name is refused rather than rewritten"
+        )
+    return value
+
+
+def _check_pin_entry(cfg, name, entry, statuses=()):
+    """One artifact triple, optionally with how it resolved against the pin.
+
+    Fixed shape, like ``_check_derivation``: a caller cannot add keys to it.
+    """
+    if not isinstance(entry, dict):
+        raise SchemaError(f"field {name!r} entries must be mappings")
+    allowed = {"kind", "name", "digest"}
+    if statuses:
+        allowed |= {"status", "pinned", "pin_event"}
+    if set(entry) - allowed:
+        raise SchemaError(f"field {name!r} has undeclared nested fields")
+    if entry.get("kind") not in PIN_ARTIFACT_KINDS:
+        raise SchemaError(
+            f"field {name!r}.kind must be one of: "
+            f"{', '.join(PIN_ARTIFACT_KINDS)}"
+        )
+    out = {
+        "kind": entry["kind"],
+        "name": _check_artifact_name(cfg, f"{name}.name", entry.get("name")),
+        "digest": _check_digest(f"{name}.digest", entry.get("digest")),
+    }
+    if not statuses:
+        return out
+    if entry.get("status") not in statuses:
+        raise SchemaError(
+            f"field {name!r}.status must be one of: {', '.join(statuses)}"
+        )
+    out["status"] = entry["status"]
+    if "pinned" in entry:
+        out["pinned"] = _check_digest(f"{name}.pinned", entry["pinned"])
+    if "pin_event" in entry:
+        out["pin_event"] = _check_int(f"{name}.pin_event", entry["pin_event"])
+    return out
+
+
+def _check_pins(cfg, name, value):
+    if not isinstance(value, list) or len(value) > MAX_PIN_ARTIFACTS:
+        raise SchemaError(
+            f"field {name!r} must be a list of at most "
+            f"{MAX_PIN_ARTIFACTS} artifacts"
+        )
+    return [_check_pin_entry(cfg, name, entry) for entry in value]
+
+
+def _check_provenance(cfg, name, value):
+    """What was in the context that produced one act.
+
+    Two lists and a digest, and deliberately nothing else. This field is not a
+    verdict and carries no judgement: it names which instruction-position
+    digests and which untrusted content sources were present. Whether that
+    makes the act tainted is a *reduction* over these rows in id order
+    (``pinning.reduce_provenance``), not a value any single appender writes.
+    """
+    if not isinstance(value, dict):
+        raise SchemaError(f"field {name!r} must be a provenance record")
+    if set(value) - {"instructions", "untrusted", "context_digest"}:
+        raise SchemaError(f"field {name!r} has undeclared nested fields")
+    instructions = value.get("instructions", [])
+    if not isinstance(instructions, list) or len(instructions) > MAX_PIN_ARTIFACTS:
+        raise SchemaError(
+            f"field {name!r}.instructions must be a list of at most "
+            f"{MAX_PIN_ARTIFACTS} artifacts"
+        )
+    untrusted = value.get("untrusted", [])
+    if not isinstance(untrusted, list) or len(untrusted) > MAX_UNTRUSTED_SOURCES:
+        raise SchemaError(
+            f"field {name!r}.untrusted must be a list of at most "
+            f"{MAX_UNTRUSTED_SOURCES} sources"
+        )
+    out = {
+        "instructions": [
+            _check_pin_entry(cfg, f"{name}.instructions", entry, PIN_STATUSES)
+            for entry in instructions
+        ],
+        # An untrusted source is named, not quoted. The label is refused rather
+        # than rewritten for the same reason the artifact name is: it is an
+        # identity a lineage query joins on.
+        "untrusted": [
+            _check_artifact_name(
+                cfg, f"{name}.untrusted", source, MAX_SOURCE_LABEL
+            )
+            for source in untrusted
+        ],
+    }
+    if "context_digest" in value:
+        out["context_digest"] = _check_digest(
+            f"{name}.context_digest", value["context_digest"]
+        )
+    return out
+
+
 def _check_attestation(cfg, name, value):
     """The stored operator-authorization block. Written only by the authority
     plane; its exact shape lives in contextd/attest.py."""
@@ -703,6 +902,12 @@ def _coerce(cfg, name: str, spec: Field, value):
         return _check_derivation(cfg, name, value)
     if kind == "attestation":
         return _check_attestation(cfg, name, value)
+    if kind == "artifact":
+        return _check_artifact_name(cfg, name, value)
+    if kind == "pins":
+        return _check_pins(cfg, name, value)
+    if kind == "provenance":
+        return _check_provenance(cfg, name, value)
     if kind == "enum":
         if value not in spec.choices:
             raise SchemaError(
