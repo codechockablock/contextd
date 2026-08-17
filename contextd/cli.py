@@ -260,8 +260,8 @@ def cmd_grant(args):
     operator."""
     from datetime import datetime, timezone
 
-    from .grants import (GrantError, add_grant, grant_line, parse_duration,
-                         reduce_grants, revoke_grant)
+    from .grants import (GrantError, add_grant, grant_line, is_expired,
+                         parse_duration, reduce_grants, revoke_grant)
     from .loops import make_scope, scope_str
     conn = connect()
     try:
@@ -293,7 +293,9 @@ def cmd_grant(args):
             now = now_iso()
             shown = 0
             for g in red["grants"]:
-                expired = bool(g["expires"]) and g["expires"] <= now
+                # the same predicate the act-time gate uses: a listing that
+                # disagrees with the gate is an audit view that lies
+                expired = is_expired(g, now)
                 state = ("revoked" if g["revoked_by"] is not None
                          else "expired" if expired else "ACTIVE")
                 if state != "ACTIVE" and not args.all:

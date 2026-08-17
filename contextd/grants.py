@@ -13,7 +13,7 @@ enables is indistinguishable from a human act.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .db import append_event, now_iso
 from .loops import scope_str
@@ -44,6 +44,31 @@ def parse_duration(text: str) -> timedelta:
     raise GrantError(f"cannot parse duration {text!r} (use e.g. 90m, 8h, 3d)")
 
 
+def _instant(text) -> datetime | None:
+    """ISO timestamp -> aware UTC datetime, or None if it cannot be read.
+
+    A naive timestamp is read as UTC, matching now_iso()'s own form. That is
+    the fail-closed reading: for an operator west of UTC it retires the grant
+    earlier than a local-time reading would, never later.
+    """
+    try:
+        dt = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def normalize_expiry(text: str) -> str:
+    """Canonical UTC form, so a stored expiry sorts the way it compares and
+    every display of it agrees. Granting is the one place that can still
+    reject a bad timestamp loudly; after this the value is trusted bytes."""
+    dt = _instant(text)
+    if dt is None:
+        raise GrantError(f"cannot parse expiry {text!r} (use an ISO 8601 "
+                         f"timestamp, e.g. 2026-08-16T23:00:00+00:00)")
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def add_grant(conn, cls: str, scope: dict, expires: str | None = None,
               reason: str = "", client: str = "cli") -> dict:
     """Operator-recorded delegation. Idempotent against an identical active
@@ -55,10 +80,10 @@ def add_grant(conn, cls: str, scope: dict, expires: str | None = None,
         raise GrantError(f"{cls} does not accept {_scope_kind(scope)} scope "
                          f"(allowed: {', '.join(CLASSES[cls])})")
     if expires is not None:
-        datetime.fromisoformat(expires)  # validate now, fail loudly
+        expires = normalize_expiry(expires)  # validate now, fail loudly
     for g in active_grants(conn):
         if (g["class"] == cls and scope_str(g["scope"]) == scope_str(scope)
-                and g["expires"] == expires):
+                and _same_expiry(g["expires"], expires)):
             return {"result": "existing", "grant": g}
     meta = {"op": "grant", "class": cls, "scope": scope,
             "authority": "operator", "client": client}
@@ -135,14 +160,35 @@ def reduce_grants(conn) -> dict:
     return {"grants": list(grants.values()), "anomalies": anomalies}
 
 
-def _expired(grant: dict, now: str) -> bool:
-    return bool(grant["expires"]) and grant["expires"] <= now
+def _same_expiry(a: str | None, b: str | None) -> bool:
+    """Two stored expiries naming the same moment, however each was written."""
+    if a is None or b is None:
+        return a is b
+    ia, ib = _instant(a), _instant(b)
+    return ia == ib if (ia and ib) else a == b
+
+
+def is_expired(grant: dict, now: str | None = None) -> bool:
+    """Expiry compares *instants*, never ISO strings.
+
+    A lexical compare is not a temporal one once offsets differ: the string
+    '2026-08-16T23:00:00+05:00' sorts after a UTC now it actually precedes by
+    two hours, so a dead grant kept reading as live and the model went on
+    acting under it. An expiry that cannot be read at all counts as expired —
+    the one gate bounding delegated authority fails closed.
+    """
+    if not grant["expires"]:
+        return False
+    expires, current = _instant(grant["expires"]), _instant(now or now_iso())
+    if expires is None or current is None:
+        return True
+    return expires <= current
 
 
 def active_grants(conn, now: str | None = None) -> list[dict]:
     now = now or now_iso()
     return [g for g in reduce_grants(conn)["grants"]
-            if g["revoked_by"] is None and not _expired(g, now)]
+            if g["revoked_by"] is None and not is_expired(g, now)]
 
 
 def _covers(grant: dict, scope: dict | None) -> bool:

@@ -52,6 +52,76 @@ def test_reduction_grant_revoke_expiry_idempotence():
         parse_duration("soon")
 
 
+def _stored_grant(conn, expires: str, scope=None) -> int:
+    """A grant written straight into the ledger with a raw expiry — a grant
+    recorded before expiries were normalized. Append-only means those bytes
+    are permanent, so the read path is what has to be right."""
+    return append_event(conn, "grant", "grant", content="overnight",
+                        meta={"op": "grant", "class": "loop.confirm",
+                              "scope": scope or REPO_A,
+                              "authority": "operator", "expires": expires,
+                              "client": "cli"})
+
+
+def test_expiry_compares_instants_not_strings():
+    conn = connect()
+    # '...T23:00:00+05:00' is 18:00Z — two hours before this now, though it
+    # sorts *after* it as text. The lexical compare kept a dead grant alive.
+    _stored_grant(conn, "2026-08-16T23:00:00+05:00")
+    assert active_grant_for(conn, "loop.confirm", REPO_A,
+                            now="2026-08-16T20:00:00+00:00") is None
+
+    # the same bug in the other direction: '...T19:00:00-05:00' is 00:00Z the
+    # next day, sorts *before* this now, and was being retired while live
+    live = _stored_grant(conn, "2026-08-16T19:00:00-05:00", scope=REPO_B)
+    g = active_grant_for(conn, "loop.confirm", REPO_B,
+                         now="2026-08-16T20:00:00+00:00")
+    assert g is not None and g["id"] == live
+
+    # an expiry that cannot be read at all is treated as expired: the gate
+    # that bounds delegated authority fails closed
+    _stored_grant(conn, "tomorrow night", scope=make_scope("/home/sim/cape"))
+    assert active_grant_for(conn, "loop.confirm", make_scope("/home/sim/cape"),
+                            now="2026-08-16T20:00:00+00:00") is None
+
+
+def test_expiry_is_stored_canonical_and_validated():
+    conn = connect()
+    # far-future on purpose: dedupe only considers *active* grants, so a
+    # wall-clock-relative expiry would make this test time-dependent
+    g = add_grant(conn, "loop.confirm", REPO_A,
+                  expires="2099-03-01T23:00:00+05:00")["grant"]
+    assert g["expires"] == "2099-03-01T18:00:00+00:00"  # normalized at write
+
+    # the same moment written another way is the same grant, not a second one
+    again = add_grant(conn, "loop.confirm", REPO_A,
+                      expires="2099-03-01T18:00:00+00:00")
+    assert again["result"] == "existing" and again["grant"]["id"] == g["id"]
+
+    # an unreadable expiry is refused at grant time, as a GrantError the CLI
+    # renders as a refusal rather than a traceback
+    with pytest.raises(GrantError):
+        add_grant(conn, "loop.dismiss", GLOBAL, expires="tomorrow night")
+
+
+def test_grant_list_agrees_with_the_gate(capsys, monkeypatch):
+    """An audit view that disagrees with the act-time gate is a view that
+    lies; both sides run the same predicate."""
+    from types import SimpleNamespace
+
+    from contextd.cli import cmd_grant
+    conn = connect()
+    eid = _stored_grant(conn, "2026-08-16T23:00:00+05:00")
+    now = "2026-08-16T20:00:00+00:00"
+    assert active_grant_for(conn, "loop.confirm", REPO_A, now=now) is None
+
+    monkeypatch.setattr("contextd.db.now_iso", lambda: now)
+    cmd_grant(SimpleNamespace(action="list", all=True))
+    out = capsys.readouterr().out
+    assert f"[grant ev {eid}]" in out
+    assert "expired" in out and "ACTIVE" not in out
+
+
 def test_model_cannot_grant_to_itself():
     conn = connect()
     append_event(conn, "grant", "grant", content="sneaky",
