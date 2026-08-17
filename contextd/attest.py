@@ -83,6 +83,13 @@ ACTION_CLASSES = frozenset({
     "decision.supersede",
     "archive.raw_read", "archive.export", "archive.backup", "archive.restore",
     "security.key_register", "security.key_revoke",
+    # Instruction-position pinning (contextd/pinning.py). `pin.adopt` is the
+    # only thing that may move a pin, and `pin.barrier` the only thing that may
+    # break the transitive provenance chain. Both are here rather than in a
+    # module-local check so they go through the one authorization path: a
+    # second way to say "the operator approved this" is a second way to be
+    # wrong about it.
+    "pin.adopt", "pin.barrier",
 })
 
 DEFAULT_TTL_SECONDS = 300
