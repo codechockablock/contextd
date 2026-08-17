@@ -112,18 +112,24 @@ CREATE TABLE IF NOT EXISTS archive_identity (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   uuid      TEXT NOT NULL
 );
+-- These four tables are duplicated verbatim in contextd/ledger_sig.py, which
+-- applies them to archives the security migration touches. The two copies must
+-- stay byte-identical or a migrated archive and a fresh one diverge in schema
+-- while both report success; test_ddl_definitions_agree pins that.
 CREATE TABLE IF NOT EXISTS service_keys (
   key_id     TEXT PRIMARY KEY,
   public_pem TEXT NOT NULL,
   created    INTEGER NOT NULL,
-  retired    INTEGER
+  retired    INTEGER,
+  alg        TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256'
 );
 CREATE TABLE IF NOT EXISTS service_signatures (
   event_id   INTEGER PRIMARY KEY,
   key_id     TEXT NOT NULL,
   digest     TEXT NOT NULL,
   signature  TEXT NOT NULL,
-  signed_at  INTEGER NOT NULL
+  signed_at  INTEGER NOT NULL,
+  alg        TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256'
 );
 CREATE TABLE IF NOT EXISTS service_tips (
   tip_id     INTEGER PRIMARY KEY,
@@ -131,7 +137,17 @@ CREATE TABLE IF NOT EXISTS service_tips (
   key_id     TEXT NOT NULL,
   signature  TEXT NOT NULL,
   signed_at  INTEGER NOT NULL,
-  cutover    INTEGER NOT NULL DEFAULT 0
+  cutover    INTEGER NOT NULL DEFAULT 0,
+  alg        TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256'
+);
+CREATE TABLE IF NOT EXISTS service_checkpoints (
+  tip_id     INTEGER NOT NULL,
+  alg        TEXT NOT NULL,
+  chain_hash TEXT NOT NULL,
+  key_id     TEXT NOT NULL,
+  signature  TEXT NOT NULL,
+  signed_at  INTEGER NOT NULL,
+  PRIMARY KEY (tip_id, alg)
 );
 """
 
@@ -146,7 +162,12 @@ SUPPORTED_STATE_VERSIONS = (1, 2)
 #: A journal enumerating more outcomes than this is treated as malformed; the
 #: bound exists so a corrupt file cannot make recovery accept an open set.
 MAX_RECOVERY_OUTCOMES = 16
-SCHEMA_VERSION = 2
+#: Version 3 added the ``alg`` column to every signature table and the
+#: ``service_checkpoints`` table. It is a cutover rather than a silent upgrade
+#: because a version-2 archive has no ``alg`` column at all, so this build's
+#: inserts would fail against one — and because the repo's standing rule is
+#: that schema changes are declared and applied deliberately, not discovered.
+SCHEMA_VERSION = 3
 _PROCESS_CHAIN_LOCK = threading.RLock()
 
 
