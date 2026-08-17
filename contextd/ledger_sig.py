@@ -84,14 +84,10 @@ def _ensure(conn) -> None:
     receive these tables from ``contextd.db.SCHEMA`` and legacy archives receive
     them only through the explicit security migration.
     """
+    from .backends import table_names
+
     required = {"service_keys", "service_signatures", "service_tips"}
-    present = {
-        row[0]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
-    }
-    missing = required - present
+    missing = required - table_names(conn)
     if missing:
         raise LedgerSignatureError("service-signature schema is not installed")
 

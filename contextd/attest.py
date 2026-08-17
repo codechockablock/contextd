@@ -192,7 +192,12 @@ def archive_uuid(conn: sqlite3.Connection | None = None) -> str:
             return row["uuid"]
         value = secrets.token_hex(16)
         conn.execute(
-            "INSERT OR IGNORE INTO archive_identity(singleton, uuid) VALUES (1, ?)",
+            # ``ON CONFLICT DO NOTHING`` rather than SQLite's ``INSERT OR
+            # IGNORE``: same semantics, and the only spelling both backends
+            # accept. The re-SELECT below is what makes a concurrent loser
+            # return the winner's uuid instead of its own.
+            "INSERT INTO archive_identity(singleton, uuid) VALUES (1, ?) "
+            "ON CONFLICT (singleton) DO NOTHING",
             (value,),
         )
         conn.commit()

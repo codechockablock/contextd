@@ -303,7 +303,21 @@ def open_archive_for_migration(
     return conn
 
 
-def connect() -> sqlite3.Connection:
+def connect():
+    """Open the configured archive.
+
+    Dispatch is on ``CONTEXTD_DATABASE_URL`` alone (contextd/backends). Unset —
+    which is every existing install — takes the SQLite path below, unchanged and
+    unmigrated.
+    """
+    from .backends import active_backend, postgres_configured
+
+    if postgres_configured():
+        return active_backend().connect()
+    return connect_sqlite()
+
+
+def connect_sqlite() -> sqlite3.Connection:
     _guard_direct_access()
     # BEFORE mkdir, chmod, WAL, or schema application
     database = home() / "contextd.db"
@@ -366,7 +380,18 @@ def chain_state_paths(root: Path | None = None) -> dict[str, Path]:
     }
 
 
-def _connection_root(conn: sqlite3.Connection) -> Path:
+def _connection_root(conn) -> Path:
+    """The archive's filesystem root — blobs, scratch, and SQLite chain state.
+
+    A Postgres connection has no filesystem path, so it carries the root
+    explicitly instead of deriving one. Before that existed, this function was
+    the first line of the append path to run and the first to fail: `PRAGMA
+    database_list` returns nothing useful for a server-backed archive, so the
+    protocol could not even initialize, let alone race.
+    """
+    archive_root = getattr(conn, "archive_root", None)
+    if archive_root is not None:
+        return Path(archive_root)
     row = conn.execute("PRAGMA database_list").fetchone()
     database = row["file"] if isinstance(row, sqlite3.Row) else row[2]
     if not database:
@@ -606,9 +631,15 @@ def _recover_locked(conn: sqlite3.Connection, paths: dict[str, Path]) -> dict:
     raise ChainStateError("database tip matches neither side of recovery journal")
 
 
-def recover_chain_state(conn: sqlite3.Connection, root: Path | None = None) -> dict:
-    with _chain_lock(root or _connection_root(conn)) as paths:
-        return _recover_locked(conn, paths)
+def recover_chain_state(conn, root: Path | None = None) -> dict:
+    """Complete any interrupted append and return the reconciled tip.
+
+    Under the Postgres protocol there is nothing to complete — the tip commits
+    with the event — so the backend verifies the tip instead and returns it.
+    """
+    from .backends import backend_for
+
+    return backend_for(conn).reconcile(conn, root)
 
 
 def _chain_hash(
@@ -752,27 +783,18 @@ def verify_chain(conn, root: Path | None = None) -> dict:
 
 
 def verify_chain_read_only(conn, root: Path | None = None) -> dict:
-    """Verify rows and the external witness without recovery or mutation."""
+    """Verify rows and the attested tip without recovery or mutation.
+
+    Row recomputation is backend-independent and identical either way; what the
+    tip is attested *by* is not, so that half is the backend's.
+    """
+    from .backends import backend_for
+
     result = _verify_rows(conn)
     if not result["ok"]:
         return result
     try:
-        archive_root = root or _connection_root(conn)
-        witness = _read_state(
-            chain_state_paths(archive_root)["witness"], "chain witness"
-        )
-        if witness is None or set(witness) != {"version", "id", "chain_hash"}:
-            raise ChainStateError("chain witness is missing or malformed")
-        witnessed = _read_tip(
-            {"id": witness.get("id"), "chain_hash": witness.get("chain_hash")},
-            "chain witness",
-        )
-        current = _db_tip(conn)
-        if current != witnessed:
-            raise ChainStateError(
-                f"database tip {current['id']} does not match witnessed tip "
-                f"{witnessed['id']}"
-            )
+        backend_for(conn).verify_tip(conn, root)
     except ChainStateError as exc:
         return {
             "ok": False,
@@ -955,8 +977,18 @@ def append_event_checked(
     if len(alternates) > MAX_RECOVERY_OUTCOMES - 1:
         raise SchemaError("an append may declare only a bounded set of refusals")
     fault = fault or (lambda _phase: None)
-    with _chain_lock(_connection_root(conn)) as paths:
-        previous = _recover_locked(conn, paths)
+    from .backends import backend_for
+
+    backend = backend_for(conn)
+    with backend.append_scope(conn) as scope:
+        # The cutover defines complete signature coverage. Load/create the key
+        # before the append transaction opens — the key registry may need one
+        # setup commit of its own, and under the Postgres protocol the
+        # transaction is already holding the tip lock by the time ``acquire``
+        # returns, so a commit after that point would release it.
+        from .ledger_sig import prepare_append_signing
+        signing = prepare_append_signing(conn)
+        previous = scope.acquire()
         ts = now_iso()
         if prepare is not None:
             extra = prepare(conn, ts) or {}
@@ -980,31 +1012,22 @@ def append_event_checked(
             )
 
         chain = _tip_of(row)
-        # The cutover defines complete signature coverage.  Load/create the key
-        # before BEGIN (the key registry may need one setup commit), then insert
-        # both the event and its service signatures in the single append
-        # transaction below.  A crash can therefore produce neither or both,
-        # never an accepted-but-unsigned event.
-        from .ledger_sig import prepare_append_signing
-        signing = prepare_append_signing(conn)
         target = {"id": eid, "chain_hash": chain}
         refusal_tips = {
             reason: {"id": eid, "chain_hash": _tip_of(candidate)}
             for reason, candidate in alternates.items()
         }
-        _atomic_json(
-            paths["recovery"],
-            {
-                "version": WITNESS_VERSION,
-                "previous": previous,
-                "outcomes": [target, *refusal_tips.values()],
-            },
-        )
+        # Name every tip this append is permitted to leave behind. Under the
+        # SQLite protocol this is the fsynced recovery journal; under the
+        # Postgres protocol it is a no-op, because the event and the tip it
+        # produces commit together and no interrupted state exists to
+        # adjudicate.
+        scope.declare([target, *refusal_tips.values()])
         committed = False
         refused: Refusal | None = None
         finalized = target
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            scope.open_transaction()
             try:
                 # Everything the act touches is undoable without ending the
                 # transaction, so a refusal detected here can still commit in
@@ -1028,26 +1051,25 @@ def append_event_checked(
                     previous["chain_hash"], finalized["chain_hash"], signing,
                 )
                 refused = exc
+            scope.record_tip(finalized)
             fault("before_db_commit")
             conn.commit()
             committed = True
             fault("after_db_commit")
             fault("before_witness_finalize")
-            _atomic_json(paths["witness"], _witness_value(finalized))
-            _unlink_durable(paths["recovery"])
+            scope.publish(finalized)
         except InjectedCrash:
             # Deliberately mirror abrupt process death. An uncommitted row is
             # rolled back when the test closes the connection; durable state is
             # reconciled by the next connect/append/verify.
             raise
         except BaseException:
-            if not committed:
-                conn.rollback()
-                _unlink_durable(paths["recovery"])
-            # Once SQLite commits, the recovery journal is the durable bridge
-            # to the old witness. Preserve it on every later I/O failure so a
-            # future connect can finish the already-committed append exactly
-            # once instead of mistaking a stale witness for tampering.
+            # Once the database commits, the SQLite protocol's recovery journal
+            # is the durable bridge to the old witness, so ``abandon`` preserves
+            # it on every later I/O failure: a future connect finishes the
+            # already-committed append exactly once instead of mistaking a
+            # stale witness for tampering.
+            scope.abandon(committed=committed)
             raise
     if refused is not None:
         # The refusal row is durable and witnessed before the caller is told
