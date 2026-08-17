@@ -287,10 +287,52 @@ differ; rewriting them after verification would create false provenance.
      not redirect. Verified by mutation: with the digest removed from the
      covered arguments, the substitution test stops refusing and the archive
      is sealed to the attacker's key.
-- **Key loss**: losing the Secure Enclave key (device loss, key deletion)
-  makes new operator-authorized events impossible until a new key is enrolled.
-  Enrollment of the first key is an out-of-band service-admin act with closed
-  ownership and empty-registry preconditions; it is never an RPC. See
+- **Key loss**: losing every enrolled Secure Enclave key (device loss, key
+  deletion, a wiped Application Support) ends operator authority on that
+  archive **permanently**. This bullet used to say "until a new key is
+  enrolled", which named a recovery that does not exist. Both apparent exits
+  are closed, and it is worth stating exactly which:
+
+  1. **First-key bootstrap** refuses once the registry is non-empty —
+     `bootstrap_key`: *"first-key bootstrap is permanently closed once any key
+     exists"*. Revoking the lost key does not reopen it: `revoke_key` sets
+     `revoked` and the row persists, so the count never returns to zero. The
+     empty-registry precondition, once spent, can never be met again.
+  2. **Registering a replacement** (`security.key_register`) is authorized by
+     an *active* key — precisely what was lost. With the key revoked,
+     `prepare_action` refuses outright; with the registry row intact but the
+     `.sekey` handle gone, a challenge still mints and then cannot be signed,
+     because the handle is the only way to reach the Enclave key.
+
+  Restore does not rescue an archive in this state: a bundle carries
+  `contextd.db`, and the operator key registry lives inside it, so a restored
+  archive inherits the same non-empty registry. The unsigned legacy recovery
+  exception is non-hardened, one-time, and cannot authorize a snapshot with a
+  service-signature cutover. What remains is manual deletion of
+  `operator_keys` rows — no supported procedure, and in hardened mode not
+  available to the desktop UID at all.
+
+  The mitigation is therefore entirely **before** the loss, and it is the
+  operator's job, not the machinery's:
+
+      native/contextd-signer enroll --key-id spare > spare-key.der
+      ctx security key register spare-key.der --signer-tag spare
+
+  Any number of keys may be registered; two active keys are the intended
+  steady state. Because Enclave keys are device-bound and a `.sekey` handle is
+  device-specific ciphertext that cannot be copied or backed up, a spare
+  enrolled on *this* machine covers handle deletion and corruption only. If
+  the risk you care about is losing the machine, the spare must be enrolled on
+  a **second device**; only its public DER travels, and signatures made there
+  verify here because verification needs nothing but the public key.
+
+  One consequence to plan around: `operator_authorization` signs with the most
+  recently registered active key, so enrolling a spare makes it the default
+  signer. A spare whose handle lives on another machine will therefore break
+  local operator acts until the caller can select a key explicitly.
+
+  Enrollment of the first key remains an out-of-band service-admin act with
+  closed ownership and empty-registry preconditions; it is never an RPC. See
   `docs/OPERATOR_CEREMONY.md`. Later rotation is authorized by an active key.
 - **Crash**: the witness/recovery journal reconciles exactly one interrupted
   append. Nonce and capability consumption are atomic with the append they
