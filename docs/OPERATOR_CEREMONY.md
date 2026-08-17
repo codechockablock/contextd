@@ -65,6 +65,51 @@ Additional keys use the normal, already-attested path:
 The enrollment tag is registry metadata used to find the Secure Enclave key;
 it is not the SHA-256 key id. Re-registering a revoked key is refused.
 
+## Keeping a spare, and why it is not optional
+
+Do this while the first key still works. Once every enrolled key is gone the
+archive can never accept another operator act: bootstrap stays closed against
+a non-empty registry, and registering a replacement is authorized by an active
+key you no longer have. The full dead end is `docs/SECURITY.md` §8; the point
+here is that the only remedy is taken *before* the loss.
+
+Two active keys are the intended steady state, and the same already-attested
+path enrolls one — register it, do **not** revoke the first:
+
+```sh
+/usr/local/libexec/contextd/contextd-signer enroll --key-id spare \
+  > /tmp/contextd-spare-public.der
+/usr/local/libexec/contextd/ctx security key register \
+  /tmp/contextd-spare-public.der --signer-tag spare
+```
+
+What that buys depends on where the spare's handle lives, and the distinction
+matters more than it looks:
+
+- **Same machine.** Covers deletion or corruption of one `.sekey` handle. It
+  does not survive losing the machine — both handles die with it.
+- **Second device.** The only configuration that survives losing this one.
+  Enroll on that device, carry back its public DER (public material, like the
+  first key's), and register it here. Its signatures verify against this
+  archive because verification needs nothing but the public key.
+
+An Enclave handle is device-bound ciphertext. It cannot be copied to another
+machine or restored from a backup, so "back up the key" is not available and a
+second device is not a convenience.
+
+Selection follows registration order: acts sign with the most recently
+registered active key. After enrolling a spare on a *second* device, that key
+is the newest and this machine cannot sign for it, so local acts must name a
+key they can reach:
+
+```sh
+ctx --signer-key primary grant add loop.confirm --repo /path --for 8h
+```
+
+`ctx security key list` shows both columns the flag accepts, and a wrong tag
+refuses by naming the keys that are actually registered rather than failing at
+the signer.
+
 ## Honest limits
 
 The automated suite exercises the complete ceremony with real P-256

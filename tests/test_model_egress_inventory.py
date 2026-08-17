@@ -20,6 +20,11 @@ EXPECTED_SUBPROCESS_CALLS = {
         "the macOS Secure Enclave signer helper; it receives only the exact "
         "canonical bytes to be signed and no archive content, and it is not a "
         "model",
+    ("contextd/attest.py", "local_signer_tags", "run"):
+        "`contextd-signer list`, which prints the enrollment tags whose Enclave "
+        "handle exists on this machine; it is passed no arguments beyond the "
+        "subcommand and no stdin, so no archive bytes can reach it, and it is "
+        "not a model",
     ("hooks/health_sweep.py", "_live_launchctl", "run"):
         "launchctl list, read-only local service state; nothing from the "
         "archive is passed and it is not a model",

@@ -58,6 +58,12 @@ DEFAULTS = {
         # behaviour — see docs/DEPLOYMENT.md.
         "mode": "development",
         "socket": "",                    # default: <home>/authd.sock
+        # There is deliberately no signer-selection key here. Selecting among
+        # already-registered keys authorizes nothing, but config must not name
+        # a signer in any sense — test_config_and_env_cannot_name_a_signer
+        # keeps the word out of the config surface entirely so no future
+        # setting can grow signing semantics. Per-act selection is
+        # `ctx --signer-key TAG` (contextd/cli.py), which is not ambient.
         # An independently protected checkpoint destination the desktop uid
         # cannot rewrite. Empty means rollback resistance is INCOMPLETE, and
         # `ctx security doctor` says so rather than passing.

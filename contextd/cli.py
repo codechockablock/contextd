@@ -223,6 +223,68 @@ def _print_loop_row(lp):
           f"{_scope_label(lp['scope'])}\n    {lp['text']}")
 
 
+#: Set once from `ctx --signer-key TAG` in main(); empty means "use the
+#: configured default". Read only by _signer_choice, which is the single place
+#: the signing key is chosen.
+_SIGNER_KEY_FLAG = ""
+
+
+def _signer_choice() -> str:
+    """The enrollment tag that should sign, or '' for the registry default.
+
+    Flag only, never config: selecting among already-registered keys
+    authorizes nothing (each is a registered key, each use still costs a
+    presence gesture, and the nonce binds the key id its challenge was minted
+    for), but `test_config_and_env_cannot_name_a_signer` keeps signer
+    semantics out of the config surface entirely so no later setting can grow
+    into a signing path. A per-act flag is not ambient, so it does not.
+    """
+    return _SIGNER_KEY_FLAG
+
+
+def _select_signer(keys: list[dict], wanted: str) -> dict:
+    """Resolve the chosen tag against the active keys, or exit saying why.
+
+    Matches an enrollment tag first, then a key id prefix, so either column of
+    `ctx security key list` works.
+    """
+    if not wanted:
+        return keys[-1]
+    for key in keys:
+        if key["signer_tag"] == wanted or key["key_id"].startswith(wanted):
+            return key
+    available = ", ".join(
+        f"{k['signer_tag'] or '(untagged)'} ({k['key_id'][:12]}…)" for k in keys
+    )
+    sys.exit(
+        f"refused: no active operator key matches signer key {wanted!r}.\n"
+        f"  registered and active: {available}\n"
+        f"  choose one with `ctx --signer-key TAG …` or [security] signer_key"
+    )
+
+
+def _signing_failure(exc, tag: str) -> str:
+    """Turn a bare signer failure into the remedy, when the cause is local.
+
+    The common case after enrolling a spare on a second device: the registry
+    knows the key, this machine does not hold its handle, and the helper says
+    only "no Secure Enclave key for tag …". An Enclave handle cannot be copied
+    between devices, so the fix is to sign with a key this machine holds.
+    """
+    if "no Secure Enclave key" not in str(exc):
+        return f"refused: {exc}"
+    from .attest import local_signer_tags
+    local = local_signer_tags()
+    return (
+        f"refused: {exc}\n"
+        f"  this machine holds no Enclave handle for tag {tag!r}. Handles are "
+        f"device-bound and cannot be copied between machines.\n"
+        f"  handles on this machine: {', '.join(local) or '(none)'}\n"
+        f"  sign with one of those: `ctx --signer-key TAG …`, or run this act "
+        f"on the device that holds {tag!r}"
+    )
+
+
 def operator_authorization(conn, action: str, scope: str = "global",
                            arguments: dict | None = None,
                            content: str | None = None,
@@ -240,10 +302,17 @@ def operator_authorization(conn, action: str, scope: str = "global",
                          registered_keys, sign_with_secure_enclave,
                          verify_action, SIGNER_SECURE_ENCLAVE,
                          test_mode_authorization)
+    wanted = _signer_choice()
     if service.hardened():
         try:
+            key_id = ""
+            if wanted:
+                active = [k for k in service.operator_keys() if not k["revoked"]]
+                if not active:
+                    raise AttestationError("no active operator key is registered")
+                key_id = _select_signer(active, wanted)["key_id"]
             prepared = service.prepare_action(
-                action, scope, arguments, content, reason
+                action, scope, arguments, content, reason, key_id=key_id
             )
             if prepared["signer"] != SIGNER_SECURE_ENCLAVE:
                 raise AttestationError(
@@ -251,11 +320,14 @@ def operator_authorization(conn, action: str, scope: str = "global",
                 )
             print(f"authorize: {prepared['human_summary']}")
             print(f"  digest {prepared['digest'][:16]}…  (approve on your device)")
-            signature = sign_with_secure_enclave(
-                bytes.fromhex(prepared["canonical"]), prepared["signer_tag"],
-                display_content=prepared["display_content"],
-                display_reason=prepared["display_reason"],
-            )
+            try:
+                signature = sign_with_secure_enclave(
+                    bytes.fromhex(prepared["canonical"]), prepared["signer_tag"],
+                    display_content=prepared["display_content"],
+                    display_reason=prepared["display_reason"],
+                )
+            except AttestationError as exc:
+                sys.exit(_signing_failure(exc, prepared["signer_tag"]))
             return SignedAction(prepared["action"], signature)
         except (AttestationError, service.RpcError) as exc:
             sys.exit(f"refused: {exc}")
@@ -280,17 +352,21 @@ def operator_authorization(conn, action: str, scope: str = "global",
                 f"<der> --signer-tag <tag>)\n"
                 f"({exc})"
             )
-    key_id = keys[-1]["key_id"]
-    prepared = prepare_action(key_id, action, scope=scope, arguments=arguments,
-                              content=content, reason=reason, conn=conn)
+    selected = _select_signer(keys, wanted)
+    prepared = prepare_action(selected["key_id"], action, scope=scope,
+                              arguments=arguments, content=content,
+                              reason=reason, conn=conn)
     print(f"authorize: {prepared['human_summary']}")
     print(f"  digest {prepared['digest'][:16]}…  (approve on your device)")
     try:
         signature = sign_with_secure_enclave(
-            bytes.fromhex(prepared["canonical"]), keys[-1]["signer_tag"],
+            bytes.fromhex(prepared["canonical"]), selected["signer_tag"],
             display_content=prepared["display_content"],
             display_reason=prepared["display_reason"],
         )
+    except AttestationError as exc:
+        sys.exit(_signing_failure(exc, selected["signer_tag"]))
+    try:
         return verify_action(prepared["action"], signature, conn=conn)
     except AttestationError as exc:
         sys.exit(f"refused: {exc}")
@@ -1159,6 +1235,11 @@ def cmd_serve(args):
 
 def main():
     p = argparse.ArgumentParser(prog="ctx", description="contextd v0")
+    p.add_argument("--signer-key", default="", metavar="TAG",
+                   help="enrollment tag (or key-id prefix) of the operator key "
+                        "that signs this act; default is the most recently "
+                        "registered active key, which is wrong when that key's "
+                        "Enclave handle lives on another device")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init", help="create ~/.contextd (db, config, blob store)")
@@ -1380,6 +1461,8 @@ def main():
     )
 
     args = p.parse_args()
+    global _SIGNER_KEY_FLAG
+    _SIGNER_KEY_FLAG = args.signer_key or ""
     try:
         {"init": cmd_init, "note": cmd_note, "ingest": cmd_ingest,
          "watch": cmd_watch,

@@ -1097,6 +1097,25 @@ def _signer_helper() -> Path:
     return helper
 
 
+def local_signer_tags() -> list[str]:
+    """Enrollment tags whose Enclave handle exists on THIS machine.
+
+    Diagnostic only, and deliberately not an input to any decision: a handle
+    being present says nothing about whether its key is registered, and the
+    registry says nothing about which handles are local. Callers use this to
+    explain a signing failure, never to pick a key.
+    """
+    try:
+        proc = subprocess.run([str(_signer_helper()), "list"],
+                              capture_output=True, timeout=10)
+    except (AttestationError, OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    tags = proc.stdout.decode("utf-8", errors="replace").split()
+    return [t for t in tags if _SIGNER_TAG.fullmatch(t)]
+
+
 def _assert_test_mode_ok() -> None:
     """The software signer exists only for tests, and must be unmistakable.
 
