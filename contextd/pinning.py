@@ -7,38 +7,19 @@ agent is following what it correctly believes are its instructions, and the
 record is honest all the way down. A skill is a delegation the operator never
 signed, and ``contextd/grants.py`` already refuses that shape for grants.
 
-Prior art, stated plainly rather than worked around
+Prior art
 -----------------------------------------------------------------------
 
 **Microsoft's ``agent-governance-toolkit`` already built this mechanism**, and
-this module is deliberately convergent with it. At commit ``7d0cef5``:
-
-* ``agent-governance-rust/agentmesh-mcp/src/mcp/security.rs`` (~124-130)
-  computes ``description_hash = sha256_hex(&tool.description)`` and
-  ``schema_hash = sha256_hex(&serde_json::to_string(&tool.input_schema)?)`` when
-  a tool registers; ``check_rug_pull`` (~153-181) compares both later and
-  reports which of description/schema changed.
-* ``agent-governance-python/agent-os/modules/control-plane/src/
-  agent_control_plane/tool_registry.py``: ``verify_tool_integrity`` (~361-375)
-  re-hashes the handler's source and compares it against the registration-time
-  hash. It runs **before execution** (~265) and on mismatch it **blocks** —
-  returning ``{"success": False, "error": "Tool integrity verification failed:
-  ..."}``. It does not merely warn.
-* ``agent-marketplace`` signs plugin manifests with Ed25519 and binds the
-  artifact SHA-256 into the signed bytes; the installer fails closed.
-
-Digest-pinning an instruction-position artifact and enforcing it before
-execution is therefore **not novel here**, and nothing in this file claims it
-is. Two independent implementations arriving at the same shape is evidence the
-shape is right; the error would have been inventing a different one to look
-different. Their code was read as prior art and none of it was copied.
-
-Citation provenance, since it matters more than the citations: the four bullets
-above were verified firsthand against a read-only clone at ``7d0cef5`` during
-this repo's gate-v1 pre-flight, and are reproduced here from that record. They
-were **not** re-verified while this module was written — no checkout was
-present. Line numbers are approximate and named by enclosing function so they
-survive upstream edits.
+this module is deliberately convergent with it: their MCP scanner fingerprints
+tool descriptions and schemas at registration and reports what changed, and
+their tool registry re-hashes handler source before execution and blocks on
+mismatch — it does not merely warn. Digest-pinning an instruction-position
+artifact and enforcing it before execution is therefore not novel here, and
+nothing in this file claims it is. Two independent implementations arriving at
+the same shape is evidence the shape is right. Their code was read as prior
+art (upstream commit ``7d0cef5``; full file/line citations in
+``docs/reviews/lane-2-goal-prompt.md``) and none of it was copied.
 
 The one thing that is actually different
 -----------------------------------------------------------------------

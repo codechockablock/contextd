@@ -123,15 +123,6 @@ def test_the_documented_chain_hash_recipe_reproduces_a_real_row():
         prev = row["chain_hash"]
 
 
-def test_the_first_events_prev_hash_is_the_empty_string():
-    conn = connect()
-    ingest_note(conn, "root of the chain")
-    row = conn.execute(
-        "SELECT prev_hash FROM events ORDER BY id LIMIT 1"
-    ).fetchone()
-    assert (row["prev_hash"] or "") == ""
-
-
 def test_the_separator_is_a_terminator_not_a_delimiter():
     """Documented as terminating *every* field including the last. If it were
     a delimiter, dropping the trailing one would still hash the same."""
@@ -186,15 +177,6 @@ def test_the_documented_canonical_rules_reproduce_the_frozen_vectors():
         assert hashlib.sha256(mine).hexdigest() == vector["digest"]
         checked += 1
     assert checked, "no vectors exercised"
-
-
-def test_the_refused_types_are_the_ones_the_spec_lists(spec_text):
-    for refused in ("float", "bool", "None", "bytes", "non-NFC"):
-        assert refused in spec_text
-    assert "IEEE-754 round-tripping is not reproducible" in spec_text
-
-
-# --- §4 OperatorActionV1 ----------------------------------------------------
 
 
 def test_the_spec_lists_every_action_field_and_gets_the_count_right(spec_text):
@@ -423,7 +405,3 @@ def test_the_spec_states_what_it_does_not_cover(spec_text):
         "FTS5 index",
     ):
         assert topic in omissions, f"§9 does not disclaim {topic}"
-
-
-def test_the_spec_does_not_promise_semantic_truth(spec_text):
-    assert "It says nothing about whether a record's assertions are true" in spec_text

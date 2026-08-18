@@ -57,10 +57,8 @@ none of them is a defect for its stated purpose:
    no transaction boundary: `audit_logger.start_trace()` at line 180 writes a
    `'pending'` row, `policy_engine.check_violation()` runs as a separate call
    at line 186, then `audit_logger.log_violation()` updates that row at line
-   190. (A note on naming: an earlier read of this code referred to this as
-   the "`check_and_log` path"; no function of that name exists — the enclosing
-   method is `intercept_tool_execution`, in both its sync and async variants,
-   the async twin beginning at line 226.)
+   190. (the enclosing method is `intercept_tool_execution`, in both its
+   sync and async variants)
 2. **Records are buffered, not durable at act time.** `_queue_write`
    (`flight_recorder.py`, line 241) appends under a lock to an in-memory
    `deque` (`_write_buffer`, line 117); the flush happens when `batch_size`
@@ -130,8 +128,7 @@ across a large SaaS estate is the strongest version of that capability on the
 market, and the standards-first approach is a serious attempt at an industry
 protocol rather than a proprietary silo.
 
-**Stated precisely, because an earlier revision of this document was wrong
-about it:** Okta's standards work here is the **Cross App Access / Identity
+**Stated precisely:** Okta's standards work here is the **Cross App Access / Identity
 Assertion JWT Authorization Grant** draft, whose lead author is Aaron Parecki
 of Okta. That draft *profiles* two pre-existing OAuth foundations — **RFC 8693**
 (Token Exchange, January 2020) and **RFC 8707** (Resource Indicators, February
@@ -173,7 +170,7 @@ pinning**, which contextd adopted rather than invented.
 
 ### On the pinning row, precisely
 
-Because this row was wrong in two earlier revisions in opposite directions, it
+This row
 is worth being exact about what is and is not claimed.
 
 **Conceded as prior art:** Microsoft pins tool definitions and blocks before
@@ -320,9 +317,7 @@ alongside so the record shows what changed and why.
   live schema migration are likewise SQLite-only, and the weekly restore drill
   does not cover a Postgres archive at all. Multi-host is therefore a real
   capability with a real hole in its operational story.
-- **Refusals are recorded by the core — for redemption, and not everywhere.**
-  *(Was: "Refusal rows are the caller's act. A caller that dies before
-  recording its refusal leaves the nonce state as the only trace.")* The
+- **Refusals are recorded by the core — for redemption, and not everywhere.** The
   three-state redemption path now writes its own refusal inside the detecting
   transaction. But **a mandate can still get stuck in flight**: if the act's
   callback raises an unknown exception or returns an oversized outcome, the
@@ -334,27 +329,15 @@ alongside so the record shows what changed and why.
   The in-flight state was never reached in 160 observed worker outcomes under
   natural contention — it is exercised only by a test built to force it.
 - **I pin the instruction surface, and the pin binds the caller's claim, not
-  the file.** *(Was: "I do not pin the instruction surface … Microsoft's
-  toolkit already does this and contextd does not.")* contextd never opens the
-  artifact; it pins the bytes the caller said it read. Four attacks survive by
-  construction (`contextd/pinning.py`):
-  1. **TOCTOU** — mutating the file between the digest and the read.
-  2. **Incomplete labels** — presenting three of four loaded skills produces
-     an honest-looking act, and nothing here can tell
-     (`::test_the_provenance_label_is_a_claim_about_context_not_a_measurement`).
-  3. **Poisoned at first sight** — TOFU catches mutation, never malice present
-     the first time; gate mode's refusal of unknown digests is the only answer
-     (`::test_record_mode_pins_an_artifact_that_arrived_poisoned`).
-  4. **Renaming the position** — the pin is on a position, so an attacker who
-     can create positions picks a new one
-     (`::test_a_renamed_artifact_is_a_new_first_sight`).
-
-  None of these is unique to contextd; the same four hold for every
-  registration-time digest scheme, prior art included. A claim that pins bind
-  the model's actual context window is **not** earned and is not made.
+  the file.** contextd never opens the artifact; it pins the bytes the caller
+  said it read. Four attacks survive by construction — TOCTOU, incomplete
+  labels, poisoned-at-first-sight, position renaming — each named and pinned
+  by test in `contextd/pinning.py`, the authoritative enumeration. None is
+  unique to contextd; all four hold for every registration-time digest
+  scheme, prior art included. A claim that pins bind the model's actual
+  context window is **not** earned and is not made.
 - **The commerce vocabulary exists, and it is a vocabulary, not a domain
-  model.** *(Was: "I have no commerce event schemas … Orders, payments,
-  refunds, settlement — none of that exists.")* `mandate.bind`, `tx.execute`,
+  model.** `mandate.bind`, `tx.execute`,
   `tx.refuse`, and `tx.inflight` are registered and tested. Orders, payments,
   refunds, and settlement still do not exist. Four words for *authorization
   lifecycle* is not a commerce system, and a `note` event is still not an

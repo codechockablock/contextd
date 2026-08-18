@@ -512,9 +512,6 @@ checkpoint (§9) exported to a destination the database host cannot rewrite.
 **That export is not built. It is still owed**, and until it exists a
 multi-host archive's integrity story ends at "the application credential
 cannot forge it."
-
-Origin: `docs/reviews/lane-4-goal-prompt.md` and the Lane 4 merge into
-`1c5b1c8`. The reasoning is preserved verbatim in the module docstring at
 `contextd/backends/postgres.py:85–115`.
 
 ### Consequences to plan around

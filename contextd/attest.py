@@ -1079,41 +1079,24 @@ def refusal_reason(exc: BaseException) -> str:
 #: the nonce — a refused act must not burn the operator's signature, or anyone
 #: who can provoke a refusal could destroy an authorization the operator paid a
 #: presence gesture for. The cost of that correct choice is that a single valid
-#: authorization can be re-presented forever, and each attempt appends a
-#: core-written, chained, signed row. That is an unbounded write channel into an
-#: append-only archive: nothing is forged, nothing is false, and the archive
-#: still grows without limit (merge-audit finding, gate-v1.1).
+#: authorization can be re-presented forever, each attempt appending a
+#: core-written, chained, signed row: an unbounded write channel into an
+#: append-only archive.
 #:
-#: Why this mitigation does not weaken evidence. The first `cap` refusals of
-#: each distinct reason are recorded exactly as before. What is dropped is the
-#: (cap+1)-th identical repetition, which carries no information the first
-#: `cap` do not already carry: the refusal event's bytes are a pure function of
-#: (authorization, reason) — `_refusal_event` derives every field from the
-#: signed action and reproduces nothing the caller supplied — so repetitions are
-#: *byte-identical apart from chain position and the seconds-precision timestamp*. Evidence is what the rows
-#: say, and after the first one of a reason they say the same thing.
+#: Dropping the (cap+1)-th repetition of a reason loses no evidence: the
+#: refusal event's bytes are a pure function of (authorization, reason) —
+#: `_refusal_event` derives every field from the signed action — so
+#: repetitions are byte-identical apart from chain position and the
+#: seconds-precision timestamp. The budget is per (nonce, reason) because the
+#: reasons are distinct allegations; provoking one can never suppress the
+#: recording of another, and the total stays bounded at
+#: `cap * len(REFUSAL_REASONS)` rows per authorization. Over budget the caller
+#: still receives the identical exception — the cap governs the row, never the
+#: refusal (see `_refuse_redemption`).
 #:
-#: Why the budget is per (nonce, reason) rather than per nonce. The reasons are
-#: not interchangeable: `act_mismatch` says an authorization was aimed at a
-#: different act, `already_consumed` says a spent signature was presented again,
-#: `intent_mismatch` says a bound mandate was re-aimed. Each is a distinct
-#: allegation and each keeps its own budget, so provoking one reason can never
-#: suppress the recording of another. The total remains bounded, at
-#: `cap * len(REFUSAL_REASONS)` rows per authorization.
-#:
-#: What is NOT dropped: the refusal itself. Over budget, the caller receives
-#: the identical exception it would have received under budget. The cap governs
-#: whether a new row is written, never whether the act is refused.
-#:
-#: Why the default is 64 and not something tight. The property that closes the
-#: hole is that the bound is *finite*, not that it is small, and a default low
-#: enough to be reached by honest behaviour would be a worse bug than the one
-#: it fixes — sixteen clients racing one authorization is a real shape this
-#: archive already tests (`test_sixteen_racing_appenders_yield_one_act_and_
-#: fifteen_core_refusals`), and losing rows there would drop evidence the
-#: operator has a live reason to read. 64 clears realistic concurrent-retry
-#: bursts with margin while bounding one authorization to at most
-#: `64 * len(REFUSAL_REASONS)` = 320 rows instead of unbounded.
+#: 64 because the bound must be *finite*, not small: a default reachable by
+#: honest behaviour (sixteen clients racing one authorization is a tested
+#: shape) would drop rows the operator has a live reason to read.
 DEFAULT_MAX_REFUSALS_PER_NONCE = 64
 
 #: Config key in the `[security]` table. Zero or negative disables the cap and

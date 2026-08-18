@@ -108,8 +108,8 @@ triggers, rewrite `events`, and set `chain_tip` to match. Against that actor the
 in-database tip is worth nothing, and the SQLite deployment — where the same
 actor would additionally need write access to a *different machine's*
 filesystem — was strictly better. Closing that gap requires a tip attested
-outside the database, which is a periodic signed checkpoint (`service_tips`,
-Lane 3), not a per-append file. Per-append is exactly the shape that does not
+outside the database, which is a periodic signed checkpoint
+(`ledger_sig.py`), not a per-append file. Per-append is exactly the shape that does not
 port. This backend therefore treats the in-database tip as the concurrency and
 continuity authority, and an external checkpoint as the anti-owner-tampering
 authority, and does not pretend either one does the other's job.

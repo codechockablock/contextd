@@ -21,9 +21,9 @@ is the test that keeps it that way.
 What the Regulation actually says, and what it does not
 -------------------------------------------------------------------------
 
-The program this module was written for carried three wrong beliefs about
-Regulation (EU) 2024/1689. All three are corrected here, because a compliance
-artifact citing the wrong article is worse than no artifact.
+Three common misreadings of Regulation (EU) 2024/1689, corrected here
+because a compliance artifact citing the wrong article is worse than no
+artifact.
 
 * **Article 12 is a design requirement on the system, not a retention rule.**
   It requires that a high-risk AI system technically allow for the automatic
@@ -169,10 +169,10 @@ def _checkpoint_coverage(conn, tables: set, tip_id: int) -> dict:
         str(r["alg"])
         for r in conn.execute("SELECT DISTINCT alg FROM service_checkpoints")
     })
-    try:
-        interval = int(checkpoint_interval())
-    except Exception:
-        interval = 0
+    # No fallback: a bug in reading the interval must surface, not silently
+    # report "checkpointing disabled" in a compliance artifact — the one
+    # document where a misreport matters most.
+    interval = int(checkpoint_interval())
     return {
         "supported": "yes",
         "configured_interval_events": interval,

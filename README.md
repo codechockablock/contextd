@@ -161,18 +161,9 @@ Postgres backend existing. The one-time SQLite→Postgres archive migration is
 implemented and tested (`test_migration_sqlite_to_postgres_preserves_the_chain`);
 what does not exist is ongoing *schema* migration of a live Postgres archive.
 
-**The trade is real and runs in the honest direction.** On SQLite the database
-and the witness are two files in one directory under one uid: whoever can
-rewrite events can rewrite the witness a microsecond later. Postgres removes
-that adjacency and gives the *application credential* a privilege separation
-SQLite never had — contextd's own credential cannot rewrite history or forge
-the tip. But a Postgres superuser, the table owner, or root on the database
-host can disable the triggers, rewrite `events`, and set the tip to match in
-one internally consistent transaction, and there is no external witness there
-to contradict them. Against that actor SQLite was strictly better, because the
-same actor would additionally need write access to a *different machine's*
-filesystem. Closing it needs a periodic signed checkpoint exported off the
-database host. **Not built. Still owed.** See
+**The trade:** Postgres gives the application credential a privilege
+separation SQLite never had, but has no external witness — a database
+superuser can rewrite history and tip together. Full analysis:
 [docs/SECURITY.md](docs/SECURITY.md) §10.
 
 ---
@@ -333,12 +324,9 @@ Briefly, with pointers:
   SQLite backend only**.
 - **No encryption at rest, no plugin system, no UI, no screen capture, no
   embeddings.** Each gets built when a concrete, logged failure demands it.
-- **No trajectory scoring.** Advisory trajectory-evidence scoring was built,
-  measured, and **dropped by operator decision** (2026-08-17): its detector's
-  calibrated true-positive rate did not transfer from the development corpus
-  to a held-out slice (100% → 40%), and a score that weak belongs in an eval
-  report, not a ledger. The measurement is the artifact worth keeping. It is
-  not in this package and its numbers are not product claims.
+- **No trajectory scoring.** Built, measured, dropped: the detector did not
+  transfer to held-out data, and a score that weak belongs in an eval report,
+  not a ledger.
 
 ---
 

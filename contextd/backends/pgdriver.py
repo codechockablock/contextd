@@ -99,10 +99,6 @@ class PGCursor:
         """
         return self._cursor.rowcount
 
-    @property
-    def lastrowid(self):  # pragma: no cover - present for API parity only
-        return None
-
     def close(self) -> None:
         self._cursor.close()
 
@@ -114,9 +110,8 @@ class PGConnection:
         self._connection = connection
         self._in_transaction = False
         #: Postgres has no filesystem path, so the archive root that SQLite
-        #: derives from ``PRAGMA database_list`` must be supplied explicitly.
-        #: This is finding (1) in the lane brief: without it the very first
-        #: line of the append path raises before anything interesting happens.
+        #: derives from ``PRAGMA database_list`` must be supplied explicitly;
+        #: without it the very first line of the append path raises.
         self.archive_root = archive_root
         #: Accepted and ignored; rows are always :class:`Row`.
         self.row_factory = None

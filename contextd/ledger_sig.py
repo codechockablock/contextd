@@ -1226,7 +1226,7 @@ def write_checkpoint(conn, destination: Path | str) -> Path:
 # SQLite file or a Postgres superuser — they are worth nothing on their own:
 # rewriting the chain and rewriting the checkpoint rows are the same privilege,
 # so the attacker produces an archive that is internally consistent at a state
-# of their choosing. Both Lane 3 and Lane 4 flagged this during Gate v1.0.
+# of their choosing.
 #
 # The fix is not cryptographic, because there is nothing wrong with the
 # cryptography. It is *positional*: the same signed records, kept somewhere the

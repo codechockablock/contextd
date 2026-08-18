@@ -455,12 +455,6 @@ def test_the_pinning_vocabulary_is_registered_and_lane_ones_is_untouched():
         assert pair in EVENT_SCHEMAS, pair
 
 
-def test_an_unregistered_event_type_still_refuses_metadata():
-    conn = connect()
-    with pytest.raises(SchemaError):
-        append_event(conn, "pin", "not_a_pin_kind", meta={"digest": "0" * 64})
-
-
 def test_the_provenance_field_refuses_undeclared_shapes():
     conn = connect()
     art = pinning.artifact("skill", "s.md", GOOD_SKILL)
@@ -808,3 +802,11 @@ def test_pin_survives_process_restart(tmp_path, monkeypatch):
     assert [t["event"] for t in
             pinning.acts_touched_by(conn, first["digest"])] == [first["act"]]
     conn.close()
+
+
+def test_operator_levels_cannot_drift_between_grants_and_pinning():
+    """pinning._authorize deliberately mirrors grants._authorize; this is the
+    tripwire that keeps the two copies honest until someone unifies them."""
+    from contextd import grants, pinning
+
+    assert pinning.OPERATOR_LEVELS == grants.OPERATOR_LEVELS

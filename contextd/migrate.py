@@ -154,7 +154,7 @@ def plan(conn) -> dict:
 #: cosmetic documentation slip: it makes the dry run *under-report what apply
 #: will do*, which is the one thing an operator runs a dry run to learn.
 #:
-#: `redemptions` was missing until gate-v1.1. It is applied by `DB_SCHEMA` like
+#: `redemptions` was once missing from this set. It is applied by `DB_SCHEMA` like
 #: the rest of the authority-plane tables, so migration created it either way —
 #: the bug was entirely in what the plan promised, which is the half the
 #: operator reads before consenting.

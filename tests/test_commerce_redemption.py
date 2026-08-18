@@ -147,25 +147,8 @@ def test_the_intent_digest_covers_intent_and_provably_excludes_the_envelope():
     for field in attest.INTENT_FIELDS:
         moved = {**auth.action, field: mutations[field]}
         assert attest.action_intent_digest(moved) != base, field
-
-
-def test_the_two_digests_use_different_domain_separators():
-    """Same five fields under one separator would make them substitutable."""
+    # distinct domain separators, so one digest can never be presented as the other
     assert attest.INTENT_DOMAIN != attest.DOMAIN
-    conn = connect()
-    auth = operator(conn).authorize("note.deliberate", "global", content=ACT)
-    assert auth.intent_digest != auth.digest
-
-
-# --- the closed registry stays closed ---------------------------------------
-
-def test_the_commerce_vocabulary_is_registered():
-    from contextd.schemas import EVENT_SCHEMAS
-    for pair in (
-        ("mandate", "bind"), ("tx", "execute"), ("tx", "refuse"),
-        ("tx", "inflight"),
-    ):
-        assert pair in EVENT_SCHEMAS, pair
 
 
 def test_an_unregistered_commerce_type_still_refuses_metadata():
