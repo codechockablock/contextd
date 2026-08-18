@@ -22,12 +22,11 @@ Everything the machinery cannot do for you, with the exact act.
    merged code 2026-08-15; a denied scan now records no-access in its
    cursor, `ctx status` warns from that state, and the first good scan
    self-clears it.
-2. **Morning review ritual** while the grant-calibration field window
-   accrues (docs/GRANT_CALIBRATION.md): `ctx loop list`, review each
-   model-granted confirmation since the last review — silence after review
-   is agreement; `VETO:` / `VETO-HARMFUL:` close-reasons are the exact
-   tally markers. Check bars:
-   `.venv/bin/python experiments/grant_calibration/field_tally.py`.
+2. **Open a NEW grant-calibration field window when the post-gate-v1 code
+   settles** (docs/GRANT_CALIBRATION.md): the r1 window is CLOSED as of
+   2026-08-18 — see Decisions. Opening act: `ctx grant add loop.confirm
+   --repo /Users/joseph/contextd --for <duration>`, then resume the morning
+   review ritual for confirmations made under the new window.
 
 Resolved 2026-08-15 (evening), by the operator: **production signer
 enrolled** — key `0885eb01…` (secure_enclave, tag=default); first signed
@@ -41,6 +40,16 @@ under r1 metadata authority, are expired and inert, and the confirmations
 they enabled still count in the field tally.
 
 ## Decisions
+
+- 2026-08-18 — Operator: **grant-calibration field window r1 CLOSED at 2/20
+  confirmations, 2 grant-active days, 0 vetoes — a regime break, not a
+  calibration verdict.** gate-v1 landed mid-window (schema 3, new vocabulary,
+  new operator acts), so accruing the remaining 18 samples into the same
+  window would mix two systems under one measurement. Both seed loops
+  (#42848, #42914) closed as OVERTAKEN, explicitly not vetoed: the model's
+  confirmations were sound when made. Continuation grant ev 45893 revoked
+  (revocation ev 45907). A fresh window opens post-settle; its tally starts
+  at 0/20 and its numbers must never be pooled with r1's.
 
 - 2026-08-18 — Operator rulings, batch: unified-stack Apache relicense merged
   and pushed (public master no longer AGPL); the frontier-ops/unified-stack
