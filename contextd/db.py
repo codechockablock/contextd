@@ -261,7 +261,7 @@ def _guard_direct_access() -> None:
     matter: in a hardened deployment it still cannot read the file, and in a
     development deployment there is no boundary to defeat.
     """
-    from .authd import hardened, is_service_process
+    from .authority_mode import hardened, is_service_process
     if not hardened() or is_service_process():
         return
     raise DirectAccessRefused(

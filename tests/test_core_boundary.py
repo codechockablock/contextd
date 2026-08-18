@@ -26,6 +26,9 @@ PKG = Path(__file__).resolve().parents[1] / "contextd"
 CORE = frozenset({
     "__init__",
     "attest",
+    # the two authority-plane predicates db.connect and attest consult before
+    # they will open or bootstrap an archive (lane T, ruling R6)
+    "authority_mode",
     "canonical",
     "capability",
     "compliance",
