@@ -145,26 +145,31 @@ they enabled still count in the field tally.
   L4 scratch drafts only, per operator ruling. Spec amendable via its
   changelog until first fixture, immutable after (§10 marker cites its
   hash + ENV.lock + WEIGHTS.lock).
-- **Next:** the making half — compose/timing engine + `gen` backends
-  (llama.cpp + deterministic stub) + template authoring (real setA/setB
-  pools, T1–T4, GBNF) → `plan` output committed → ENV.lock/WEIGHTS.lock
-  on the desktop → corpus generation there (~1.5 GPU-days
-  single-stream, sharded) → §9 leakage probe before anything
-  downstream. The judging half is done: `plan` @ `0c03b51`;
-  `replay`/`verify`/`probe`/`manifest` @ `c50b813`, integration-tested
-  against live contextd (unauthorized barrier → anomaly; §7.4 reading
-  pinned by test), 72 tests green.
+- **Next:** the desktop tranche — author `ENV.lock`/`WEIGHTS.lock` on the
+  4070 Ti (llama.cpp build, GGUF sha256s), commit the real `plan` output,
+  then run `gen --backend llamacpp` for the corpus (~1.5 GPU-days
+  single-stream, sharded) and re-run the §9 probe on the *real* corpus
+  before anything downstream. The whole harness is done and validated on
+  the stub: `plan` @ `0c03b51`; `replay`/`verify`/`probe`/`manifest` @
+  `c50b813`; **compose/backends/timing/templates/`gen` @ `e8f3eac`**.
+  Family A (commerce) + family B (procurement) templates authored,
+  independently. 157 tests green; the end-to-end stub corpus PASSES the
+  leakage probe at AUROC 0.513 (≤0.55) — after the probe caught a real
+  compose leak at 0.624 and it was fixed at source. CLI plan+gen
+  byte-deterministic; 556 shard fixtures schema-valid; gate-invisible 43%.
 - **Blockers:** — (repo naming outstanding, non-blocking; kill date
   2026-10-16 stands)
-- **Last update:** 2026-08-18 — harness core landed @ `0c03b51`
-  (md-signal): frozen-constants module with contextd-vocabulary drift
-  tests against the live schema, canonical regen hashing, seed
-  derivation, structural ids, pool loader, and the `plan` verb — 57
-  tests green, CLI smoke byte-identical across runs, 4,500 rows matching
-  the §5.2 arithmetic, quota breaches raise instead of write. The two
-  §7.3/§7.4 spec rulings were ratified by the operator ("rulings
-  stand"; spec changelog updated). No fixture exists; prereg freeze
-  window still open.
+- **Last update:** 2026-08-18 — making half landed (`e8f3eac`); the whole
+  Phase-1 harness is code-complete and stub-validated. Six pre-generation
+  realization decisions recorded in the FACTORY-SPEC changelog
+  (timing twin-identical in v0; template-defined intents; add=suppress
+  balance; nuisance features over the non-construct subset;
+  additive-not-substitutive gate signals; schema stub-allowance). The §9
+  probe caught a real compose leak at AUROC 0.624 and the source fix took
+  it to 0.513 — logged as the machinery working pre-GPU. No corpus
+  fixture exists yet; the prereg freeze window is still open. The
+  first-fixture marker fires when `gen --backend llamacpp` writes the real
+  corpus on the desktop (after ENV.lock/WEIGHTS.lock).
 
 ## Done
 
