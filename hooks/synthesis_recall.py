@@ -38,6 +38,13 @@ from contextd.redact import sanitize_content  # noqa: E402
 from contextd.gate import (GateError, disclose, record_dispatch_outcome,  # noqa: E402
                            select_items, verify_anchors)
 
+# contextd.gate dispatches retrieval through a provider that contextd.search
+# registers at import time (lane T). A process that assembles a disclosure
+# without importing it gets an empty candidate set, not an error — importing it
+# here is what keeps this script's recall working. Pinned by
+# tests/test_gate_retrieval_hook.py::test_every_retrieval_caller_registers.
+import contextd.search  # noqa: F401
+
 CLAUDE_BIN = os.environ.get("SYNTH_CLAUDE_BIN", "claude")
 
 # The fused-with-ids objective, validated in exp #41485. Keep in sync with

@@ -31,6 +31,8 @@ from .search import timeline
 # loop or decision event through a half-populated registry: every daemon process
 # starts at one of the four entry points that carry this import.
 from . import decisions, loops  # noqa: F401
+# aliased: mcp_server and service define their own `search` function
+from . import search as _search_registration  # noqa: F401
 
 CONFIG_TEMPLATE = '''# contextd config — merged over built-in defaults (see contextd/__init__.py)
 

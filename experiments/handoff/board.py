@@ -55,6 +55,13 @@ from experiments.handoff.common import (REPO, RESULTS, contextd_home,  # noqa: E
                                         extract_citations, record, run_claude,
                                         view_conn)
 from experiments.handoff.livethreads import episodes  # noqa: E402  (same
+
+# contextd.gate dispatches retrieval through a provider that contextd.search
+# registers at import time (lane T). A process that assembles a disclosure
+# without importing it gets an empty candidate set, not an error — importing it
+# here is what keeps this script's recall working. Pinned by
+# tests/test_gate_retrieval_hook.py::test_every_retrieval_caller_registers.
+import contextd.search  # noqa: F401
 # horizon/quiescence constants: 24h, >=2 msgs, 1200s — fixed by that trial)
 
 CLAUDE_BIN = "claude"

@@ -8,7 +8,35 @@ import re
 from .db import append_event, append_event_checked, now_iso
 from .domains import blocked, load_skip_domains
 from .redact import redact
-from .search import search
+
+#: How the gate finds candidate events to consider disclosing. The daemon
+#: registers contextd.search here at its own import time; the evidence core
+#: does not name it, because retrieval is a consumer of the record rather than
+#: part of its lifecycle (lane T, ruling R1/R5).
+#:
+#: **No provider is the fail-closed state.** With nothing registered there are
+#: no candidates, so `select_items` returns nothing and `disclose` has nothing
+#: to disclose or to log. That is the safe direction for a gate: it discloses
+#: LESS, never more. Contrast contextd/domains.py, whose no-op default would
+#: have discloses MORE and is therefore core rather than a hook.
+_RETRIEVAL = None
+
+
+def register_retrieval_provider(provider) -> None:
+    """Declare how candidate events are found.
+
+    `provider(conn, query, *, limit, since, until) -> list[row]`, each row
+    carrying at least `id` and `uri`. Last registration wins.
+    """
+    global _RETRIEVAL
+    _RETRIEVAL = provider
+
+
+def _search(conn, query, *, limit, since, until):
+    if _RETRIEVAL is None:
+        return []
+    return _RETRIEVAL(conn, query, limit=limit, since=since, until=until)
+
 
 __all__ = [
     "GateError",
@@ -182,7 +210,8 @@ def select_items(
     themselves live outside the kernel until an experiment earns them."""
     items, used = [], 0
     seen_uris = set()
-    hits = search(conn, query, limit=40, since=since or None, until=until or None)
+    hits = _search(conn, query, limit=40, since=since or None,
+                   until=until or None)
     if ranked_ids is not None:
         by_id = {h["id"]: h for h in hits}
         hits = [by_id[i] for i in ranked_ids if i in by_id]
