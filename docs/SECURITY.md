@@ -461,6 +461,180 @@ would be a distinguisher, which is an attack. Tests:
 
 ---
 
+## 10. The PostgreSQL trust trade
+
+Everything above §9 describes the **SQLite** deployment, where the archive is a
+file and its tip is witnessed by a second file beside it. The PostgreSQL
+backend (`contextd/backends/postgres.py`) keeps every semantic guarantee and
+moves the trust boundary. That move is not free in either direction, and both
+directions are stated here.
+
+### What Postgres gains
+
+On SQLite, "can write the database" and "can write the witness" are the **same
+capability**, because the database *is* a file: whoever can rewrite `events`
+can rewrite `chain-witness.json` a microsecond later, under one uid, in one
+directory. §3 layer 2 already says the local witness is defeated by this
+attacker.
+
+Postgres replaces that filesystem adjacency with a **privilege separation the
+database enforces on every statement**. `harden_roles` grants the application
+role `INSERT` and `SELECT` on `events` and **not** `UPDATE`, `DELETE`, or
+`TRUNCATE`; a PL/pgSQL trigger refuses all three regardless of grants; and the
+chain tip is advanced only through a `SECURITY DEFINER` function, so the
+application role holds no write privilege on the tip either. The consequence is
+the property that matters: **the credential contextd itself uses cannot rewrite
+history or forge the tip.** SQLite has no counterpart — there, the appending
+process owns the file and can `DROP TRIGGER` at will.
+
+Tests: `tests/test_postgres_backend.py::test_backend_immutability_update_on_a_committed_event_is_refused`,
+`::test_backend_immutability_delete_is_refused`,
+`::test_backend_immutability_truncate_is_refused`,
+`::test_backend_immutability_appender_role_has_no_update_privilege`,
+`::test_backend_chain_fork_is_refused_by_the_database`.
+
+### What Postgres loses — stated without hedging
+
+**A Postgres superuser, the table owner, or root on the database host can
+disable the triggers, rewrite `events`, and set the chain tip to match, in one
+internally consistent transaction.** Against that actor the in-database tip is
+worth nothing, because the thing being attested and the thing attesting it are
+the same system. There is **no external witness on this backend**: a Postgres
+archive has no `chain-witness.json` and no recovery journal, by design — the
+per-append external file is exactly the shape that does not port across hosts.
+
+Against that actor the SQLite deployment was **strictly better**, because the
+same actor would additionally need write access to a *different machine's*
+filesystem.
+
+Closing this requires a tip attested outside the database — a periodic signed
+checkpoint (§9) exported to a destination the database host cannot rewrite.
+**That export is not built. It is still owed**, and until it exists a
+multi-host archive's integrity story ends at "the application credential
+cannot forge it."
+
+Origin: `docs/reviews/lane-4-goal-prompt.md` and the Lane 4 merge into
+`1c5b1c8`. The reasoning is preserved verbatim in the module docstring at
+`contextd/backends/postgres.py:85–115`.
+
+### Consequences to plan around
+
+- **Backup, handoff, ingest, and schema migration are SQLite-only.** The bundle
+  machinery uses SQLite's online backup API (`contextd/backup.py:834–839`),
+  which has no PostgreSQL counterpart. A Postgres archive therefore cannot
+  currently be backed up by `ctx backup`, and the weekly restore drill does not
+  cover it.
+- **Search refuses rather than degrading.** FTS5 has no equivalent, and
+  silently changing ranking and snippets under the same API would be worse than
+  a refusal (`SearchUnsupported`).
+- **The zero-network property does not hold here.** `psycopg` opens a network
+  connection unless the database is on a local socket. Worse, the gate that
+  enforces the no-network claim (`scripts/gates.sh`) is a **lexical grep** whose
+  vocabulary does not contain `psycopg`, so the one change that genuinely gave
+  contextd network capability was invisible to it. The blind spot is recorded
+  here rather than papered over; the README's zero-network claim is scoped to
+  the default SQLite backend.
+
+---
+
+## 11. Two threat models, and which claims serve which
+
+§1 states the attacker. It is worth separating the two *purposes* this contract
+serves, because a claim that is strong under one can be weak under the other.
+
+### Model A — the hostile same-UID agent
+
+The one enumerated in §1: an untrusted model or agent running as the normal
+desktop user, controlling every argument and environment variable. This is the
+model almost everything above is written against. Its defining feature is that
+the attacker owns the filesystem the archive lives on, which is why §3 layers 1
+and 2 are explicitly conceded to it, and why layer 3 plus a protected
+checkpoint is the answer.
+
+### Model B — adjudication between distrusting parties
+
+A different question: **later, someone disputes what happened, and the archive
+is the evidence.** Here the adversary is not necessarily live — it is a party
+with an interest in the record reading differently, possibly the archive's own
+owner, possibly acting after the fact.
+
+Under Model B the properties that matter are not the same ones:
+
+| Property | Model A | Model B |
+|---|---|---|
+| Hash chain (§3.1) | conceded — attacker recomputes | catches accidental and casual alteration; establishes ordering |
+| External witness (§3.2) | conceded — attacker rewrites it | detects tail truncation by anyone without simultaneous access |
+| Service signature (§3.3) | the load-bearing layer | load-bearing, **and only if the key was service-owned at signing time** |
+| Exported checkpoint (§8) | the rollback answer | **the strongest evidence available**, because it is out of the owner's reach |
+| Single-use consumption (§4, S5) | prevents a live double-spend | proves *which* act an authorization was spent by, after the fact |
+| Record format (`docs/FORMAT.md`) | irrelevant | **essential** — evidence a third party cannot parse is not evidence |
+
+Two honest consequences:
+
+1. **A development-deployment archive is weak under Model B.** The service key
+   sits beside the archive under the same uid, so the archive's owner could
+   have re-signed anything. `ctx security doctor` reports which case applies,
+   and an adjudicator should ask.
+2. **The strongest Model-B artifact this system can produce is an exported,
+   independently held checkpoint** — and for a PostgreSQL archive that export
+   does not exist yet (§10).
+
+Nothing in this contract claims to adjudicate *truth*. A signature binds bytes
+and a chain binds order; §5's excluded-claims list applies undiminished.
+
+---
+
+## 12. The injection surface
+
+contextd ingests untrusted text by design — watched files, browser titles and
+URLs, and model dialogue — and some of it is later assembled into prompts. That
+is a prompt-injection surface and is treated as one.
+
+**The foundation, from `docs/AGENTS.md`: no agent that reads untrusted content
+can be made immune to prompt injection.** That is stated as the premise, not a
+caveat, and the word "immune" is not used anywhere about anything that reads
+untrusted text.
+
+What the contract actually provides:
+
+- **The kernel never calls a model.** Every model-dispatching component lives
+  in `hooks/` and is a client subject to the same gate as any other caller. An
+  injection in a watched file cannot reach a kernel decision, because the
+  kernel makes no model-mediated decisions.
+- **The trifecta rule** (`docs/AGENTS.md`): no component holds all three of
+  untrusted-content reading, broad capability, and egress. Whatever reads raw
+  untrusted bytes is the least capable thing in the system.
+- **Structured verdicts carry no attacker text.** The health sweep and the
+  liveness gauge emit content-NULL events and name check names only, never
+  detail strings, precisely so attacker-influenceable text cannot ride into a
+  later trusted prompt.
+- **Untrusted sources are named, never quoted.** An act's provenance label
+  carries bounded source *labels* and digests, capped at
+  `MAX_UNTRUSTED_SOURCES`, and a label is refused rather than rewritten if the
+  privacy floor would change it (`contextd/schemas.py:816–850`).
+- **Instruction-position pinning** (§ `contextd/pinning.py`) addresses the
+  narrower case of untrusted content arriving *as instruction* — a mutated
+  skill or tool definition. Its four surviving attacks are enumerated in that
+  module and are not claimed to be closed.
+- **Injection claims are empirical-only.** Per `docs/AGENTS.md`, a resistance
+  claim requires planted-injection corpora run against the actual role with
+  preregistered obedience-rate bars. "0/N planted injections obeyed" is a
+  sayable result; "immune" is not.
+
+**Not claimed:** that a model reading a contextd recall bundle will ignore an
+instruction embedded in an ingested document. Nothing here makes that true, and
+the redaction floor (§6) is a secret-shape filter, not an instruction filter.
+
+---
+
+## Reporting a vulnerability
+
+Private disclosure, process, and an explicit list of properties that are
+*openly not claimed* (so a report against one is not a finding): the root
+[`SECURITY.md`](../SECURITY.md), per GitHub convention. No bug bounty.
+
+---
+
 ## Deployment states
 
 | State | Meaning | `doctor --strict` |
@@ -488,6 +662,11 @@ would be a distinguisher, which is an attack. Tests:
 | Signed backup manifests | implemented, tested |
 | Encrypted export | implemented, tested — X25519/HKDF-SHA256/ChaCha20-Poly1305 sealed to a configured recipient, whose sha256 the operator's signed action covers. No recipient is configured on this tree, so export refuses here. |
 | Migration (append-only, idempotent, crash-safe), frozen legacy fixture, crash/concurrency tests, future-schema refusal | implemented, tested |
+| Storage-backend seam; PostgreSQL archive with DB-enforced immutability and in-database tip | implemented, tested — **but** its 18 tests skip unless a server is configured, so a default `pytest` run does not exercise this backend at all (§10) |
+| External checkpoint export for a PostgreSQL archive | **not built.** A Postgres archive has no external witness; §10 |
+| Backup, handoff, ingest, schema migration on PostgreSQL | **not built** — SQLite-only (§10) |
+| Record format specified independently of this codebase (`docs/FORMAT.md`, `contextd-record-format v1`) | implemented, tested — `tests/test_format_spec.py` re-derives the chain hash and canonical encoding from the document and checks them against real rows |
+| EU AI Act logging-evidence export (`ctx compliance`) | implemented, tested — deterministic, read-only, no verdict, no model. Reports measurements, not compliance |
 
 **This repository is in `development`.** No service has been installed, no key
 enrolled, no export recipient configured, and no migration run against a live

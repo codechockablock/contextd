@@ -1,467 +1,399 @@
 # contextd
 
-A personal context daemon: an **append-only life log** + **index** + **gate**,
-served to AI clients over **MCP**. One local daemon, a SQLite ledger plus a
-small crash-recovery witness, no cloud.
+**contextd is a detailed ledger of what humans and AIs do on a computer — one
+that can't be quietly rewritten, and that an AI's authorization is spent
+*inside*, in the same transaction as the act. Nothing happens off the books.**
 
-The four kernel jobs, each in its smallest honest form:
+One local daemon. A SQLite ledger (or PostgreSQL, for multi-host), an FTS
+index, a disclosure gate, and an authority plane. No cloud, no account, no
+hosted service.
 
-| Job | v0 implementation |
-|---|---|
-| **Log** | Append-only `events` table (SQLite WAL); DB triggers enforce immutability; each event extends a hash chain whose external tip detects loss of the final row; oversized files use a content-addressed blob store |
-| **Index** | FTS5 over event content (embeddings are v0.1, only after lexical search fails you in a documented way) |
-| **Gate** | Every archive-derived outbound payload passes one disclosure primitive: never-leave rules, redaction, and a pre-dispatch `egress` receipt recording the exact disclosed bytes, committed atomically with the budget decision (the budget itself is denominated in estimated tokens, `len/4`) |
-| **Scheduler** | The budget counter, derived entirely from egress events in the log itself |
+Most systems in this space record a decision *next to* the act. contextd makes
+the authorization a row that the act consumes: the single-use nonce is spent by
+a conditional `UPDATE` inside the same transaction that appends the event. The
+nonce cannot be spent twice, so a second act cannot be recorded against it —
+the **refusal** is, as a durable chained row written by the core itself.
 
-Four ingesters, on purpose: watched text/markdown directories, deliberate
-notes (`ctx note`), a read-only sip of Chrome/Safari history (titles+URLs;
-`browser.skip_domains` never enters the archive at all, because append-only
-means ingestion is forever), and Claude Code dialogue — user and assistant
-text, delegation prompts, and subagent reports, with tool noise dropped,
-secrets redacted before storage, and every message role-tagged for provenance.
+---
 
-**Zero network code.** Nothing in this package talks to the network — no TCP,
-no cloud. Two local-only IPC surfaces exist: the MCP stdio server, and the
-authority plane's unix-domain socket (`contextd/authd.py`, hardened mode).
-Every file allowed to mention network vocabulary is pinned in
-`tests/network_surface.txt`; `scripts/gates.sh` fails on any new match.
+## The one property that is demonstrated, not asserted
 
-## Security
+Eight OS processes race to redeem one single-use operator authorization against
+one ledger. Exactly one wins. The seven losers are refused **inside the append
+transaction**, and each refusal is a durable, chained ledger row.
 
-The threat model is a **hostile same-UID agent**: an untrusted model or agent
-running as the normal desktop user, controlling every MCP argument and
-environment variable. Under that model no caller-supplied string —
-`CONTEXTD_CLIENT`, `actor`, `authority`, `role` — establishes anything.
-Operator-authoritative acts require a verified `OperatorActionV1` signature
-from a presence-bound Secure Enclave key.
+```
+$ python examples/gate_proof/concurrent_redemption.py
+RESULT: 1 success, 7 refused
+BASELINE: 7 double-redemption(s) (8 redemptions of one single-use authorization)
+```
 
-**Production is not hardened.** Read [`docs/SECURITY.md`](docs/SECURITY.md) for
-the contract, its "Implementation status" table for what is actually enforced
-today, and [`docs/adr/0001-two-plane-authority.md`](docs/adr/0001-two-plane-authority.md)
-for the architecture and the exact signed bytes.
+The same script runs a naive decide-then-record baseline against an identical
+barrier, identical schema, and the same minted authorization — the only
+difference is whether the check and the record are one transaction or three.
+The baseline double-redeems on the first attempt of every run.
+
+| Proof | Recorded result | Re-run it |
+|---|---|---|
+| Single host, 8 OS processes | 21/21 runs: 1 success, 7 durable redemption-stage refusals, `verify_chain` ok | `python examples/gate_proof/concurrent_redemption.py` |
+| Two hosts, separate archive roots, one database | 20/20 runs, chain one unforked line | `python examples/gate_proof/multihost_redemption.py --hosts 2 --database-url …` |
+
+The single-host campaign's method, machine, and per-run outcome table are
+recorded in `examples/gate_proof/RESULTS.md`. The multi-host figure has no
+written campaign record — re-run the loop above to reproduce it. The demos
+themselves are frozen: they are the evidence, so they are not edited to keep
+passing.
+
+The multi-host proof matters because it removes the file lock. Each worker gets
+its own `CONTEXTD_HOME` — its own witness, its own recovery journal, its own
+lock inode — and shares only the database. `fcntl.flock` is a kernel-local
+advisory lock on a local inode, so across hosts it does nothing; what is left
+holding the guarantee up is in-transaction conditional consumption plus a
+`FOR UPDATE` row lock on the singleton tip row. Test:
+`tests/test_postgres_backend.py::test_multihost_single_use_authorization_is_redeemed_exactly_once`.
+
+**What this is not.** The ledger prevents double-*recording*. If the authorized
+act has an external effect — an email, a payment, an API call — a crash between
+the commit and the effect is the classic dual-write problem, and it is not
+solved here. See [Known limits](#known-limits).
+
+---
 
 ## Quickstart
 
+Verified from a clean clone in a `python:3.12` container. No system packages,
+no local knowledge, nothing outside `pip`.
+
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/ctx init          # creates ~/.contextd (db, config, blob store)
-# edit ~/.contextd/config.toml -> set watch_dirs
-.venv/bin/ctx ingest        # one-shot scan
+git clone <this-repo> contextd && cd contextd
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+.venv/bin/ctx init                       # creates ~/.contextd (db, config, blobs)
 .venv/bin/ctx note "first entry: contextd is alive"
-.venv/bin/ctx search contextd
-.venv/bin/ctx recall "contextd" --purpose "trying recall"
-.venv/bin/ctx audit         # what has left the machine, when, for what
+.venv/bin/ctx search contextd            # FTS through the gate — redacted and receipted
+.venv/bin/ctx verify                     # recompute the whole hash chain
 .venv/bin/ctx status
 ```
 
-Run the daemon in the foreground with `ctx watch`, or install the launchd
-agent so it survives reboots:
+Then watch the property prove itself — the demo builds its own throwaway
+archive and refuses to run against a real one:
+
+```bash
+.venv/bin/python examples/gate_proof/concurrent_redemption.py
+```
+
+Ingest, disclosure, and audit:
+
+```bash
+# edit ~/.contextd/config.toml -> set [ingest] watch_dirs
+.venv/bin/ctx ingest                     # one-shot scan
+.venv/bin/ctx recall "contextd" --purpose "trying recall"   # gated + logged
+.venv/bin/ctx audit                      # what left the machine, when, for what
+.venv/bin/ctx compliance                 # EU AI Act logging evidence (§ below)
+```
+
+Run the daemon in the foreground with `ctx watch`, or install the launchd agent:
 
 ```bash
 cp launchd/com.contextd.watch.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.contextd.watch.plist
 ```
 
-## Hook it into Claude
+### Hook it into a model
 
 ```bash
-claude mcp add contextd -- __CONTEXTD_REPO__/.venv/bin/ctx serve
+claude mcp add contextd -- /absolute/path/to/contextd/.venv/bin/ctx serve
 ```
 
-Tools exposed: `recall(query, budget, purpose, since, until)`, `search(query)`,
-`note(text)`, `timeline(since, until, source)`, `loop_candidate`, `loop_list`,
+Tools: `recall`, `search`, `note`, `timeline`, `loop_candidate`, `loop_list`,
 and the grant-gated `loop_confirm` / `loop_dismiss` / `decision_supersede`
-(these refuse without an active operator delegation; see Open loops below).
-Recall's window filters by occurrence time (visit time for browser history),
-not ingest time.
-
-An operator can restrict a server process at the registry itself:
+(these refuse without an active operator delegation). An operator can restrict
+the registry itself — disallowed tools are absent from `tools/list`:
 
 ```bash
 ctx serve --tools recall search timeline
 ```
 
-Disallowed tools are absent from MCP `tools/list`. This is a capability
-allowlist, not authentication: `CONTEXTD_CLIENT` is a self-asserted audit
-label. The committed OpenClaw configuration uses this server-side read-only
-surface (and retains its client filter only as defense in depth).
+This is a capability allowlist, not authentication. `CONTEXTD_CLIENT` is a
+self-asserted audit label and proves nothing. Other clients connect the same
+way — see [clients/](clients/).
 
-Other clients (OpenClaw, Codex) connect the same way — see [clients/](clients/).
-Each sets `CONTEXTD_CLIENT`, so the audit trail attributes who took what. Every
-MCP read is redacted and logged as an egress event; `ctx audit` shows the full
-disclosure history and any locally observable dispatch outcome.
+---
 
-## AI-session pipeline
-
-The daemon tails Claude Code transcripts live and ingests dialogue as
-evidence. When a session goes quiet for `claude.quiet_seconds` (20 min), the
-daemon marks an *epoch* — sessions mostly end by abandonment, so quiescence,
-not exit, is the episode boundary. A harness-side janitor
-(`hooks/reconcile.py`, launchd every 10 min) distills unreconciled epochs
-into notes via `claude -p --model haiku`, skipping episodes whose dialogue is
-already cited by live anchored notes (id-window co-location is not enough:
-with parallel sessions an unrelated neighbor's note lands between another
-episode's events routinely). The kernel never calls a model; the janitor is a
-client like any other, and its notes carry its claimed client label
-(`reconciler`) plus kernel-stamped derivation. (`hooks/` shells out to your
-Claude subscription; the contextd package itself opens nothing network-facing.)
-
-The exact reconciler prompt is redacted, budgeted, and receipted before the
-subprocess starts. A separate linked `egress_outcome` event records success,
-nonzero exit, or timeout. Failed attempts do not mark an epoch reconciled, so
-they remain retryable; a successful run that writes zero notes is recorded as
-such rather than confused with dispatch failure.
+## Install
 
 ```bash
-cp launchd/com.contextd.reconcile.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.contextd.reconcile.plist
+pip install -e .                 # base: mcp, cryptography
+pip install -e '.[dev]'          # pytest, ruff
+pip install -e '.[pqc]'          # cryptography >= 47 — ML-DSA checkpoints
+pip install -e '.[postgres]'     # psycopg — multi-host archives
 ```
 
-## Design commitments
+Base dependencies are exactly `mcp` and `cryptography`. The extras:
 
-- **Append-only, and tamper-evident**: `UPDATE`/`DELETE` on `events` abort at
-  the SQLite level, and every event commits to the hash of the one before it.
-  `chain-witness.json` records the external chain tip, so `ctx verify` detects
-  rewrites, middle or tail deletion, and insertion/reordering. Appends use a
-  durable recovery journal and the lock order witness → SQLite; after a crash,
-  recovery resolves the interrupted append to zero or exactly one committed
-  event. This remains tamper-evident, not tamper-proof (see Trust model).
-- **Self-auditing gate**: the archive records the exact redacted payload it
-  intended to disclose before returning it or starting a model subprocess.
-  The actual token charge and receipt append share one SQLite write
-  transaction, so concurrent readers cannot overspend the daily cap.
-  Subprocesses add a linked immutable outcome when their result is observable.
-  A receipt proves a local dispatch attempt, not delivery or receipt by a
-  remote model.
-  Egress events are excluded from search, recall, and the timeline tool
-  (audit disclosures with `ctx audit`, or MCP `timeline` with
-  `source='gate'`), so disclosures never feed on themselves.
-- **Local search is free; egress is metered.** `ctx search` is yours and
-  unlogged. Anything shaped for a model (`recall`, all MCP reads) is gated,
-  budgeted, and logged.
-- **Data lives in `~/.contextd/`, never in this repo.**
+- **`pqc`** is a **version floor, not a new library.** `cryptography` ≥ 47
+  exposes ML-DSA (FIPS 204) natively through OpenSSL — no third-party PQC
+  package, no C toolchain. The base install stays at ≥ 42 so nothing regresses;
+  checkpoint signing degrades to classical-only and says so rather than failing.
+- **`postgres`** is for multi-host archives only. SQLite is the default and
+  requires nothing extra. Installing this extra migrates nothing.
+- **`dev`** is the test and lint toolchain.
 
-## Trust model
+Python ≥ 3.11. CI runs 3.11 and 3.13.
 
-The gate is an **audit layer, not a security boundary** (decided 2026-08-11).
-It redacts, meters, and logs every disclosure made through recall and the MCP
-tools — but it governs only that path. Any local process with filesystem
-access can read the SQLite directly; `0700`/`0600` permissions keep other
-accounts out, not your own software. Hard isolation is deliberately not a v0
-goal. The promise is narrower and kept: everything a well-behaved client
-sees is redacted, budgeted, and on the record.
+---
 
-The chain witness has the same owner and filesystem trust boundary as the
-database. It catches DB-only loss and makes interrupted appends recoverable;
-an owner-level process that rewrites both the database and witness can still
-forge a consistent history. Likewise, a server tool allowlist limits that
-process's MCP capabilities but does not prove who launched it.
+## Backends
 
-Models may write notes. Every note records who claimed to write it
-(`claimed_client` / `actor`), and operator-authoritative acts additionally
-carry a verified signature — claimed attribution and proven authority are
-different fields on purpose, so the archive always distinguishes what you
-said from what a model said.
+| | SQLite (default) | PostgreSQL |
+|---|---|---|
+| Setup | none | `[postgres]` extra + `CONTEXTD_DATABASE_URL` |
+| Hosts | one | many, sharing one database |
+| Append exclusion | `fcntl.flock` on a local lock file | `FOR UPDATE` on a singleton tip row, inside the append transaction |
+| Chain tip | external `chain-witness.json`, fsync'd | a row in the database |
+| Immutability | `BEFORE UPDATE`/`BEFORE DELETE` triggers raise `ABORT` | PL/pgSQL trigger **plus** privilege revocation: the app role has `INSERT`/`SELECT` and no `UPDATE`/`DELETE`/`TRUNCATE` |
+| Search | FTS5 | **refuses** — `SearchUnsupported`, rather than silently ranking differently |
+| Backup, handoff, ingest, schema migration | yes | **not yet** — all four are SQLite-only |
 
-Model-derived events additionally carry **derivation lineage**. A dispatch
-harness binds the model subprocess to the exact disclosed bytes with a
-single-use, expiring dispatch capability (`CONTEXTD_DISPATCH_CAPABILITY`,
-`contextd/capability.py`; the old integer `CONTEXTD_DERIVATION_SOURCE`
-binding is retired); the `note` tool kernel-verifies proposed
-anchors against that disclosure and refuses citations of undisclosed events.
-`ctx why <event_id>` walks the full derivation closure — claim → source
-disclosure → cited events → recursively → leaf evidence — and reports what
-is mechanically verified (anchors, disclosure membership, quote spans, hash
-integrity, chain shape) as distinct from what remains a semantic judgment
-(whether a claim's wording is actually supported by its evidence — which the
-kernel never asserts). The exact boundary between the two is measured and
-pinned by an adversarial suite; see [docs/PROVENANCE.md](docs/PROVENANCE.md).
+Nothing is auto-migrated. An existing single-host install is unaffected by the
+Postgres backend existing. The one-time SQLite→Postgres archive migration is
+implemented and tested (`test_migration_sqlite_to_postgres_preserves_the_chain`);
+what does not exist is ongoing *schema* migration of a live Postgres archive.
 
-## Deliberately not in v0
+**The trade is real and runs in the honest direction.** On SQLite the database
+and the witness are two files in one directory under one uid: whoever can
+rewrite events can rewrite the witness a microsecond later. Postgres removes
+that adjacency and gives the *application credential* a privilege separation
+SQLite never had — contextd's own credential cannot rewrite history or forge
+the tip. But a Postgres superuser, the table owner, or root on the database
+host can disable the triggers, rewrite `events`, and set the tip to match in
+one internally consistent transaction, and there is no external witness there
+to contradict them. Against that actor SQLite was strictly better, because the
+same actor would additionally need write access to a *different machine's*
+filesystem. Closing it needs a periodic signed checkpoint exported off the
+database host. **Not built. Still owed.** See
+[docs/SECURITY.md](docs/SECURITY.md) §10.
 
-No sync, no multi-device, no encryption-at-rest, no plugin system, no UI, no
-screen capture, no embeddings, no cloud anything. Each of these gets built
-only when a concrete, logged failure demands it.
+---
 
-## The only evaluation that matters
+## What is in the ledger
 
-For one month, every time you think "what was that thing I read/wrote about
-X?", ask `ctx recall` first and keep the tally in the archive itself:
+Every record is a row in one append-only table, chained to the one before it,
+validated against a **closed** metadata registry — an unregistered event type
+cannot carry metadata at all, and undeclared fields are refused rather than
+dropped.
+
+- **Ingest**: watched text/markdown directories, deliberate notes, a read-only
+  sip of Chrome/Safari history (titles + URLs), and Claude Code dialogue —
+  role-tagged, tool noise dropped, secrets redacted before storage.
+  `browser.skip_domains` never enters the archive at all, because append-only
+  means ingestion is forever.
+- **Disclosures**: every archive-derived outbound payload passes one gate —
+  never-leave rules, redaction, and a pre-dispatch `egress` receipt recording
+  the exact disclosed bytes, committed atomically with the budget decision.
+- **Authorizations**: `mandate.bind` consumes the nonce; `tx.execute`,
+  `tx.refuse`, and `tx.inflight` record what became of it.
+- **Instruction positions**: `pin` and `act` events digest the skills, tool
+  definitions, and prompt fragments an act was taken under.
+- **Operator acts**: notes, loops, grants, decisions, key registry changes —
+  each carrying a verified `OperatorActionV1` signature or nothing.
+
+The byte-level format is specified independently of this codebase in
+**[docs/FORMAT.md](docs/FORMAT.md)** (`contextd-record-format v1`): the row
+shape, the chain-hash computation, the canonical encoding and why it refuses
+floats, the signing domains, the witness and recovery journals, and the closed
+vocabulary. An adjudicator in 2035 should be able to parse a record written
+today with a SHA-256 implementation and a signature verifier, and nothing else.
+`tests/test_format_spec.py` re-derives the chain hash and the canonical
+encoding from that document's own prose and checks them against real rows and
+the frozen vectors, so the spec cannot drift from the code in silence.
+
+---
+
+## Integrity, in three layers
+
+1. **Hash chain** — every event commits to the one before it. Detects naive
+   rewrites, deletion, insertion, reordering. Defeated by an attacker who
+   recomputes the chain.
+2. **External witness** — `chain-witness.json` records the tip, fsync'd, with
+   a durable recovery journal. Detects loss of the final row; makes an
+   interrupted append resolve to zero or exactly one committed event. Defeated
+   by the same attacker, who can rewrite the file.
+3. **Service signatures** — over accepted envelopes and chain tips, under a
+   key the attacker is not assumed to hold. **Not** defeated by chain
+   recomputation.
+
+Every signature record names the scheme that produced it (`ecdsa-p256-sha256`,
+`ml-dsa-44/65/87`), and verification dispatches on that name rather than
+assuming one. This is the piece that is expensive to retrofit: once a million
+records exist with no algorithm field, introducing a second scheme means
+guessing which rows are which. Checkpoints — not events — carry the
+post-quantum signature, because an ML-DSA-44 signature is ~38× an ECDSA one per
+event and the chain hash at event *N* already commits to everything beneath it.
+That is Certificate Transparency's signed-tree-head model.
+Tests: `tests/test_crypto_agility.py` (21 tests).
+
+**The window you must know about.** `checkpoint_interval_events` (default 100)
+is how many events may pass before the tip is checkpointed again, and that
+number *is* the exposure window: events appended since the last checkpoint are
+covered by local state alone. `ctx compliance` reports that window as
+`uncovered_events` rather than leaving you to assume it away.
+
+This is tamper-**evident**, not tamper-proof. Read
+[docs/SECURITY.md](docs/SECURITY.md) — especially its "Implementation status"
+table, which says what is actually enforced on this tree — before treating any
+of it as a security boundary.
+
+---
+
+## Compliance evidence
 
 ```bash
-ctx outcome <egress-id> hit      # or: partial | miss  (add --note "why")
-ctx outcome                      # the scoreboard
+ctx compliance              # JSON to stdout
+ctx compliance -o report.json
 ```
 
-If it beats grep and your own memory ≥30% of the time, v0.1 is earned — and
-the misses tell you *what* to build (vocabulary mismatch → embeddings earn
-their place; time confusion → better windows; and so on).
+A deterministic, read-only artifact: event span, count, chain verification
+result, and checkpoint coverage, keyed to the EU AI Act articles that actually
+govern logging. It appends nothing, calls no model, and returns **no
+pass/fail verdict**. Two runs over an unchanged archive are byte-identical
+(`now` is an explicit argument, not an ambient clock read), so quarterly
+artifacts diff cleanly.
 
-Resumptions are judged the same way: every `ctx checkpoint` egress takes the
-same verdict, plus `--failure-class` on a miss or partial — `not-in-archive`
-(never captured), `not-selected` (in the archive, absent from the package),
-`drowned` (in the package, buried), `superseded` (selected, but a later
-decision made it stale). The scoreboard stratifies by egress type; the class
-distribution of real misses is what licenses the next selection work.
+Three things it is careful to get right, because the surrounding industry
+frequently does not:
 
-Back up the archive as a complete versioned bundle:
+- **Article 12** is a *logging-capability* design requirement on high-risk
+  systems. It is not a retention period.
+- The **six-month figure is a retention floor** in **Art. 19(1)** (providers)
+  and **Art. 26(6)** (deployers) — both limited to logs under that party's
+  control, both displaceable by other Union or national law.
+- **The Regulation nowhere requires append-only or tamper-evident storage.** An
+  ordinary rotated log file can satisfy Articles 12, 19(1) and 26(6). This
+  ledger is *one way* to satisfy them and an evidentiary advantage — it makes
+  "these logs were not edited" checkable rather than asserted. Anyone telling
+  you the Regulation mandates a tamper-evident ledger is selling something.
 
-```bash
-ctx backup                         # writes ~/.contextd/backups/*.ctxbackup
-ctx backup /safe/location --keep 8
-ctx restore /safe/location/contextd-….ctxbackup /new/empty/contextd-home
-```
+Applicability: 2 Aug 2026 for Annex III (Art. 6(2)); 2 Aug 2027 for Art. 6(1)
+product-embedded systems.
 
-The manifest-hashed bundle contains an online WAL-consistent database
-snapshot, config when present, chain witness/recovery state, and every blob
-referenced by that snapshot. Restore treats the bundle as hostile input:
-unexpected, missing, traversing, symlinked, or hash-mismatched payloads are
-refused; it stages and verifies SQLite, FTS, event chain, witness, and blobs
-before one final publish rename. It never merges into a non-empty destination.
-Retention removes complete `.ctxbackup` directories only, never legacy files.
-The live database is versioned too: a brand-new archive is stamped
-`PRAGMA user_version = 2` (`SCHEMA_VERSION`), an older archive refuses every
-write until the explicit audited migration (`ctx security migrate`), and an
-archive from a **newer** contextd refuses before any filesystem change — an
-older build never silently writes rows whose invariants it does not know.
+---
 
-A backup that has never been restored is a hope, not a backup. The weekly
-restore fire-drill (`hooks/restore_drill.py --once`, scheduled by
-`launchd/com.contextd.restore-drill.plist`) restores the newest bundle into a
-throwaway temp destination — after a free-space preflight pinned to the
-measured peak temp usage — and runs a verification battery on the restored
-copy: chain + witness, event count and tip against the manifest snapshot,
-every blob re-hashed, and FTS + behavioral equivalence (a fixed probe set of
-search / timeline / loop-reduction / liveness / audit reads answered
-byte-identically by the bundle's snapshot and the restored copy). The
-verdict lands in the live ledger as a content-NULL `restore_drill` event
-(never searchable, never recallable), `ctx status` prints the last verdict
-and its age, and warns when the last drill FAILED or none has run within
-`[backup].drill_stale_after_hours` (default 192) — the alarm path itself is
-exercised by test and smoke. Scale behavior (1–8 GiB, event-heavy and
-blob-heavy) is measured, not assumed: `experiments/restore_scale/trial.py`
-holds the inflator, the measurements, and the cross-machine rehearsal.
+## The rest of the daemon
 
-## The health sweep
+Beyond the authority plane, contextd is a working personal context system.
+Briefly, with pointers:
 
-A daemon that degrades quietly is supervised, restarted, logged — and
-invisible (the 2026-08-15 specimen: 42 identical reconciler refusals into a
-log nobody read). `hooks/health_sweep.py` (launchd, every 30 min, zero
-model dispatches) reduces existing evidence — ledger liveness watermarks,
-unreconciled-backlog age, launchd states, log-tail failure fingerprints,
-backup and drill ages, grant-reduction anomalies — into one content-NULL
-`health` event per run. `ctx status` prints the last verdict; a local
-notification fires only on a NEW degradation, naming check names only,
-never detail strings (attacker-influenceable text stays out of trusted
-prompts). These structured verdicts are deliberately free-text-free: they
-are the future coordinator's entire input feed
-([docs/AGENTS.md](docs/AGENTS.md), the frozen agent-plane contract —
-non-convertibility, the trifecta rule, workflows as promoted artifacts).
+- **Every archive read is gated.** `ctx search`, `ctx recall`, and every MCP
+  read go through one disclosure primitive and land as an `egress` receipt —
+  including `search`, which used to be a raw local FTS read that printed
+  unredacted snippets and logged nothing. That bypass is closed; the only
+  reads that stay unlogged are the ones that disclose no archive content
+  (`ctx why`, `ctx lineage`, `ctx verify`). `recall --mode synthesis` serves a
+  distillate in which every claim carries a bracketed event id that resolves.
+- **Provenance.** `ctx why <id>` walks claim → disclosure → cited events →
+  leaf evidence, and reports what is *mechanically verified* separately from
+  what remains a semantic judgment — which the kernel never asserts.
+  [docs/PROVENANCE.md](docs/PROVENANCE.md)
+- **Checkpoint/restore.** `ctx checkpoint` compiles a project's *active state*
+  so a fresh model can continue the work. Measured against full-transcript
+  ceilings; limits stated in [docs/DECISIONS.md](docs/DECISIONS.md).
+- **Open loops.** Operator-declared commitments that survive the session, with
+  model proposals inert until confirmed. Four preregistered attempts to
+  *infer* them from dialogue failed; contextd does not mind-read.
+  [docs/OPEN_LOOPS.md](docs/OPEN_LOOPS.md)
+- **Delegation grants.** Class-scoped, expiring, revocable, never grantable by
+  a model. [docs/GRANTS.md](docs/GRANTS.md)
+- **Backup and restore drill.** Manifest-hashed bundles, plus a weekly drill
+  that actually restores one and verifies chain, blobs, and behavioral
+  equivalence — a backup that has never been restored is a hope.
+- **Health sweep and lineage gauge.** Content-NULL verdict events; advisory,
+  never quarantining.
+- **Experiments.** `contextd/experiment.py` preregisters designs as ledger
+  events *before* any run, with a negative control that came back Δ 0.00,
+  p = 1.0 — the harness can demonstrably answer "this context barely matters."
 
-```bash
-cp launchd/com.contextd.health.plist ~/Library/LaunchAgents/   # then sed the __PLACEHOLDERS__
-launchctl load ~/Library/LaunchAgents/com.contextd.health.plist
-```
+---
 
-## Synthesis-mode recall
+## Deliberately not here
 
-Plain recall serves raw items. Synthesis mode serves a ~150-word distillate
-in which **every claim carries a bracketed event id that resolves** — the
-representation the ablation experiments found carries cross-item synthesis
-capability at ~12% of the raw tokens, and the one thing that could not be
-compressed away (exps #41325–#41485: id-free summaries scored zero;
-id-anchored ones matched per-item granular bundles).
+- **No hosted service, no sync, no multi-device, no account.** Multi-host means
+  several of your machines sharing one database you run.
+- **No LLM in the kernel.** The kernel never calls a model. Everything that
+  does — the reconciler, synthesis, the lineage judge — lives in `hooks/` and
+  is a *client* like any other, subject to the same gate. `ctx compliance`
+  contains no model call of any kind.
+- **No network code in the SQLite path.** Every file allowed to mention
+  network vocabulary is pinned in `tests/network_surface.txt` and
+  `scripts/gates.sh` fails on a new match. Note the scope honestly: that gate
+  is **lexical**, and `psycopg` is not in its vocabulary — the PostgreSQL
+  backend is the one change that genuinely gives contextd network capability,
+  and the grep cannot see it. The zero-network claim is true of the **default
+  SQLite backend only**.
+- **No encryption at rest, no plugin system, no UI, no screen capture, no
+  embeddings.** Each gets built when a concrete, logged failure demands it.
+- **No trajectory scoring.** Advisory trajectory-evidence scoring was built and
+  is deliberately **held unmerged**: its detector's calibrated true-positive
+  rate did not transfer from the development corpus to a held-out slice, and
+  the honest version was judged worth more than the feature line. It is not in
+  this package and its numbers are not product claims.
 
-```bash
-ctx recall --mode synthesis "what did we decide about the trust model" --purpose "..."
-```
+---
 
-The kernel never calls models, so `--mode synthesis` delegates to
-[hooks/synthesis_recall.py](hooks/synthesis_recall.py) (same rule as the
-reconciler), which shells out to `claude -p` for the distillation. Honesty
-properties, enforced not promised: the raw bundle disclosed *to the
-distiller* is itself a logged egress; the served distillate is a second
-logged egress linking back to the first; and `gate.verify_anchors` refuses
-any distillate whose anchors don't all resolve to supplied events — an
-anchor pointing nowhere launders authority the archive never granted.
-Judge it like any recall: `ctx outcome <egress-id> hit|partial|miss`.
+## Known limits
 
-## Checkpoint/restore: the work survives the model
+Stated first-person, because a README with no limits section should not be
+believed. The full list, with the alternatives that beat contextd on each,
+is in [COMPARISON.md](COMPARISON.md).
 
-`ctx checkpoint` compiles the **active state** of a project — not a summary
-of its past — so a fresh model with zero session continuity can continue the
-actual work:
+- **I cannot make your counterparty idempotent.** Exactly-once *effects*
+  require an idempotent receiver or a reconciliation loop. I supply neither.
+- **I have a single-operator authority plane.** One human, one key registry.
+  No roles, no quorums, no separation between who grants and who audits.
+- **A mandate can get stuck in flight.** If the act's callback raises an
+  unknown exception or returns an oversized outcome, the mandate is consumed
+  with no recorded outcome and there is no operator-facing way to resolve it.
+  That is deliberate — the core will not guess an outcome — but it is a dead
+  end today.
+- **Pinning binds the caller's claim, not the file.** contextd never opens the
+  artifact; it pins the bytes the caller said it read. Four attacks survive:
+  TOCTOU between digest and read, an incomplete artifact list, malice present
+  at first sight, and renaming the position. None is unique to contextd — the
+  same four hold for every registration-time digest scheme.
+- **Postgres archives cannot be backed up or handed off**, and a Postgres
+  superuser is outside the trust model entirely (see [Backends](#backends)).
+- **This tree is `development`, not `hardened`.** No dedicated service UID, no
+  enrolled hardware signer on a fresh clone. `ctx security doctor --strict`
+  exits nonzero here, correctly.
 
-```bash
-ctx checkpoint --repo ~/myproject --test-cmd 'pytest -q' --hint "what I was doing"
-ctx checkpoint --mode distill ...   # model-compressed, anchor-verified (hooks/)
-```
-
-The compiler is stratified, not a search box: the raw dialogue tail of the
-interrupted session (freshest working state, verbatim), reconciled episode
-notes (the archive's own anchored compression of earlier episodes), operator
-notes, an optional task-hint recall, and a live repository section (branch,
-status, diff, failing tests) — every item keeps its `[event-id]`, so each
-line stays inspectable with `ctx why`. Compilation is a gated, logged egress
-like any other disclosure; `--mode distill` adds a structured
-OBJECTIVE/STATE/DECISIONS/REJECTED/OPEN/NEXT compression whose anchors the
-kernel verifies before serving (same rule as synthesis recall: the kernel
-never calls models, and a checkpoint is a **view for resumption**, never
-re-ingested as truth — the archive stays canonical).
-
-Measured basis (handoff benchmark, ledger exps #41823/#41853/#41864/#41899/#41905;
-rebuild with `experiments/handoff/bench.py report <id>`): on a staged
-interrupted implementation, a fresh model resuming from a ~520-token
-distilled checkpoint matched the full-transcript ceiling (1.00), preserved
-dialogue-only constraints, finished the code, and passed held-out tests —
-while a same-size naive summary lost the rejected-alternative and constraint
-knowledge; sonnet and codex (cross-vendor, real runs) resumed from the same
-haiku-written checkpoint at 1.00. At two frozen real-history interruption
-points (`contextd/handoff.py` frozen views make post-cutoff events
-mechanically invisible), every contextd arm beat no-history distinguishably
-(p at the design floor), zero runs out of 96 resurrected the
-recorded-rejected alternative, and compiled checkpoints were the most
-*stable* representation across cutoffs — a naive recency summary swung
-0.92 → 0.33 between cutoffs while checkpoints held. Component ablations
-(exps #41939, #41949) found the DECISIONS/REJECTED content load-bearing
-(removing it: Δ −0.35, the only near-threshold effect); anchor-stripping
-showed no stable rubric effect, as preregistered — anchors buy
-inspectability, not lexical score. Known measured gap, stated precisely: no
-representation *reliably* carried an open thread that was neither recent nor
-lexically near the task hint — `next_check` was recovered at 0.25 by the
-raw-tail and recall arms and 0.0 by the other six (exp #41905 raw report;
-an earlier run-log summary saying "0.00 across all 8 arms" overstated this).
-Cross-episode open loops are what still died with the session; the open-loops
-mechanism below is the earned answer, built on the measured fix (exp #42203:
-one explicit operator note moved the lost target from 0/5 to 5/5).
-
-## Open loops: acknowledged work that must survive the session
-
-Four preregistered attempts to *infer* open commitments from dialogue failed
-(lexical markers, retro extraction, live tracking, a model-maintained board —
-exps #42011/#42067/#42123/#42127..#42240): the missing datum was always the
-operator's own prioritization, which is not reliably present in the
-observable record. So contextd does not mind-read. It gives the operator a
-one-line externalization act and makes that act indestructible:
-
-```bash
-ctx loop add "re-run the drift correction on the July batch"   # scoped to cwd's repo
-ctx loop list            # active loops for this repo
-ctx loop close 42317 --reason "ran clean"
-ctx loop reopen 42317 --reason "regressed"
-ctx loop candidates      # model-proposed, awaiting your confirm/dismiss
-ctx loop confirm 42410   # operator act; candidates never activate themselves
-```
-
-Loops are event-sourced (state is a pure reduction of append-only `loop`
-events; invalid transitions refuse; retries are no-ops), scoped to a
-repository or global, and carried into every `ctx checkpoint` for their repo
-in a dedicated `ACTIVE OPEN LOOPS` section selected by lifecycle state — not
-recency, not lexical luck, never competing with newer notes. If the budget
-cannot hold every active loop, the omitted ids are named in the package;
-silent loss is structurally forbidden. Closed and dismissed loops leave the
-checkpoint; reopened ones return; distilled checkpoints re-attach the section
-verbatim so carriage never depends on a model's choices.
-
-Models may *propose* (`loop_candidate` over MCP, or the gated
-`hooks/loop_scan.py` scanner): proposals are labeled, deduplicated,
-suppressed against dismissed/closed loops, and inert until confirmed. There
-is no model-facing add, close, or reopen. Confirmation and dismissal are
-operator CLI acts by default; under an explicit **delegation grant**
-(`ctx grant add loop.confirm --for 8h ...` — recorded, class-scoped,
-expiring, revocable, itself never grantable by a model) the MCP
-`loop_confirm` / `loop_dismiss` tools stop refusing, and every transition
-they record carries authority `model-granted` plus the grant's event id —
-permanently distinguishable from an operator act ([docs/GRANTS.md](docs/GRANTS.md)).
-(A model-relayed confirmation bound to ingested operator utterances was
-built and retired before field use: verifying that words were uttered
-cannot distinguish assent from rejection, so it could launder rejecting
-words into authority — the negative result is recorded in the contract.)
-No calendars, no recurrence, no notifications — this is durable operator
-state, not a planner. Contract, threat model, and measured limits:
-[docs/OPEN_LOOPS.md](docs/OPEN_LOOPS.md).
-
-## Measuring whether context matters
-
-The outcome tally judges recalls by hand. The experiment layer asks the harder
-question with controls: **which recorded context actually changed a downstream
-result?** `contextd/experiment.py` freezes one retrieval, intervenes on it
-(drop an event, drop a provenance class, substitute a distilled summary), and
-records the whole design — task, arms, rubric, frozen items, model, planned n —
-as ledger events *before* any run. The harness in [experiments/](experiments/)
-replays the task through `claude -p` per arm, scores outputs against a
-preregistered deterministic rubric, and reports marginal effects with an exact
-permutation test against the measured run-to-run noise. Every bundle an arm
-discloses passes the real gate and lands as an egress event; experiment records
-are content-NULL so they can never leak into FTS and feed a later recall.
-
-```bash
-.venv/bin/python experiments/runner.py plan experiments/tasks/contextd-decisions.json
-.venv/bin/python experiments/runner.py run  experiments/tasks/contextd-decisions.json
-.venv/bin/ctx exp list      # every experiment, from the ledger
-.venv/bin/ctx exp report 41054
-```
-
-A negative control task (one the model aces with no archive) ships alongside
-the real one, and came back Δ 0.00, p=1.0 — the harness demonstrably can
-answer "this context barely matters," which keeps the positive answers honest.
-See [experiments/README.md](experiments/README.md) for the method and its
-stated limits.
-
-## Lineage: measuring note drift instead of worrying about it
-
-Model-written notes are paraphrases, and paraphrases drift. Two standing
-instruments turn that worry into numbers:
-
-**The topology gauge** (kernel, model-free). `ctx lineage` walks every
-derivation-bearing event and reports chain depth (leaf dialogue = 0, a note
-citing only leaves = 1), anchor-resolution health, notes-per-epoch, and the
-age of cited evidence; `--full` prints the per-note table. Today the
-reconciler cites raw dialogue only — the gauge *measures* that instead of
-assuming it, and the day any note exceeds `lineage.max_note_depth`
-(default 1: a note citing notes, where compounding-summary drift becomes
-structurally possible) `ctx lineage` exits nonzero with a `DEPTH ALERT` and
-`ctx status` warns.
-
-**The sampled fidelity audit** (harness-side, calibrated, advisory-only).
-`hooks/lineage_audit.py` samples model-written notes stratified by age,
-walks each to its leaf evidence, disclosures the bundle through the real
-gate, and asks a judge model whether the note is faithful. The judge earned
-that job first: it was validated against a seeded corpus of deliberately
-corrupted notes with known ground truth
-([experiments/lineage_calibration/](experiments/lineage_calibration/)),
-with preregistered per-class sensitivity/specificity bars — an uncalibrated
-judge is vibes. Verdicts land as content-NULL `lineage_audit` events: they
-never enter FTS, never feed a recall, never quarantine or re-rank a note,
-and `ctx lineage report` always prints them next to the judge's measured
-confusion matrix. The semantic-entailment boundary does not move: this
-instrument samples and *estimates* fidelity; it never certifies it.
-
-The weekly schedule (`launchd/com.contextd.lineage-audit.plist`) ships
-**disabled by default** — load it only after the calibration verdict in
-`experiments/lineage_calibration/calibration_result.json` reads
-`AUDIT EARNED` (the hook refuses to run otherwise, and it stays mandatorily
-disabled if calibration was NOT EARNED):
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.contextd.lineage-audit.plist
-```
+---
 
 ## Tests
 
 ```bash
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/ruff check .
-.venv/bin/python -m pytest -q
-.venv/bin/python tests/smoke.py
+sh scripts/gates.sh            # ruff + pytest + smoke + network-surface grep
 ```
 
-The pytest suite includes deterministic 32-way budget and append races, crash
-fault injection, a real stdio MCP capability test, model-call inventory, and
-corrupt-backup restore cases. It always installs a temporary `CONTEXTD_HOME`;
-the legacy smoke suite does the same. CI runs pytest, smoke, and Ruff on Python
-3.11 and 3.13. A weekly launchd job
-(`launchd/com.contextd.backup.plist`) runs `ctx backup --keep 8`.
+The suite includes deterministic 32-way budget and append races and 16-way
+redemption races (**threads** — the cross-*process* evidence is the gate-proof
+demo above), crash fault injection at three interruption points
+(`before_db_commit`, `after_db_commit`, `before_witness_finalize`) via an
+injected fault hook rather than a killed process, a real stdio MCP capability
+test, a model-call inventory, and corrupt-backup restore cases. It always
+installs a temporary `CONTEXTD_HOME`.
+
+Postgres tests **skip** unless you point them at a throwaway server — so a
+default run is green whether or not that backend works. Switch them on:
+
+```bash
+python -m pytest tests/test_postgres_backend.py --postgres-url "postgresql://…"
+```
+
+## Security disclosure
+
+See [SECURITY.md](SECURITY.md).
 
 ## License
 

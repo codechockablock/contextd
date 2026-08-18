@@ -1211,6 +1211,25 @@ def cmd_verify(args):
                  f"({r['checked']} events verified before it)")
 
 
+def cmd_compliance(args):
+    """Deterministic EU AI Act logging/retention evidence from the ledger.
+
+    ``now`` is passed explicitly rather than read inside the generator, so the
+    artifact is a pure function of (archive state, instant) and two runs over
+    an unchanged archive diff clean. Read-only: this command appends nothing.
+    """
+    from .compliance import compliance_report
+
+    text = compliance_report(connect(), now=int(time.time()))
+    if args.output:
+        destination = Path(os.path.expanduser(args.output))
+        destination.write_text(text)
+        os.chmod(destination, 0o600)
+        print(f"wrote {destination}")
+    else:
+        sys.stdout.write(text)
+
+
 def cmd_why(args):
     from .provenance import closure, format_closure
     print(format_closure(closure(connect(), args.event_id)))
@@ -1434,6 +1453,16 @@ def main():
     kv.add_argument("key_id")
 
     sub.add_parser("verify", help="recompute the event hash chain; detect rewrites")
+    sp = sub.add_parser(
+        "compliance",
+        help="EU AI Act logging/retention evidence from the ledger: event "
+             "span, chain verification, checkpoint coverage, keyed to "
+             "Arts. 12 / 19(1) / 26(6). Read-only, deterministic, no verdict "
+             "and no model (docs/FORMAT.md, docs/SECURITY.md)",
+    )
+    sp.add_argument("-o", "--output", default="",
+                    help="write the artifact to this path (mode 0600) instead "
+                         "of stdout")
     sp = sub.add_parser("why", help="reconstruct a derived event's provenance "
                                     "closure down to leaf evidence (local, unlogged)")
     sp.add_argument("event_id", type=int)
@@ -1472,6 +1501,7 @@ def main():
          "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
          "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
          "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,
+         "compliance": cmd_compliance,
          "security": cmd_security,
          "serve": cmd_serve}[args.cmd](args)
     except SchemaMigrationRequired as exc:
