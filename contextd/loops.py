@@ -24,8 +24,11 @@ from .assurance import (
     UNVERIFIED, assurance_for_event, assurance_of, refuse_forged_authority,
 )
 
-
+# scope_str now lives in contextd/grants.py: its output is covered by a signed
+# grant act, so it belongs with the registry that defines what a scope may be.
+# Re-exported here because it is `contextd.loops.scope_str` at ~40 call sites.
 from .db import append_event_checked
+from .grants import scope_str  # noqa: F401
 
 
 def _authority_label(assurance: str, op: str = "") -> str | None:
@@ -111,12 +114,6 @@ class _DuplicateRace(Exception):
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").lower()).strip().rstrip(".")
-
-
-def scope_str(scope: dict) -> str:
-    if scope.get("global"):
-        return "global"
-    return f"repo:{scope['repo']}"
 
 
 def make_scope(repo: str | None) -> dict:
