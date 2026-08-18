@@ -10,4 +10,3 @@ contextd/gate.py
 contextd/ingest.py
 contextd/mcp_server.py
 contextd/rpc.py
-contextd/service.py

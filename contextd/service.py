@@ -3,22 +3,23 @@
 Every client — CLI, MCP server, hook — goes through here instead of calling
 ``db.connect()`` itself. What that buys:
 
-* **In hardened mode** the call becomes an RPC to the authority plane, which is
-  the only process that opens the database. If no service is listening, or the
-  trust material is missing, the call **fails closed**: there is no
-  direct-SQLite fallback, because a fallback is exactly the thing an attacker
-  arranges by killing the daemon.
+* **In hardened mode** every call **fails closed**. The resident authority
+  daemon this mux used to dial was removed (lane X, residency dissolution),
+  and with it the only process a hardened archive permits to open the
+  database. Refusing is the daemon-absent behaviour docs/SECURITY.md always
+  specified — there is no direct-SQLite fallback, because a fallback is
+  exactly the thing an attacker arranges by making the authority plane
+  unavailable.
 * **In development mode** it calls the kernel in-process, as before, and says
-  so. The point is that the client code is identical in both, so the hardened
-  path is the one that is actually exercised rather than a branch nobody runs.
+  so.
 
-The distinction is never inferred from whether a connection happened to
-succeed. It is read from configuration and reported by `ctx security doctor`.
+The distinction is never inferred from runtime state. It is read from
+configuration and reported by `ctx security doctor`.
 """
 
 from . import load_config
-from .authd import hardened, socket_path
-from .rpc import RpcClient, RpcError, ServiceUnavailable
+from .authority_mode import hardened
+from .rpc import RpcError
 
 # Assurance resolvers register at import time (contextd/assurance.py). Importing
 # them here, at module scope, is what guarantees a daemon process never reads a
@@ -29,7 +30,7 @@ from . import decisions, loops  # noqa: F401
 from . import search as _search_registration  # noqa: F401
 
 __all__ = [
-    "ClientRefused", "RpcError", "ServiceUnavailable",
+    "ClientRefused", "RpcError",
     "backup", "grant_add", "grant_revoke", "hardened", "key_register",
     "key_revoke", "loop_candidate", "loop_confirm", "loop_dismiss",
     "loop_list", "loop_add_operator", "loop_transition_operator", "note",
@@ -39,25 +40,43 @@ __all__ = [
 ]
 
 
-class ClientRefused(RuntimeError):
-    """The client plane cannot satisfy this call without the authority plane."""
+class ClientRefused(RpcError):
+    """The client plane cannot satisfy this call without the authority plane.
 
-
-def _client() -> RpcClient:
-    return RpcClient(socket_path())
+    Subclasses :class:`RpcError` so the refusal travels the same channel every
+    caller already handles (`except RpcError` in the CLI and MCP server) —
+    the answer under hardened configuration is "refused", delivered as a
+    refusal, not a new exception type callers would crash on.
+    """
 
 
 def _call(op: str, **args):
-    with _client() as client:
-        return client.call(op, **args)
+    """The hardened arm of every mux below. Always refuses.
+
+    The resident authority service this used to dial over ``AF_UNIX`` was
+    removed (lane X). Absent that daemon-provided state, the stricter
+    behaviour stands: a hardened archive refuses rather than falling back to
+    in-process access, exactly as it always did when no service was
+    listening. The stub is kept — rather than the symbol deleted — because
+    every hardened arm in this module still calls it; the refusal must fire
+    *before* any development arm runs, since those arms mark the thread as
+    the authority plane (`service_context`) and would otherwise pass
+    `db._guard_direct_access` under hardened configuration.
+    """
+    raise ClientRefused(
+        f"hardened mode: no authority service exists in this build "
+        f"(residency was removed); {op} fails closed. There is no "
+        f"direct-SQLite fallback — see docs/SECURITY.md, Deployment states."
+    )
 
 
 def _direct(fn, *a, **kw):
     """Run a kernel function in-process. Development mode only."""
     if hardened():
         raise ClientRefused(
-            f"hardened mode: {fn.__name__} must go through the authority "
-            f"service, not an in-process call. This is a bug in the caller."
+            f"hardened mode: {fn.__name__} fails closed — an in-process call "
+            f"may not open a hardened archive, and no authority service "
+            f"exists in this build (residency was removed)."
         )
     from .db import connect
     conn = connect()

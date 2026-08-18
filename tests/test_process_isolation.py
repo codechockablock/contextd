@@ -40,7 +40,6 @@ from contextd.rpc import (
     TIER_OPERATOR,
     RpcClient,
     RpcError,
-    ServiceUnavailable,
     peer_credentials,
 )
 from tests.authorization_support import operator
@@ -220,13 +219,17 @@ def test_hardened_mode_refuses_direct_sqlite_from_the_client_plane(hardened_mode
     assert "no direct-SQLite fallback" in str(exc.value)
 
 
-def test_hardened_mode_with_no_service_fails_closed(hardened_mode, monkeypatch):
-    """Killing the daemon must not silently re-enable local access."""
+def test_hardened_mode_with_no_service_fails_closed(hardened_mode):
+    """Residency is removed: hardened mode has no authority service at all,
+    and the client plane must refuse *before* its development arm runs —
+    that arm marks the thread as the authority plane (`service_context`),
+    which would defeat `db._guard_direct_access`. This is the fail-open the
+    lane X mitigation exists to prevent; the refusal travels the standard
+    RpcError channel so existing callers surface it as a refusal."""
     from contextd import service as client_plane
-    monkeypatch.setattr(client_plane, "socket_path",
-                        lambda *a, **k: home() / "definitely-absent.sock")
-    with pytest.raises(ServiceUnavailable) as exc:
+    with pytest.raises(client_plane.ClientRefused) as exc:
         client_plane.recall("anything")
+    assert isinstance(exc.value, RpcError)
     assert "fails closed" in str(exc.value)
     # and no archive file was opened as a consolation prize
     with pytest.raises(DirectAccessRefused):
@@ -716,84 +719,12 @@ def test_restore_challenge_binds_authenticated_manifest_and_destination(service)
     ).fetchone()["consumed_event"] == 0
 
 
-# --- end to end through the daemon in hardened mode -------------------------
+# --- the model-facing surface fails closed under hardened config ------------
 
-def test_hardened_mode_end_to_end_through_the_daemon(short_dir, monkeypatch):
-    """The whole point, exercised: hardened client -> socket -> daemon -> archive.
-
-    The client never opens the database. The daemon does, inside its service
-    context. The bytes that come back are gated, redacted, and receipted.
-    """
-    from contextd import service as client_plane
-    from contextd.ingest import ingest_note
-
-    conn = connect()
-    ingest_note(conn, "an amberlight note with sk-canary0000000000zzz1 inside")
-    conn.close()
-
-    (home() / "config.toml").write_text('[security]\nmode = "hardened"\n')
-    svc = AuthorityService(path=short_dir / "e2e.sock")
-    svc.start()
-    monkeypatch.setattr(client_plane, "socket_path", lambda *a, **k: svc.path)
-    try:
-        assert hardened()
-        # the client plane cannot open the archive at all ...
-        with pytest.raises(DirectAccessRefused):
-            connect()
-        # ... but the same call through the service works, gated
-        result = client_plane.search("amberlight", client="e2e")
-        assert "canary0000000000zzz1" not in result["content"]
-        assert "amberlight" in result["content"]
-        assert isinstance(result["egress_id"], int)
-
-        recalled = client_plane.recall("amberlight", budget=2000,
-                                       purpose="e2e", client="e2e")
-        assert "canary0000000000zzz1" not in recalled["bundle"]
-
-        noted = client_plane.note("written through the daemon", client="e2e")
-        assert isinstance(noted["event"], int)
-
-        counts = client_plane.status()
-        assert counts["total"] > 0
-    finally:
-        svc.stop()
-        (home() / "config.toml").unlink(missing_ok=True)
-
-
-def test_mcp_surface_uses_the_service_in_hardened_mode(short_dir, monkeypatch):
-    """The model-facing surface must not hold its own connection."""
+def test_mcp_surface_fails_closed_in_hardened_mode(hardened_mode):
+    """The MCP surface surfaces the hardened refusal as a refusal string,
+    never a crash and never a locally-read consolation answer."""
     from contextd import mcp_server
-    from contextd import service as client_plane
-    from contextd.ingest import ingest_note
-
-    conn = connect()
-    ingest_note(conn, "a brontide note for the mcp path")
-    conn.close()
-
-    (home() / "config.toml").write_text('[security]\nmode = "hardened"\n')
-    svc = AuthorityService(path=short_dir / "mcp.sock")
-    svc.start()
-    monkeypatch.setattr(client_plane, "socket_path", lambda *a, **k: svc.path)
-    try:
-        out = mcp_server.search("brontide")
-        assert "brontide" in out
-        assert not out.startswith("REFUSED")
-        assert not out.startswith("GATE REFUSED")
-    finally:
-        svc.stop()
-        (home() / "config.toml").unlink(missing_ok=True)
-
-
-def test_mcp_surface_fails_closed_when_the_daemon_is_gone(short_dir, monkeypatch):
-    from contextd import mcp_server
-    from contextd import service as client_plane
-    connect().close()
-    (home() / "config.toml").write_text('[security]\nmode = "hardened"\n')
-    monkeypatch.setattr(client_plane, "socket_path",
-                        lambda *a, **k: short_dir / "absent.sock")
-    try:
-        out = mcp_server.search("anything")
-        assert out.startswith("REFUSED")
-        assert "fails closed" in out
-    finally:
-        (home() / "config.toml").unlink(missing_ok=True)
+    out = mcp_server.search("anything")
+    assert out.startswith("REFUSED")
+    assert "fails closed" in out
