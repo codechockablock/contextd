@@ -145,17 +145,23 @@ they enabled still count in the field tally.
   L4 scratch drafts only, per operator ruling. Spec amendable via its
   changelog until first fixture, immutable after (§10 marker cites its
   hash + ENV.lock + WEIGHTS.lock).
-- **Next:** factory harness implementation (Mac-OK, no GPU) → `plan`
-  output committed → ENV.lock/WEIGHTS.lock on the desktop → corpus
-  generation there (~1.5 GPU-days single-stream, sharded) → §9 leakage
-  probe before anything downstream.
+- **Next:** remaining harness verbs (compose/timing engine, `gen`
+  backends, `replay`, `verify`, `probe`, `manifest`) + template
+  authoring (real setA/setB pools, T1–T4, GBNF) → `plan` output
+  committed → ENV.lock/WEIGHTS.lock on the desktop → corpus generation
+  there (~1.5 GPU-days single-stream, sharded) → §9 leakage probe
+  before anything downstream.
 - **Blockers:** — (repo naming outstanding, non-blocking; kill date
   2026-10-16 stands)
-- **Last update:** 2026-08-18 — factory spec frozen. Two in-spec rulings
-  flagged for operator review until first fixture: gate-invisibility =
-  gate events + provenance anomalies, NOT untrusted-presence (presence
-  reading is unsatisfiable under §5.2 exposure matching); feature 4
-  counts `tx.refuse` only (pin refusals belong to feature 3).
+- **Last update:** 2026-08-18 — harness core landed @ `0c03b51`
+  (md-signal): frozen-constants module with contextd-vocabulary drift
+  tests against the live schema, canonical regen hashing, seed
+  derivation, structural ids, pool loader, and the `plan` verb — 57
+  tests green, CLI smoke byte-identical across runs, 4,500 rows matching
+  the §5.2 arithmetic, quota breaches raise instead of write. The two
+  §7.3/§7.4 spec rulings were ratified by the operator ("rulings
+  stand"; spec changelog updated). No fixture exists; prereg freeze
+  window still open.
 
 ## Done
 
