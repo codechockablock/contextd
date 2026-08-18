@@ -104,30 +104,6 @@ they enabled still count in the field tally.
 
 ## Lanes
 
-### gate-v1.1-lane-p
-- **Objective:** PostgreSQL parity — backup/handoff/ingest/migrate on the
-  backend seam; CI service container so the 18 Postgres tests run. Brief:
-  docs/reviews/lane-p-goal-prompt.md. Owns backup/handoff/ingest/ci.yml.
-- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
-- **State:** RUNNING — dispatched 2026-08-18
-- **Last update:** 2026-08-18 — chartered from the operator's fix-all-gaps ruling
-
-### gate-v1.1-lane-q
-- **Objective:** Authority follow-ups — exported signed checkpoint, in-flight
-  mandate resolve act, refusal-row cap, migrate dry-run fix. Brief:
-  docs/reviews/lane-q-goal-prompt.md. Owns attest/ledger_sig/schemas/migrate.
-- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
-- **State:** RUNNING — dispatched 2026-08-18
-- **Last update:** 2026-08-18 — chartered from the operator's fix-all-gaps ruling
-
-### gate-v1.1-lane-r
-- **Objective:** Verification hardening — independent-language format verifier,
-  TOCTOU pinning test, import-level network gate. Brief:
-  docs/reviews/lane-r-goal-prompt.md. Owns scripts/ and tests/ only.
-- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
-- **State:** RUNNING — dispatched 2026-08-18
-- **Last update:** 2026-08-18 — chartered from the operator's fix-all-gaps ruling
-
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned
@@ -140,6 +116,22 @@ they enabled still count in the field tally.
 - **Last update:** 2026-08-15 — map reconciled to the archive marker
 
 ## Done
+
+- 2026-08-18 — **gate-v1.1** (three lanes, merged to master `ce27e55`): Postgres
+  backup/handoff/ingest + CI service container (lane P); exported signed
+  checkpoints, mandate.resolve, refusal cap, migrate-plan fix (lane Q);
+  independent-language format verifier, TOCTOU test, import-level network gate
+  (lane R). R's verifier caught FORMAT.md omitting the health plane — fixed,
+  errata kept. Pre-push audit found 5 cross-lane defects, all reproduced,
+  fixed, regression-tested, then re-verified probe-by-probe against the
+  pre-fix commit: sqlite_master probe and INSERT OR REPLACE crashed/wedged
+  post-cutover Postgres appends; APPENDER_GRANTS missed service_checkpoints;
+  checkpoint export laundered the chain_tip tamper signal; and the network
+  gate itself was passing falsely (bad __init__ relative-import resolution,
+  silent drops — manifest wrong from birth, regenerated). Suites 882+35 /
+  917 zero-skip; gates ALL PASSED. Residual, recorded: gate.py/cli.py/
+  handoff.py json_extract sites are SQLite-only (pre-existing; next bite is
+  the egress budget on a Postgres archive).
 
 - 2026-08-17 — **gate-v1-lane-5** (Claude Code / Fable 5, merged to master):
   the release surface, closing the Gate v1.0 program — all six lanes resolved
