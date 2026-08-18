@@ -83,6 +83,16 @@ they enabled still count in the field tally.
 
 ## Lanes
 
+### gate-v1-lane-5
+- **Objective:** Release surface — README (operator-ruled one-liner), quickstart
+  container-tested, SECURITY.md coverage, versioned record-format spec,
+  COMPARISON.md updated to merged reality, EU AI Act export (corrected
+  articles), packaging. Brief: docs/reviews/lane-5-goal-prompt.md.
+- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
+- **State:** RUNNING — dispatched 2026-08-17 evening
+- **Blockers:** —
+- **Last update:** 2026-08-17 — dispatched after lanes 1–4 merged (`1c5b1c8`)
+
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned
