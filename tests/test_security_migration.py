@@ -19,6 +19,7 @@ place, and then discovered to be a problem.
 
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -544,3 +545,78 @@ def test_fingerprint_detects_a_change_in_every_historical_column(legacy):
         conn.execute(f"UPDATE events SET {column} = ? WHERE id = 3", (original,))
         conn.commit()
         assert fingerprint(conn)["digest"] == baseline, f"{column} restore"
+
+
+# --- the plan must not under-report what apply creates -----------------------
+#
+# `plan()` is what an operator reads *before* consenting to a migration, so a
+# table missing from `_REQUIRED_TABLES` is not a cosmetic slip: the dry run
+# promises less than apply performs. `redemptions` was missing exactly that way
+# until gate-v1.1. Two tests keep it closed, from opposite directions — one
+# parses the schemas migration applies, one watches an apply actually happen —
+# because either test alone could be satisfied by editing its own input.
+
+def _declared_tables(script: str) -> set:
+    """Every table name a schema script creates, virtual tables included."""
+    return set(re.findall(
+        r"CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)",
+        script, re.IGNORECASE,
+    ))
+
+
+def test_required_tables_lists_every_table_the_migration_applies():
+    """Diff `_REQUIRED_TABLES` against the three schemas `migrate()` executes.
+
+    Static and total: this reads the DDL itself, so a table added to any of the
+    three scripts without being added to `_REQUIRED_TABLES` fails here even if
+    no migration is ever run.
+    """
+    from contextd.capability import SCHEMA as CAPABILITY_SCHEMA
+    from contextd.db import SCHEMA as DB_SCHEMA
+    from contextd.ledger_sig import SCHEMA as LEDGER_SCHEMA
+    from contextd.migrate import _PRE_HARDENING_TABLES, _REQUIRED_TABLES
+    from tests.legacy_support import LEGACY_SCHEMA
+
+    declared = set()
+    for script in (DB_SCHEMA, CAPABILITY_SCHEMA, LEDGER_SCHEMA):
+        found = _declared_tables(script)
+        assert found, "a schema script parsed to no tables at all"
+        declared |= found
+
+    # the guard that keeps the subtraction honest: every name excused as
+    # pre-existing must really be in the frozen legacy schema
+    assert _PRE_HARDENING_TABLES <= _declared_tables(LEGACY_SCHEMA)
+
+    assert declared - _PRE_HARDENING_TABLES == _REQUIRED_TABLES, (
+        "migrate._REQUIRED_TABLES has drifted from the schemas migration "
+        "applies; plan() would under-report what apply creates"
+    )
+    # the specific omission this test was written for
+    assert "redemptions" in _REQUIRED_TABLES
+
+
+def test_required_tables_plan_matches_what_apply_actually_creates(legacy):
+    """The behavioural half: what the plan promises vs. what apply adds.
+
+    Independent of the parse above — it never reads the DDL, it watches
+    `sqlite_master` across a real migration of a real legacy archive. Together
+    the two mean the plan cannot drift from apply in either direction.
+    """
+    root = home()
+    before = _table_names(root)
+    conn = open_archive_for_migration()
+    promised = set(plan(conn)["tables_to_create"])
+    migrate(conn)
+    conn.close()
+
+    created = _table_names(root) - before
+    # SQLite materializes FTS5 shadow tables on demand; they are not created by
+    # any CREATE TABLE in our schemas and are not the plan's to promise.
+    created = {t for t in created if not t.startswith("events_fts")}
+
+    assert promised, "the legacy fixture already had every authority table"
+    assert promised == created, (
+        f"plan() promised {sorted(promised)} but apply created "
+        f"{sorted(created)}"
+    )
+    assert "redemptions" in created

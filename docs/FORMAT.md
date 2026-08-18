@@ -1,9 +1,16 @@
 # contextd record format, version 1
 
 **Format identifier:** `contextd-record-format v1`
-**Archive schema version:** 3 (`contextd/db.py:170`, `SCHEMA_VERSION`)
-**Status:** frozen for v1. Additive changes bump the archive schema version;
-a change to any byte layout below bumps this document's version.
+**Archive schema version:** 3 (`contextd/db.py`, `SCHEMA_VERSION`)
+**Document revision:** 2
+**Status:** frozen for v1. A change to any byte layout below bumps the format
+identifier; a change to the archive's DDL bumps the schema version; anything
+this document merely gains — a new closed-vocabulary entry, a new section for a
+format that lives *outside* the archive — bumps only the document revision
+above. Revision 2 adds §11 (the exported checkpoint log), the `mandate.resolve`
+action class, and the `(mandate, resolve)` event type. No byte layout in §§1–6
+changed, which is why the format identifier and the schema version did not
+move: an archive written before revision 2 parses identically under it.
 
 ## Why this document exists
 
@@ -219,12 +226,20 @@ detection possible at all.
 
 ### Closed action-class registry
 
-`attest.py:79–92`. A class not listed cannot be authorized:
+`attest.py`, `ACTION_CLASSES`. A class not listed cannot be authorized:
 
 `note.deliberate`, `loop.add`, `loop.confirm`, `loop.close`, `loop.reopen`,
 `loop.dismiss`, `grant.add`, `grant.revoke`, `decision.supersede`,
-`archive.raw_read`, `archive.export`, `archive.backup`, `archive.restore`,
-`security.key_register`, `security.key_revoke`, `pin.adopt`, `pin.barrier`.
+`mandate.resolve`, `archive.raw_read`, `archive.export`, `archive.backup`,
+`archive.restore`, `security.key_register`, `security.key_revoke`,
+`pin.adopt`, `pin.barrier`.
+
+`mandate.resolve` (document revision 2) is the operator's attested outcome for
+a mandate the core cannot resolve — see the `(mandate, resolve)` row in §7. Its
+`arguments` are exactly `{nonce, status}`: the in-flight mandate's nonce, and
+`succeeded` or `failed`. A parser should read the recorded status from the
+**signed arguments**, not from the event's convenience copy, because the
+signature is what makes it an attestation.
 
 ### The attestation block as stored
 
@@ -377,16 +392,46 @@ registered type are refused rather than dropped.
 | `(grant, grant)` | Delegation grant or revocation |
 | `(decision, decision)` | Supersession edge |
 
-### Commerce vocabulary (`schemas.py:340–381`)
+### Commerce vocabulary (`schemas.py`, `EVENT_SCHEMAS`)
 
-Four words a transaction path needs that notes and grants do not have:
+Five words a transaction path needs that notes and grants do not have:
 
 | `(source, kind)` | Meaning |
 |---|---|
-| `(mandate, bind)` | The authorization is bound to an intent. **The only one of the four carrying an attestation block** — it is the event that consumes the nonce. |
+| `(mandate, bind)` | The authorization is bound to an intent. Carries an attestation block — it is the event that consumes the nonce. |
+| `(mandate, resolve)` | The operator's attested outcome for an in-flight mandate (document revision 2). Also carries an attestation block, for the same reason: it consumes an operator nonce of its own. |
 | `(tx, inflight)` | Observed-unresolved: the binding process did not live to record an outcome. Written at most once per mandate, by the core, when something asks — never by guessing. |
 | `(tx, execute)` | The act executed; carries `status` (`succeeded`/`failed`) and `outcome_digest`. |
 | `(tx, refuse)` | The core refused. Carries digests and a bounded reason, **never** an attestation block — the signature was not honored, and a refusal reproducing a live signed action would put an unconsumed authorization into the permanent record. |
+
+`(mandate, bind)` and `(mandate, resolve)` are the two that carry an
+attestation block; the three `tx` types consume no nonce and carry none.
+
+**`(mandate, resolve)` carries two distinct nonces and a reader must not
+conflate them.** `nonce` is the authorization *this* event consumes — the
+`mandate.resolve` signature — exactly as in every other event here.
+`mandate_nonce` is the in-flight mandate being resolved, which is the nonce of
+the *original* authorization, consumed long before by its `(mandate, bind)`.
+The row also carries `mandate_event`, `status`, `outcome_digest` and
+`replay_until`; the receipt itself is the event's `content`.
+
+A resolution is an assertion about the world, not an observation by contextd.
+Its receipt is a JSON object carrying `resolved_by: "operator"`, which is what
+distinguishes it from a `(tx, execute)` receipt the core actually witnessed. A
+reader treating the two as the same kind of evidence is reading it wrong.
+
+**Refusal rows are capped, and the cap is not evidence loss.** One
+authorization may durably record at most `[security] max_refusals_per_nonce`
+`(tx, refuse)` rows *per distinct reason* (default 64;
+`attest.DEFAULT_MAX_REFUSALS_PER_NONCE`). The refusal branch does not consume
+the nonce — a refused act must not burn the operator's signature — so without a
+cap one authorization could mint refusal rows without limit. Repetitions beyond
+the cap are refused identically to the caller but append nothing; since a
+refusal event's bytes are a pure function of (authorization, reason), those
+repetitions carry no information the recorded ones do not. Each reason keeps
+its own budget, so flooding one cannot suppress the first record of another. An
+adjudicator should therefore read the *presence* of a refusal reason as
+evidence, and its **count as a floor, not a total**.
 
 Refusal reasons are closed (`schemas.py:249–255`): `act_mismatch`,
 `already_consumed`, `unverifiable`, `intent_mismatch`, `replay_expired`. The
@@ -512,3 +557,95 @@ of this codebase.
 The frozen vectors in `tests/vectors/operator_action_v1.json` freeze
 input → bytes → digest, so a second implementation in another language can be
 checked against exact bytes before it is trusted against a real archive.
+
+---
+
+## 11. The exported checkpoint log (document revision 2)
+
+Source: `contextd/ledger_sig.py`, `append_checkpoint_log` /
+`read_checkpoint_log` / `verify_checkpoint_log`.
+CLI: `ctx security checkpoint export <dest>` and
+`ctx security checkpoint verify <dest>`.
+
+This is the one format in this document that does **not** live inside the
+archive, and that is its entire purpose.
+
+### Why it exists
+
+§5's `service_checkpoints` rows sit inside the archive they attest. Against an
+attacker who owns the storage — the SQLite file, or a PostgreSQL superuser —
+they establish nothing on their own: rewriting the chain and rewriting the
+checkpoint rows require the same privilege, so the attacker produces an archive
+that is internally consistent at whatever state they chose. Every local check
+passes.
+
+Moving the same signed records somewhere the archive's owner cannot rewrite
+removes that freedom. The archive can then be made to say it ends at `#400`,
+but a signature the attacker could not forge still says it once reached `#900`,
+and the two no longer agree.
+
+### The format
+
+**JSON Lines.** One JSON object per line, UTF-8, `\n`-terminated, appended with
+`O_APPEND` and fsynced. Nothing already written is ever modified — which is
+what lets the destination be genuinely append-only storage, and what bounds an
+interrupted write to the trailing line.
+
+Each line is a §5 checkpoint record plus two envelope keys:
+
+| Field | Meaning |
+|---|---|
+| `v` | Log record version, currently `1`. |
+| `exported_at` | Unix seconds when the line was appended. **Unsigned — see below.** |
+| `archive_uuid`, `tip_id`, `chain_hash`, `key_id`, `signature` | The §5 checkpoint record, unchanged. |
+| `alg`, `hybrid` | Present only in hybrid mode, exactly as in §5. |
+
+The signature covers the §5 **checkpoint payload only** —
+`{archive_uuid, tip_id, chain_hash, key_id}`, plus `alg` for non-classical
+schemes — canonically encoded under `contextd.ProtectedCheckpointV1` (§3).
+
+`v` and `exported_at` are deliberately outside it. The checkpoint payload is
+frozen so that every record signed before this section existed keeps verifying
+byte-for-byte, and buying a signed timestamp would have cost that. So
+**`exported_at` is unauthenticated**: it is for the operator's own ordering,
+and it is not evidence of when anything happened.
+
+### Verifying a log
+
+For each line: parse it, check `v`, rebuild the payload and verify every
+signature it carries (§5 — *all* of them must verify), confirm `archive_uuid`
+matches, then compare against the archive:
+
+- `tip_id` greater than the archive's last event id → **ROLLBACK**: the archive
+  no longer reaches a tip a signature says it had.
+- the archive's `chain_hash` at `tip_id` differs from the record's →
+  **REWRITTEN**.
+- a line that does not parse is reported, never skipped — an unparseable line
+  is what truncation and corruption look like.
+
+**Every record must be checked, not just the newest.** An attacker who rolls
+the archive back and then exports a fresh checkpoint at the rolled-back tip
+produces a log whose last line is perfectly valid. The earlier lines are the
+evidence, and a verifier that stops at the newest record finds nothing.
+
+### What this does NOT prove
+
+Stated here because the mechanism is easy to over-read, and returned as data by
+`ledger_sig.checkpoint_log_claim` so a caller cannot quietly upgrade it:
+
+- **On one machine under one uid this is advisory.** The uid that can rewrite
+  the archive can rewrite the log. It detects accident, bug, and partial
+  compromise — not an attacker who owns the account. The mechanism becomes
+  load-bearing only when the destination is somewhere the archive's owner
+  cannot write: another host, an append-only bucket, a different uid, or
+  immutable storage. Nothing in the code can verify that the destination has
+  that property; `ctx security doctor` reports separately whether the
+  configured checkpoint destination is writable by this uid.
+- **Completeness is not proved.** A log can be truncated, and a truncated log
+  verifies — it is a valid log of fewer checkpoints. Only the destination's own
+  append-only guarantee can rule that out.
+- **A rollback to a state older than the first exported checkpoint is not
+  detected**, because no exported record covers it.
+- **Nothing about content.** A checkpoint carries no archive data by design —
+  the destination is by definition somewhere the operator does not fully
+  control, so it must not carry any.

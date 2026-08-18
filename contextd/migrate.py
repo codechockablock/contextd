@@ -149,11 +149,34 @@ def plan(conn) -> dict:
     }
 
 
+#: Every table migration creates that a pre-hardening archive does not already
+#: have. `plan()` reports the missing ones, so an omission here is not a
+#: cosmetic documentation slip: it makes the dry run *under-report what apply
+#: will do*, which is the one thing an operator runs a dry run to learn.
+#:
+#: `redemptions` was missing until gate-v1.1. It is applied by `DB_SCHEMA` like
+#: the rest of the authority-plane tables, so migration created it either way —
+#: the bug was entirely in what the plan promised, which is the half the
+#: operator reads before consenting.
+#:
+#: This set is checked against the schemas it claims to summarize by
+#: `tests/test_security_migration.py::test_required_tables_*`: one test parses
+#: every `CREATE TABLE` out of the three scripts `migrate()` applies, and one
+#: diffs the plan against the tables an apply actually adds. Adding a table to
+#: any schema without adding it here fails both.
 _REQUIRED_TABLES = {
-    "operator_keys", "operator_nonces", "operator_sequence",
+    "operator_keys", "operator_nonces", "operator_sequence", "redemptions",
     "archive_identity", "dispatch_capabilities", "service_keys",
     "service_signatures", "service_tips", "service_checkpoints",
 }
+
+#: Tables a pre-hardening archive already has, so migration never "creates"
+#: them and `_REQUIRED_TABLES` must not list them. These are exactly the four
+#: in `tests/legacy_support.py::LEGACY_SCHEMA`. Kept explicit rather than
+#: implied: this is the whole difference between the schemas' table set and
+#: the set above, and the drift test subtracts it *by name* so that a newly
+#: added core table cannot be waved through as "presumably legacy".
+_PRE_HARDENING_TABLES = {"events", "cursors", "chain_state", "events_fts"}
 
 
 def _table_names(conn) -> set:

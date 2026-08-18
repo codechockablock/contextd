@@ -55,6 +55,21 @@ def test_the_spec_declares_its_identifier_and_the_schema_version_it_describes(
     assert f"**Archive schema version:** {SCHEMA_VERSION}" in spec_text
 
 
+def test_the_spec_declares_a_document_revision_distinct_from_the_format(
+    spec_text,
+):
+    """Revision 2 added §11 and two vocabulary entries and changed no bytes.
+
+    The three version numbers in the header answer different questions and the
+    document says which is which — the format identifier is what a parser keys
+    on, the schema version is the DDL, and the revision is this document. A
+    change that moved the wrong one would mislead exactly the reader this file
+    exists for.
+    """
+    assert "**Document revision:** 2" in spec_text
+    assert "an archive written before revision 2 parses identically" in spec_text
+
+
 def test_the_compliance_export_names_the_same_format_identifier():
     """A reader handed only the compliance artifact must be able to find the
     document that tells them how to parse the archive it describes."""
@@ -317,6 +332,84 @@ def test_the_spec_lists_every_field_kind(spec_text):
 
 
 # --- §9 stated omissions ----------------------------------------------------
+
+
+# --- §11 the exported checkpoint log ----------------------------------------
+
+
+def test_the_spec_documents_the_exported_checkpoint_log_envelope(spec_text):
+    """§11's envelope keys and version, checked against the implementation."""
+    section = spec_text.split("## 11. The exported checkpoint log")[1]
+    for key in ledger_sig.CHECKPOINT_LOG_ENVELOPE:
+        assert f"`{key}`" in section, f"§11 omits envelope key {key}"
+    assert f"currently `{ledger_sig.CHECKPOINT_LOG_VERSION}`" in section
+    assert "JSON Lines" in section
+
+
+def test_the_spec_records_that_the_export_timestamp_is_unsigned(spec_text):
+    """The single most over-readable field in the format.
+
+    `exported_at` is outside `checkpoint_payload` — §5's payload is frozen — so
+    it is not evidence of when anything happened, and the document has to say
+    so where a reader will meet it.
+    """
+    section = spec_text.split("## 11. The exported checkpoint log")[1]
+    assert "**Unsigned" in section
+    assert "`exported_at` is unauthenticated" in section
+    assert "not evidence of when anything happened" in section
+    # and the implementation agrees: the signed payload has no timestamp
+    payload = ledger_sig.checkpoint_payload("uuid", 1, "a" * 64, "k")
+    assert "exported_at" not in payload and "v" not in payload
+
+
+def test_the_spec_states_the_exported_logs_advisory_scope(spec_text):
+    """The honest-scope paragraph is load-bearing and must match the code.
+
+    `checkpoint_log_claim` returns the same limitations as data; if the
+    document and the claim drift, one of them is lying to an operator.
+    """
+    section = spec_text.split("## 11. The exported checkpoint log")[1]
+    assert "advisory" in section.lower()
+    assert "another host" in section
+    claim = ledger_sig.checkpoint_log_claim()
+    assert "ADVISORY" in claim["advisory_on_one_machine"]
+    for fragment in ("truncated", "older than the first exported checkpoint"):
+        assert fragment in section, f"§11 does not disclaim {fragment}"
+    # every record must be checked, not only the newest — the whole point
+    assert "Every record must be checked, not just the newest" in section
+
+
+def test_the_spec_documents_the_refusal_cap_as_a_floor_not_a_total(spec_text):
+    """A reader counting `tx/refuse` rows must know the count is capped.
+
+    Without this, an adjudicator would read "8 refusals" as "8 attempts",
+    which is exactly wrong: attempts are unbounded and only the record is
+    capped.
+    """
+    from contextd import attest
+
+    assert f"default {attest.DEFAULT_MAX_REFUSALS_PER_NONCE}" in spec_text
+    assert attest.REFUSAL_CAP_KEY in spec_text
+    assert "count as a floor, not a total" in spec_text
+
+
+def test_the_spec_distinguishes_an_attested_resolution_from_an_observed_one(
+    spec_text,
+):
+    """`(mandate, resolve)` is an assertion about the world; `(tx, execute)` is
+    contextd's own observation. Conflating them is the misreading this section
+    exists to prevent."""
+    from contextd import attest
+
+    assert f'`{attest.RESOLVED_BY_OPERATOR}`' in spec_text or \
+        f'"{attest.RESOLVED_BY_OPERATOR}"' in spec_text
+    assert "mandate_nonce" in spec_text
+    assert "assertion about the world" in spec_text
+    for status in attest.RESOLUTION_STATUSES:
+        assert f"`{status}`" in spec_text
+
+
+# --- §9 stated omissions (continued) ----------------------------------------
 
 
 def test_the_spec_states_what_it_does_not_cover(spec_text):

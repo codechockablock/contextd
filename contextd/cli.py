@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import __version__, home, load_config
 from . import liveness as liveness_module
+from .attest import RESOLUTION_STATUSES as _RESOLUTION_STATUSES
 from .backup import BackupError, create_backup, restore_backup
 from .db import (
     ChainStateError,
@@ -522,11 +523,29 @@ def cmd_security(args):
                   f"left byte-identical")
         return
     if args.security_action == "checkpoint":
-        from .ledger_sig import checkpoint_record, verify_checkpoint, write_checkpoint
+        from .ledger_sig import (append_checkpoint_log, checkpoint_log_claim,
+                                 checkpoint_record, verify_checkpoint,
+                                 verify_checkpoint_log, write_checkpoint)
         conn = connect()
         destination = (args.destination
                        or (load_config().get("security") or {})
                        .get("checkpoint_destination") or "").strip()
+        action = getattr(args, "checkpoint_action", None)
+        if action == "export":
+            entry = append_checkpoint_log(conn, args.dest)
+            print(f"appended checkpoint at tip #{entry['tip_id']} to "
+                  f"{args.dest}")
+            print(f"  chain {entry['chain_hash'][:16]}…  "
+                  f"algs {', '.join([entry.get('alg', 'ecdsa-p256-sha256')] + [h['alg'] for h in entry.get('hybrid', [])])}")
+            print("  " + checkpoint_log_claim()["advisory_on_one_machine"])
+            return
+        if action == "verify":
+            result = verify_checkpoint_log(conn, args.dest)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            if result.get("rollback"):
+                print("\nROLLBACK DETECTED — the archive no longer reaches a "
+                      "tip a signed checkpoint recorded.", file=sys.stderr)
+            sys.exit(0 if result["ok"] else 1)
         if args.write:
             if not destination:
                 sys.exit("refused: no checkpoint destination configured. Set "
@@ -784,6 +803,70 @@ def cmd_decision(args):
                       f"ev {walk['current']}  (chain {chain})")
     except DecisionError as e:
         sys.exit(f"refused: {e}")
+
+
+def cmd_mandate(args):
+    """In-flight mandates, and the operator act that closes one.
+
+    A mandate goes in flight when the process that bound it died between the
+    external act and the outcome append. The core cannot close it — it does not
+    know whether the money moved — and deliberately will not guess. `resolve`
+    is the operator saying what they checked *outside* this archive: the
+    processor's console, the bank statement, the counterparty. The signature
+    covers exactly that claim, and the ledger records it as an attestation
+    rather than as something contextd observed.
+    """
+    from . import service
+    from .attest import (AttestationError, inflight_mandates,
+                         resolution_arguments, resolve_mandate)
+
+    if service.hardened():
+        # Every hardened operator act needs its own gated daemon operation
+        # (contextd/authd.py). `mandate.resolve` has none yet, and inventing an
+        # ungated path here is precisely the second authorization path this act
+        # was designed not to become.
+        sys.exit(
+            "refused: hardened mode has no gated `mandate.resolve` operation "
+            "yet; the authority service must expose one before a resolution "
+            "can be signed through it."
+        )
+    conn = connect()
+    if args.action == "list":
+        pending = inflight_mandates(conn)
+        if not pending:
+            print("(no mandates are in flight)")
+            return
+        for mandate in pending:
+            print(f"{mandate['nonce']}  bound {mandate['bound']}  "
+                  f"mandate ev {mandate['mandate_event']}  "
+                  f"intent {mandate['intent_digest'][:16]}…")
+        print(f"\n{len(pending)} awaiting an attested outcome. Resolve one "
+              f"only after verifying it outside contextd:")
+        print("  ctx mandate resolve <nonce> --status succeeded|failed "
+              "--reason '<what you checked>'")
+        return
+
+    # One value, used for the signed digest and for the recorded reason, so the
+    # bytes the operator signs and the bytes re-derived at append cannot differ.
+    reason = args.reason or None
+    try:
+        arguments = resolution_arguments(args.nonce, args.status)
+    except AttestationError as exc:
+        sys.exit(f"refused: {exc}")
+    authorization = operator_authorization(
+        conn, "mandate.resolve", "global", arguments=arguments, reason=reason,
+    )
+    try:
+        result = resolve_mandate(
+            conn, authorization, nonce=args.nonce, status=args.status,
+            reason=reason,
+        )
+    except AttestationError as exc:
+        sys.exit(f"refused: {exc}")
+    print(f"resolved: mandate {args.nonce[:16]}… recorded {args.status} "
+          f"(ev {result.outcome_event})")
+    print("  this is YOUR attestation about the world, not contextd's "
+          "observation of it")
 
 
 def cmd_timeline(args):
@@ -1363,6 +1446,26 @@ def main():
                          help="follow the chain from an event id")
     dc.add_argument("event_id", type=int)
 
+    sp = sub.add_parser("mandate",
+                        help="in-flight mandates: list | resolve. A mandate is "
+                             "in flight when the process that bound it died "
+                             "before recording an outcome; only the operator "
+                             "can close one, by attesting what they verified "
+                             "outside contextd")
+    msub = sp.add_subparsers(dest="action", required=True)
+    msub.add_parser("list", help="mandates awaiting an attested outcome")
+    mr = msub.add_parser(
+        "resolve",
+        help="record YOUR attested outcome for an in-flight mandate "
+             "(operator act; contextd never guesses this)",
+    )
+    mr.add_argument("nonce", help="the mandate nonce from `ctx mandate list`")
+    mr.add_argument("--status", required=True,
+                    choices=list(_RESOLUTION_STATUSES),
+                    help="what you verified actually happened out in the world")
+    mr.add_argument("--reason", default="",
+                    help="what you checked and where — recorded with the "
+                         "attestation and covered by the signature")
     sp = sub.add_parser("timeline", help="browse events by time")
     sp.add_argument("--since")
     sp.add_argument("--until")
@@ -1411,10 +1514,28 @@ def main():
     sm.add_argument("--json", action="store_true")
     sc = ssub.add_parser("checkpoint",
                          help="protected rollback checkpoint: print, write, "
-                              "or verify")
+                              "verify, or append to an exported log")
     sc.add_argument("--write", action="store_true",
                     help="write the checkpoint to the configured destination")
     sc.add_argument("--destination", default=None)
+    # Nested and optional, so `ctx security checkpoint [--write]` keeps its
+    # exact behaviour. The log subcommands are separate from `--write` because
+    # they are a different thing: --write replaces one record, export appends
+    # to a history.
+    csub = sc.add_subparsers(dest="checkpoint_action", required=False)
+    ce = csub.add_parser(
+        "export",
+        help="append a signed checkpoint to an append-only log OUTSIDE the "
+             "archive. Advisory unless <dest> is somewhere this uid cannot "
+             "rewrite (another host, another uid, append-only storage)",
+    )
+    ce.add_argument("dest", help="path to the checkpoint log (JSON Lines)")
+    cv = csub.add_parser(
+        "verify",
+        help="check the archive against EVERY checkpoint in an exported log; "
+             "exits nonzero on any failure and screams on rollback",
+    )
+    cv.add_argument("dest", help="path to the checkpoint log (JSON Lines)")
     se = ssub.add_parser("export",
                          help="seal the archive to the configured recipient")
     se.add_argument("--dest", default=None,
@@ -1499,6 +1620,7 @@ def main():
          "loop": cmd_loop, "decision": cmd_decision, "grant": cmd_grant,
          "timeline": cmd_timeline,
          "audit": cmd_audit, "status": cmd_status, "outcome": cmd_outcome,
+         "mandate": cmd_mandate,
          "exp": cmd_exp, "backup": cmd_backup, "restore": cmd_restore,
          "verify": cmd_verify, "why": cmd_why, "lineage": cmd_lineage,
          "compliance": cmd_compliance,
