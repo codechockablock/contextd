@@ -16,7 +16,9 @@ import pytest
 
 from contextd import load_config
 from contextd.db import append_event, connect
-from contextd.gate import assemble, select_items
+from contextd.gate import (
+    RetrievalNotRegistered, assemble, select_items,
+)
 
 
 def _seed(conn):
@@ -33,18 +35,32 @@ def test_registered_provider_is_what_the_gate_retrieves_through(
     assert select_items(conn, cfg, "pangolin", budget=2000)
 
 
-def test_an_unregistered_gate_discloses_nothing(
+def test_an_unregistered_gate_raises_rather_than_answering_empty(
     isolated_contextd_home, monkeypatch,
 ):
-    """The fail-closed direction: no provider means no candidates, not a crash
-    and not an unfiltered dump."""
+    """R9: returning [] would assert the archive is empty, which an
+    unconfigured gate has not earned. The error must name the way out."""
     conn = connect()
     cfg = _seed(conn)
     monkeypatch.setattr("contextd.gate._RETRIEVAL", None)
 
-    assert select_items(conn, cfg, "pangolin", budget=2000) == []
-    result = assemble(conn, cfg, "pangolin", budget=2000, purpose="hook test")
-    assert result["items"] == []
+    with pytest.raises(RetrievalNotRegistered,
+                       match="register_retrieval_provider"):
+        select_items(conn, cfg, "pangolin", budget=2000)
+    with pytest.raises(RetrievalNotRegistered):
+        assemble(conn, cfg, "pangolin", budget=2000, purpose="hook test")
+
+
+def test_absence_as_empty_is_opt_in(isolated_contextd_home, monkeypatch):
+    """A caller that genuinely wants empty says so in its own code."""
+    conn = connect()
+    cfg = _seed(conn)
+    monkeypatch.setattr("contextd.gate._RETRIEVAL", None)
+    try:
+        items = select_items(conn, cfg, "pangolin", budget=2000)
+    except RetrievalNotRegistered:
+        items = []
+    assert items == []
 
 
 @pytest.mark.parametrize("entry_point",

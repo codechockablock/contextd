@@ -14,11 +14,17 @@ from .redact import redact
 #: does not name it, because retrieval is a consumer of the record rather than
 #: part of its lifecycle (lane T, ruling R1/R5).
 #:
-#: **No provider is the fail-closed state.** With nothing registered there are
-#: no candidates, so `select_items` returns nothing and `disclose` has nothing
-#: to disclose or to log. That is the safe direction for a gate: it discloses
-#: LESS, never more. Contrast contextd/domains.py, whose no-op default would
-#: have discloses MORE and is therefore core rather than a hook.
+#: **An unregistered provider RAISES; it never returns empty** (ruling R9).
+#: Returning no candidates would assert "there is nothing here", which is a
+#: claim about the archive's contents that an unconfigured gate has not
+#: earned — a silent wrong answer, and this codebase does not ship those:
+#: absence is recorded, UNVERIFIABLE is not PASS, exit 3 is not exit 0.
+#:
+#: The rule this follows, uniformly: a hook whose absence changes an ANSWER
+#: raises when unregistered; a hook whose absence merely skips an optional side
+#: effect may no-op. A caller that genuinely wants absence-as-empty catches
+#: RetrievalNotRegistered and says so in its own code, so emptiness is opt-in
+#: rather than the default nobody chose.
 _RETRIEVAL = None
 
 
@@ -34,12 +40,20 @@ def register_retrieval_provider(provider) -> None:
 
 def _search(conn, query, *, limit, since, until):
     if _RETRIEVAL is None:
-        return []
+        raise RetrievalNotRegistered(
+            "no retrieval provider is registered, so this gate cannot say what "
+            "the archive contains and will not answer as though it were empty. "
+            "Register one with contextd.gate.register_retrieval_provider(); "
+            "the daemon's provider registers itself when contextd.search is "
+            "imported. To treat absence as an empty result, catch "
+            "contextd.gate.RetrievalNotRegistered explicitly."
+        )
     return _RETRIEVAL(conn, query, limit=limit, since=since, until=until)
 
 
 __all__ = [
     "GateError",
+    "RetrievalNotRegistered",
     "assemble",
     "check_budget",
     "disclose",
@@ -57,6 +71,10 @@ __all__ = [
 
 class GateError(Exception):
     pass
+
+
+class RetrievalNotRegistered(GateError):
+    """The gate was asked to find candidates with no retrieval provider."""
 
 
 def never_leave(cfg, uri) -> bool:

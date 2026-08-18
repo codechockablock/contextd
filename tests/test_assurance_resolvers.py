@@ -19,12 +19,13 @@ import pytest
 from contextd.assurance import (
     AUTHENTICATED_HUMAN,
     CAN_DELEGATE,
+    RESOLVER_REQUIRED,
+    ResolverNotRegistered,
     _RESOLVERS,
-    assurance_of,
     known_event_assurance,
     register_assurance_resolver,
 )
-from contextd.db import connect
+from contextd.db import append_event, connect
 from contextd.loops import add_loop, make_scope, stored_loop_assurance
 
 REPO = make_scope("/synthetic/lane-t")
@@ -46,26 +47,43 @@ def test_known_event_assurance_dispatches_to_the_registered_resolver(
     )
 
 
-def test_without_a_resolver_the_level_underclaims_rather_than_overclaims(
+def test_a_reducer_backed_type_without_its_resolver_raises(
     isolated_contextd_home, monkeypatch,
 ):
-    """The fail-closed direction the registry's docstring promises.
+    """R9: it must not answer "unverified" as though it had checked.
 
-    An unregistered event type must fall back to a level that cannot ground a
-    human claim or authorize a delegation — never to a stronger one.
+    Falling back would be true of the BUILD and read as a fact about the
+    EVENT — a loop the reducer would resolve to operator_authorized reported
+    as unverified, with nothing in the output distinguishing the two.
     """
     conn = connect()
     loop = add_loop(conn, "what happens with an empty registry", REPO)["loop"]
     row = _loop_row(conn, loop["id"])
 
     monkeypatch.setattr("contextd.assurance._RESOLVERS", {})
-    fallback = known_event_assurance(conn, row)
+    with pytest.raises(ResolverNotRegistered, match="register_assurance_resolver"):
+        known_event_assurance(conn, row)
 
-    assert fallback == assurance_of(
-        __import__("json").loads(row["meta"] or "{}")
-    )
-    assert fallback not in AUTHENTICATED_HUMAN
-    assert fallback not in CAN_DELEGATE
+
+def test_a_type_that_needs_no_reducer_still_falls_back_quietly(
+    isolated_contextd_home, monkeypatch,
+):
+    """The other half of R9: absence is only loud where it changes an answer.
+
+    For a type with no reducer behind it, "nothing checked it" is the whole
+    truth rather than a gap, so the metadata-only fallback stands — and it
+    still cannot ground a human claim or authorize a delegation.
+    """
+    conn = connect()
+    event_id = append_event(conn, "note", "note", content="an ordinary note")
+    row = _loop_row(conn, event_id)
+
+    monkeypatch.setattr("contextd.assurance._RESOLVERS", {})
+    level = known_event_assurance(conn, row)
+
+    assert ("note", "note") not in RESOLVER_REQUIRED
+    assert level not in AUTHENTICATED_HUMAN
+    assert level not in CAN_DELEGATE
 
 
 @pytest.mark.parametrize("module,source,kind", [
