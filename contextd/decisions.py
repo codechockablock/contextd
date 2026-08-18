@@ -22,6 +22,7 @@ from .assurance import (
     UNVERIFIED,
     assurance_for_event,
     refuse_forged_authority,
+    register_assurance_resolver,
 )
 
 SUPERSEDE_RESERVE_SHARE = 0.06   # of budget, when any edge exists
@@ -238,3 +239,10 @@ def supersession_marker(edges: dict, event_id: int) -> str:
         return (f"SUPERSEDED — edge ev {e['edge']} names ev {e['new']} but "
                 f"the chain is cyclic; no resolvable current version")
     return f"SUPERSEDED by ev {walk['current']} (edge ev {e['edge']})"
+
+
+# contextd/assurance.py dispatches here rather than importing this module:
+# the evidence core must not depend on the daemon. Registration happens at
+# import time, and the daemon entry points import this module at module scope
+# so no process can read a decision event through a half-populated registry.
+register_assurance_resolver("decision", "decision", stored_decision_assurance)

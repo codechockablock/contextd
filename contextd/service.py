@@ -20,6 +20,12 @@ from . import load_config
 from .authd import hardened, socket_path
 from .rpc import RpcClient, RpcError, ServiceUnavailable
 
+# Assurance resolvers register at import time (contextd/assurance.py). Importing
+# them here, at module scope, is what guarantees a daemon process never reads a
+# loop or decision event through a half-populated registry: every daemon process
+# starts at one of the four entry points that carry this import.
+from . import decisions, loops  # noqa: F401
+
 __all__ = [
     "ClientRefused", "RpcError", "ServiceUnavailable",
     "backup", "grant_add", "grant_revoke", "hardened", "key_register",

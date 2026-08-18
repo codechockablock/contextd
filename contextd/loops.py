@@ -22,6 +22,7 @@ from pathlib import Path
 from .assurance import (
     INSECURE_TEST_SIGNER, LEGACY_UNVERIFIED, MODEL_GRANTED, OPERATOR_AUTHORIZED,
     UNVERIFIED, assurance_for_event, assurance_of, refuse_forged_authority,
+    register_assurance_resolver,
 )
 
 # scope_str now lives in contextd/grants.py: its output is covered by a signed
@@ -604,3 +605,10 @@ def select_loop_section(conn, budget: int, repo_path: str | None) -> dict:
     return {"items": items, "ids": ids,
             "omitted": [lp["id"] for lp in omitted],
             "used": used, "slice": slice_budget}
+
+
+# contextd/assurance.py dispatches here rather than importing this module:
+# the evidence core must not depend on the daemon. Registration happens at
+# import time, and the daemon entry points import this module at module scope
+# so no process can read a loop event through a half-populated registry.
+register_assurance_resolver("loop", "loop", stored_loop_assurance)

@@ -26,6 +26,12 @@ from .ingest import run_all
 from .liveness import capture_liveness, describe, format_age, stale_line
 from .search import timeline
 
+# Assurance resolvers register at import time (contextd/assurance.py). Importing
+# them here, at module scope, is what guarantees a daemon process never reads a
+# loop or decision event through a half-populated registry: every daemon process
+# starts at one of the four entry points that carry this import.
+from . import decisions, loops  # noqa: F401
+
 CONFIG_TEMPLATE = '''# contextd config — merged over built-in defaults (see contextd/__init__.py)
 
 [ingest]

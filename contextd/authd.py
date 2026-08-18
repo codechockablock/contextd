@@ -51,6 +51,12 @@ from .rpc import (
     send_frame,
 )
 
+# Assurance resolvers register at import time (contextd/assurance.py). Importing
+# them here, at module scope, is what guarantees a daemon process never reads a
+# loop or decision event through a half-populated registry: every daemon process
+# starts at one of the four entry points that carry this import.
+from . import decisions, loops  # noqa: F401
+
 SOCKET_NAME = "authd.sock"
 
 #: Operations at this tier return archive-derived bytes only through the gate:

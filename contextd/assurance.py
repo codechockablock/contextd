@@ -73,6 +73,34 @@ FORGEABLE_AUTHORITY_LABELS = frozenset({
 })
 
 
+#: Assurance resolvers for event types whose level is established by a reducer
+#: that does not live here — a loop's by replaying the loop reduction, a
+#: supersession's by verifying the edge. The module that owns the event type
+#: registers its own resolver at import time; nothing in this module imports
+#: those modules, which is what keeps the evidence core free of the daemon.
+#:
+#: **Empty is the fail-closed state, not a broken one.** With nothing
+#: registered, `known_event_assurance` falls through to `assurance_of`, which
+#: has no connection, no key registry and no signature and is therefore
+#: structurally incapable of returning anything above LEGACY_UNVERIFIED. An
+#: unregistered event type under-claims its assurance; it can never over-claim
+#: it. That is the right failure direction for a type this build does not know
+#: how to verify — and with the daemon absent, the events it would have
+#: resolved cannot exist in the first place.
+_RESOLVERS: dict[tuple[str, str], object] = {}
+
+
+def register_assurance_resolver(source: str, kind: str, resolver) -> None:
+    """Declare how one event type's stored assurance is verified.
+
+    `resolver(conn, event_id) -> str` must return a level from
+    ASSURANCE_LEVELS. Registration is idempotent and last-wins so a reload
+    does not fail; there is deliberately no unregister, because a build that
+    can verify a type should not be able to forget how mid-process.
+    """
+    _RESOLVERS[(source, kind)] = resolver
+
+
 class AssuranceError(RuntimeError):
     """An action claimed an assurance level it has not established."""
 
@@ -311,14 +339,9 @@ def known_event_assurance(conn, event_row) -> str:
                 scope="global",
                 content=event_row["content"] or None,
             )
-        if source == "loop" and kind == "loop":
-            from .loops import stored_loop_assurance
-
-            return stored_loop_assurance(conn, int(event_row["id"]))
-        if source == "decision" and kind == "decision":
-            from .decisions import stored_decision_assurance
-
-            return stored_decision_assurance(conn, int(event_row["id"]))
+        resolver = _RESOLVERS.get((source, kind))
+        if resolver is not None:
+            return resolver(conn, int(event_row["id"]))
         return assurance_of(meta)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return UNVERIFIED
