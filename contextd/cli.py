@@ -1362,7 +1362,8 @@ def main():
     sp.add_argument("--authorize", action="store_true",
                     help="require a fresh hardware-signed operator action")
     sub.add_parser("ingest", help="run all ingesters once")
-    sub.add_parser("watch", help="run ingesters on a loop (the daemon)")
+    sub.add_parser("watch",
+                   help="run ingest scans on a foreground loop (ctrl-c stops)")
     sp = sub.add_parser("search", help="local FTS search (not logged)")
     sp.add_argument("query", nargs="+")
     sp.add_argument("--limit", type=int, default=10)

@@ -78,44 +78,26 @@ Then delete the exported public key file — it is not secret, but it is clutter
 rm /tmp/operator-key.der
 ```
 
-## 4. Install the authority daemon — OPERATOR ACTION, REQUIRES ROOT
+## 4. The authority daemon — REMOVED (lane X)
 
-The daemon exists (`contextd/authd.py`) and can be run in the foreground today:
+This section used to install a resident authority daemon under a dedicated
+service account. The daemon was removed with the rest of residency (lane X,
+residency dissolution): there is no `ctx security serve`, no
+`com.contextd.authd.plist`, and no RPC surface. The architecture is a
+library plus event-time hooks and launchd timers; nothing runs continuously.
 
-```bash
-CONTEXTD_HOME=/path/to/archive .venv/bin/ctx security serve --socket /tmp/authd.sock
-```
+What replaces the installed-daemon posture:
 
-That runs it as **you**, which is useful for testing the RPC surface but
-provides no isolation — the archive is still yours. Real isolation needs the
-service account below, and is a root action:
-
-```bash
-# create the dedicated service account
-sudo dscl . -create /Users/_contextd UserShell /usr/bin/false
-sudo dscl . -create /Users/_contextd UniqueID 499
-sudo dscl . -create /Users/_contextd PrimaryGroupID 499
-
-# root-owned installed code — NOT writable by the desktop UID
-sudo install -d -o root -g wheel -m 0755 /usr/local/libexec/contextd
-sudo install -o root -g wheel -m 0755 dist/contextd-authd /usr/local/libexec/contextd/
-
-# service-owned archive
-sudo install -d -o _contextd -g _contextd -m 0700 /var/db/contextd
-sudo install -d -o _contextd -g staff  -m 0750 /var/run/contextd
-
-sudo cp build/deploy/launchd/com.contextd.authd.plist /Library/LaunchDaemons/
-sudo chown root:wheel /Library/LaunchDaemons/com.contextd.authd.plist
-sudo launchctl load -w /Library/LaunchDaemons/com.contextd.authd.plist
-```
-
-Verify ownership actually landed — the security property is the ownership, not
-the copy:
-
-```bash
-ls -ln /usr/local/libexec/contextd /var/db/contextd /var/run/contextd/authd.sock
-sudo -u nobody test -r /var/db/contextd/contextd.db && echo "FAIL: readable" || echo "ok: not readable"
-```
+- **Development mode** (the default) is unchanged: the client plane opens
+  the archive directly and assurance is attribution.
+- **Hardened mode is a fail-closed refusal.** With no authority plane to
+  serve reads, a `[security] mode = "hardened"` archive refuses every read
+  and write from every boundary (docs/SECURITY.md, Deployment states). The
+  out-of-band first-key bootstrap ceremony (§3) is the one hardened path
+  that still runs.
+- The service-account and file-ownership recipe that used to live here is
+  extraction-scope for a future authority plane; nothing in this tree
+  consumes it today.
 
 ## 5. Migrate the live archive — OPERATOR ACTION
 
@@ -355,17 +337,15 @@ manifest trust store apply to it unchanged.
 ctx security doctor --strict --json
 ```
 
-On this tree it reports 6 of 7 invariants failing, which is the correct answer:
-the service is not installed, no hardware key is enrolled, the archive is
-readable by the desktop uid, service signatures are unimplemented, no protected
-checkpoint is configured, and the test signer is available in development.
+On this tree it reports most of its five invariants failing, which is the
+correct answer: no hardware key is enrolled, no protected checkpoint is
+configured, and development mode permits direct archive access. (The two
+daemon-deployment invariants were deleted with the daemon, lane X.)
 
 Production may be called hardened **only** when this exits 0 with every
 invariant reported separately and true:
 
-- protected daemon (root-owned code, dedicated service UID)
 - production hardware signer enrolled
-- raw archive inaccessible from the client boundary
 - valid service signatures
 - current protected checkpoint
 - no plaintext scratch
@@ -378,11 +358,6 @@ Until then the honest answer to "is production hardened?" is **no**.
 ## Rollback
 
 Rollback is the reason step 5 begins with a verified backup.
-
-```bash
-sudo launchctl unload -w /Library/LaunchDaemons/com.contextd.authd.plist
-sudo rm /Library/LaunchDaemons/com.contextd.authd.plist
-```
 
 The archive is append-only, so a migration cannot be "undone" by deletion —
 recovery is a restore:

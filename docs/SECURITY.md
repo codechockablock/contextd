@@ -57,10 +57,14 @@ against** and must not be claimed as defended.
 
 ## 2. Trusted computing base
 
+The resident authority daemon and its RPC surface were removed (lane X):
+rows below describe what remains. File ownership is still what makes the
+hardened refusal real — a service-owned archive at mode `0600` is unreadable
+from the desktop UID whether or not anything serves it.
+
 | Component | Trusted for | Owner in a hardened deployment |
 |---|---|---|
 | macOS kernel + Secure Enclave | key non-exportability, user presence, peer credentials on `AF_UNIX` | OS |
-| Root-owned installed daemon code | correct enforcement of every RPC | `root:wheel`, mode `0755`, not writable by the desktop UID |
 | Dedicated service UID (`_contextd`) | exclusive access to DB, blobs, witness, service key, key registry, nonce/sequence state, plaintext backup staging | service account |
 | Operator hardware key | grounding *authenticated-human* provenance | Secure Enclave, non-exportable, presence-gated |
 | Protected checkpoint destination | rollback/truncation detection | anything the desktop UID cannot rewrite |
@@ -93,12 +97,13 @@ component that received them — `mcp`, `cli`, `fs`, `chrome`, `safari`,
 agent can invoke the CLI, so `transport == "cli"` does not imply a human.
 
 ### `principal`
-The **authenticated identity of the RPC peer**, established by the daemon from
-OS-level peer credentials on the Unix socket (`LOCAL_PEERCRED` / `SO_PEERCRED`)
-plus the socket's own ownership and mode. A principal identifies a **UID and
-process**, never a human. `principal.uid == 501` means "the desktop user's
-account made this call", which under this threat model is exactly as likely to
-be the attacker as the operator.
+Historical: the **authenticated identity of the RPC peer**, which the removed
+authority daemon established from OS-level peer credentials on its Unix
+socket. The transport is gone (lane X), so no new principal is established
+this way; recorded principals remain in historical events with their original
+meaning. A principal identified a **UID and process**, never a human — under
+this threat model the desktop UID is exactly as likely to be the attacker as
+the operator, which is why nothing above attestation ever rested on it.
 
 ### `attestation`
 A **verified `OperatorActionV1` signature** over an exact canonical byte
@@ -154,7 +159,7 @@ as a property contextd has.
 | S12 | Recomputing the hash chain and witness after tampering does not make a forged authoritative signature verify. | `test_service_attestation.py` | enforced² |
 | S13 | Migration preserves every historical byte; legacy authority labels resolve `legacy_unverified`. | `test_security_migration.py` | enforced |
 | S14 | Unsupported future schema versions refuse **before** filesystem or DB mutation. | `test_security_migration.py` | enforced |
-| S15 | A hostile same-UID process cannot open the daemon-owned DB, obtain raw content through a CLI fallback, invoke a production signer without presence, read key material from env/argv/config/logs/backups/temp, or widen its RPC capabilities. | `test_process_isolation.py` | enforced¹ |
+| S15 | Hardened configuration fails closed — a hostile same-UID process cannot open the archive, obtain raw content through a CLI fallback, invoke a production signer without presence, read key material from env/argv/config/logs/backups/temp, or perform an operator act without a verified attestation. | `test_process_isolation.py` | enforced¹ |
 | S16 | `ctx security doctor --strict --json` reports each invariant separately and exits nonzero unless every one holds. | `test_security_doctor.py` | enforced |
 | S17 | Every tracked file type and filename is scanned without binary/size skips; synthetic approvals pin exact fingerprint, line, and count; reachable history includes blob, commit, and annotated-tag metadata. | `test_repository_privacy.py` | enforced |
 | S18 | Every signature record names the scheme that produced it; a record whose algorithm disagrees with its key's registered algorithm is refused, and history signed under one scheme still verifies after another is enabled. | `test_crypto_agility.py` | enforced³ |
@@ -177,10 +182,10 @@ reason. Post-quantum checkpointing is also **off by default**; with
 `checkpoint_algorithms` empty the checkpoint record is byte-for-byte what it
 was before, so a base install neither gains the property nor regresses.
 
-¹ **S15 is enforced in code and tested, with one simulated clause.** The RPC
-surface, tier assignment from kernel peer credentials, attestation requirement,
-fail-closed behaviour, and key-material absence are all directly tested. The
-clause "cannot open the daemon-owned DB" rests in a real deployment on *file
+¹ **S15 is enforced in code and tested, with one simulated clause.** The
+fail-closed behaviour, operation-layer attestation requirement, and
+key-material absence are all directly tested. The
+clause "cannot open the archive" rests in a real deployment on *file
 ownership by a service account*, which the test suite cannot create without
 root; it is simulated with file permissions and marked `SIMULATED BOUNDARY` in
 `tests/test_process_isolation.py`. Until the service account exists, that
@@ -194,7 +199,8 @@ A verified `OperatorActionV1` proves, and only proves:
 
 > At time *T*, a specific registered Secure Enclave key on this device signed
 > **exactly these bytes**, and the platform required a fresh user-presence
-> gesture to do so, and the daemon had not previously consumed that nonce.
+> gesture to do so, and that nonce had not previously been consumed against
+> the archive.
 
 ### Excluded claims — never assert these
 
@@ -637,7 +643,7 @@ Private disclosure, process, and an explicit list of properties that are
 | State | Meaning | `doctor --strict` |
 |---|---|---|
 | **development** | No dedicated service UID, no hardware signer. Client plane opens the DB directly. Assurance is *attribution only* — the same-UID attacker can do anything the owner can. | exits nonzero |
-| **hardened** | Root-owned installed daemon under a dedicated UID; production hardware signer enrolled; raw archive inaccessible from the client boundary; valid service signatures; current protected checkpoint; no plaintext scratch; no insecure fallback. | exits zero |
+| **hardened** | **Fails closed.** The resident authority daemon was removed (lane X, residency dissolution), so a hardened-configured archive refuses every read and write from every boundary — there is no direct-SQLite fallback, and no service to dial. The one hardened path that still runs is the out-of-band first-key bootstrap ceremony (`ctx security key bootstrap`, as the service account). Hardened is a terminal refuse-everything posture unless a future extraction reintroduces an authority plane. | checks the five remaining invariants; archive-reading checks report what they could not inspect |
 
 ## Implementation status
 
@@ -651,8 +657,8 @@ Private disclosure, process, and an explicit list of properties that are
 | macOS Secure Enclave signer helper (`native/`) | **written and compiles; never built into the tree, never enrolled, never exercised against real hardware** |
 | Grants: operator-authorized, finite expiry, UTC instants, verified inside the append, replay/revocation-safe | implemented, tested |
 | Dispatch capabilities replacing `CONTEXTD_DERIVATION_SOURCE` | implemented, tested — the old binding is now an explicit refusal, not a silent no-op |
-| Authority/storage daemon, closed RPC surface, hardened mode, no SQLite fallback | implemented, tested (daemon runs as the desktop uid until installed — the *isolation* is simulated, the *surface* is real) |
-| `ctx security doctor --strict --json` | implemented, tested (reports 6 of 7 invariants failing on this tree, which is correct) |
+| Authority/storage daemon, closed RPC surface | **removed** (lane X, residency dissolution) — hardened mode survives as a fail-closed refusal with no SQLite fallback; the request-scoped operation layer and its attestation checks survive in `contextd/authd.py` |
+| `ctx security doctor --strict --json` | implemented, tested (five invariants since lane X removed the daemon-deployment checks with the daemon; failures on this tree are correct) |
 | Service-signed envelopes and chain tips, key rotation, protected checkpoint | implemented, tested (see ² — the key is not yet service-owned) |
 | Algorithm identifier on every signature record, verification dispatching on it | implemented, tested (schema 3; historical rows backfilled `ecdsa-p256-sha256`) |
 | Post-quantum (ML-DSA/FIPS 204) checkpoint signing, hybrid with the classical scheme | implemented, tested — native via `cryptography` ≥ 47, no third-party PQC library. Off by default; see ³ |

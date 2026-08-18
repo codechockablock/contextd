@@ -47,7 +47,7 @@ assessment.
 (`shadow_mode.py`), a time-travel debugger (`time_travel_debugger.py`),
 constraint graphs (`constraint_graphs.py`), process isolation
 (`process_isolation.py`), Microsoft's name, and actual distribution. contextd
-is one person's single-language local daemon.
+is one person's single-language local library.
 
 Three properties of the flight recorder matter for the comparison below, and
 none of them is a defect for its stated purpose:

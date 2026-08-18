@@ -1,7 +1,8 @@
 # contextd — Executive Summary
 
-*A personal context daemon: an append-only life log, index, and disclosure gate,
-served to AI clients over MCP. One local daemon, a SQLite ledger plus a small
+*A personal context system: an append-only life log, index, and disclosure gate,
+served to AI clients over MCP. One local library plus event-time hooks and
+timers — no resident process since lane X — a SQLite ledger plus a small
 chain-tip witness, no cloud.*
 
 Written 2026-08-11, at the end of the build.
@@ -102,7 +103,7 @@ the moat.
 - **Features are earned by documented failure** — embeddings, workspace scope,
   and screen capture were all declined for v0 because nothing had failed yet.
 - **The kernel never calls a model** — models call the kernel; interpretation
-  (distillation) lives in harness-side clients, keeping the daemon network-free.
+  (distillation) lives in harness-side clients, keeping the kernel network-free.
 
 ## Where v0 stands
 

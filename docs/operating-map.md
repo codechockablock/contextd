@@ -117,6 +117,25 @@ they enabled still count in the field tally.
 
 ## Lanes
 
+### dissolution (Lane X)
+- **Objective:** Remove the daemon-residency layer for real — delete
+  `AuthorityService`/`rpc.py`/`ctx security serve`/the authd plist, hardened
+  mode becomes a fail-closed refusal, doctor loses its daemon-deployment
+  checks, docs state the architecture as library + event-time hooks + timers
+  — proving at every commit that the gate/evidence core never needed the
+  daemon. `ctx watch` ruled a foreground tool (X3) and kept. No renames.
+- **Owning session:** local CC (Fable 5), dispatched 2026-08-18; branch
+  `lane-x-dissolution` off master `97ee1da`, worktree `~/contextd-lane-x`.
+  This claim is recorded on the branch, not master, because the lane brief
+  forbids master commits — visible from master only after merge, flagged in
+  the lane report (same pattern as Lane NV).
+- **State:** Phase B complete on branch, awaiting operator review/merge —
+  audit `docs/reviews/lane-x-residency-audit.md`, five deletion/docs
+  commits, suite green at every commit, §4 virgin-home amputation gate in
+  the lane report.
+- **Blockers:** —
+- **Last update:** 2026-08-18 — residency removed on branch
+
 ### verifier-pqc (Lane NV)
 - **Objective:** Make `scripts/verify_format_independent.mjs` genuinely runtime-
   independent for ML-DSA checkpoints: vendored pure-JS ML-DSA verify (default)
