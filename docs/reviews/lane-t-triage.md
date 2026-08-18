@@ -721,7 +721,8 @@ touching `~/contextd/.venv`. Virgin `CONTEXTD_HOME`; `CONTEXTD_INSECURE_TEST_SIG
 
 ```
 pip install -e . exit=0
-CONTEXTD_HOME=/Users/joseph/.lane-t-close/virgin exists=no
+CONTEXTD_HOME=$HOME/.lane-t-close/virgin exists=no   # path elided: the
+#   repository privacy gate refuses a tracked home_path, and caught this paste
 daemon env state: CONTEXTD_INSECURE_TEST_SIGNER=0 CONTEXTD_CLIENT=0
 IMPORTS: core imports clean with daemon absent — 30/30 modules
 IMPORTS: daemon modules pulled in as a side effect: NONE
