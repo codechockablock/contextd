@@ -636,3 +636,184 @@ nothing from the daemon, and says nothing about whether a daemon process
 remembered to register what the core will ask it for. Three tests now cover
 that for the paths in this tree. Nothing covers it for a consumer that does not
 exist yet.
+
+---
+
+# Closeout — R8, R9, R10
+
+## The boundary is closed
+
+```
+R10 closure recompute after admitting backup
+  daemon modules in closure : NONE
+  newly dragged, unnamed in R2-R8 (halt condition): none — no silent widening
+
+  daemon, fully outside the closure: authd cli decisions doctor experiment
+    handoff ingest liveness loops mcp_server rpc search service
+  total: core 30 modules, daemon 13 modules
+```
+
+13 daemon modules / 24 edges at Phase A → **zero**. `PENDING_RATIFICATION` was
+deleted rather than emptied: an exception list with nothing in it is an
+invitation, and if a future boundary change needs one it can be a diff somebody
+argues for.
+
+## R8 — backup admitted, debt recorded at the literal
+
+The rationale is recorded beside the entry in `tests/test_core_boundary.py`, so
+it travels with the boundary rather than living only here: export binds the
+signed manifest's sha256 into `seal()` as AEAD associated data, which makes this
+sealing lifecycle rather than a dependency of it; 47 of 52 defs are reachable
+from export's two imports, so there is no seam, and manufacturing one would be
+worse than admitting.
+
+Recorded as extraction-scope debt, not paid here: backup's export-reachable
+surface (~1,668 lines) gets a focused review pass and a true name — it is
+manifest/sealing machinery wearing a daemon filename. No rename, no pruning, no
+API change in this lane. Its daemon-only defs (`restore_backup`,
+`bundle_identity`, `normalized_path`, `_assert_secure_regular_file`,
+`_empty_destination_identity`) stay where they are; daemon→core consumption is
+the legal direction.
+
+## R9 — unregistered hooks raise
+
+Applied to both hooks, per the principle stated uniformly.
+
+`gate.RetrievalNotRegistered` names `register_retrieval_provider`, says the
+daemon's provider arrives with `contextd.search`, and tells a caller that
+genuinely wants absence-as-empty to catch it. Emptiness is opt-in now, not the
+default nobody chose.
+
+`assurance.ResolverNotRegistered` is the half R9 did not spell out but its
+wording reaches. Falling through to `assurance_of` returned "unverified" — true
+of the *build*, and read by an adjudicator as a fact about the *event*. A loop
+the daemon's reducer would resolve to `operator_authorized` would be reported as
+unverified by a build that merely forgot to register, with nothing in the output
+distinguishing the two. Same silent wrong answer, quieter clothing.
+
+Which types are loud is declared in core as `RESOLVER_REQUIRED` — `(loop, loop)`
+and `(decision, decision)` as **strings, never imports**. `schemas.py` already
+carries that vocabulary, so this adds no edge, and it lets the core say "I
+cannot verify this" without depending on the module that could. Types outside
+the set keep the metadata-only fallback, because for them "nothing checked it"
+is the whole truth rather than a gap.
+
+**If the assurance half is unwanted, `RESOLVER_REQUIRED` is the one line to
+empty.** The gate half stands independently.
+
+### R9's condition: no finding
+
+The rehearsal runs the full core lifecycle with **nothing catching
+`RetrievalNotRegistered`**. It did not fire from any core path — including
+`gate.disclose`, `provenance.closure` (which exercises
+`known_event_assurance`), `compliance_record`, `lineage_stats`, `create_backup`,
+`validate_bundle` and `create_sealed_export`. The only place it appears is a
+deliberate probe at the end, labelled as such, which asserts the raise rather
+than swallowing it. **No core path covertly depends on retrieval.**
+
+## R10 — the full re-run
+
+Deletion list updated to the post-R8 boundary: the same 13 daemon modules plus
+`hooks/` and `experiments/`. `backup.py` is retained now *because it is core*,
+not because it was an open item. Throwaway venv, real `pip install -e .`, never
+touching `~/contextd/.venv`. Virgin `CONTEXTD_HOME`; `CONTEXTD_INSECURE_TEST_SIGNER=0`,
+`CONTEXTD_CLIENT=0`.
+
+```
+pip install -e . exit=0
+CONTEXTD_HOME=/Users/joseph/.lane-t-close/virgin exists=no
+daemon env state: CONTEXTD_INSECURE_TEST_SIGNER=0 CONTEXTD_CLIENT=0
+IMPORTS: core imports clean with daemon absent — 30/30 modules
+IMPORTS: daemon modules pulled in as a side effect: NONE
+
+RUNTIME  1. archive created from a virgin home: True
+RUNTIME  2. appended [1, 2, 3] | redaction on the write path -> AWS key [REDACTED:aws_key] must never survive the writ
+RUNTIME  3. chain verify: {'ok': True, 'checked': 3, 'first_bad': None, 'ts_warnings': 0}
+RUNTIME  4. disclose (no retrieval involved): egress events = 1
+RUNTIME  5. provenance closure (exercises known_event_assurance): ungrounded | epistemic_type model_inference
+RUNTIME  6. compliance record: ['archive', 'checkpoints', 'framing', 'integrity', 'limitations'] ...
+RUNTIME  7. lineage stats  : ['alert_notes', 'anchors', 'depth_counts', 'derived_events', 'derived_notes'] ...
+RUNTIME  8. backup bundle: contextd-20260818-190751.ctxbackup | events 4 | manifest 3ffc499cb771
+RUNTIME  9. bundle validates: {'manifest': {...'service_signature': {'key_id': '6cae26fb7bf5dc8cf3a458b3c2b503ad', 'scheme': 2, 'signed': True}, 'snapshot': {'events': 4, 'head_hash': '7397e8b85f...', 'head_id': 4}, 'version': 1}, 'manifest_sha256': '3ffc499cb771...', 'authentication': {'authenticated': True, 'ok': True, 'signed': True, 'key_id': '6cae26fb7bf5dc8cf3a458b3c2b503ad', 'signature_scheme': 2}}
+RUNTIME 10. sealed export: contextd-20260818-190751.ctxexport | sealed_bytes 133554 | manifest 12c503af35cd
+RUNTIME 11. final chain verify: {'ok': True, 'checked': 4, 'first_bad': None, 'ts_warnings': 0}
+
+R9 CONDITION: no core path above raised RetrievalNotRegistered.
+R9 PROBE (deliberate call, not a core path): raises as designed ->
+    no retrieval provider is registered, so this gate cannot say what the archive contains and wil ...
+
+RUNTIME OK — produced, protected, sealed, validated and adjudicated a record with the daemon deleted.
+```
+
+The bundle validates with an **authenticated service signature** on the
+amputated tree, which is the sharpest single line here: the core alone can
+still prove a bundle was made by this archive.
+
+Gate proof on the amputated tree:
+
+```
+SUMMARY {"atomic": {"chain_ok": true, "crashed": 0, "elapsed_s": 0.15, "mode": "atomic",
+"n": 8, "ok": true, "refusals": 7, "successes": 1}, "baseline": {"crashed": 0,
+"doubles": 7, "elapsed_s": 0.17, "mode": "baseline", "n": 8, "redemptions": 8,
+"refusals": 0}}   exit=0
+20/20 passed on the amputated tree
+```
+
+Byte check re-run, probe-count assertion intact:
+
+```
+master exit=0  OK 17 probes emitted
+head   exit=0  OK 17 probes emitted
+
+=== §5 BIT-STABILITY: master vs lane-t-severance HEAD (closeout) ===
+IDENTICAL — no serialized byte moved
+```
+
+## Final gates
+
+```
+ruff check contextd/ tests/ hooks/ experiments/   All checks passed!
+python -m pytest -q                                899 passed, 35 skipped
+python tests/smoke.py                              ALL PASSED
+examples/gate_proof/concurrent_redemption.py       20/20
+tests/test_network_imports.py                      17 passed
+tests/test_core_boundary.py                        3 passed
+git diff master --stat                             29 files, +1709 -134
+```
+
+Baseline was 877 passed / 35 skipped; this lane adds 22 tests and changes no
+existing assertion except the two that pinned the pre-R9 silent behaviour.
+
+## Filed, not claimed
+
+The db→authd severance stripped import-level socket reach from 26 modules; the
+evidence core now has no network capability at import level. Per the ruling this
+is **filed for the extraction-time README and claimed nowhere**. It appears in
+this lane report, the operating map entry, and `tests/network_imports.txt`'s own
+header — all records. It has deliberately not been added to `README.md`,
+`COMPARISON.md`, `docs/SECURITY.md` or `docs/FORMAT.md`, and was checked absent
+from all four. Claiming it needs the boundary test to guard it explicitly, which
+is a one-assertion change nobody has authorized yet.
+
+## The honest paragraph, final
+
+The judgement most worth a second opinion is the one I extended rather than
+received: applying R9 to the assurance dispatch. The ruling's principle says
+uniformly, and I believe an adjudicator reading "unverified" for a loop that was
+in fact operator-authorized is exactly the silent wrong answer it forbids — but
+the counter-argument is real, because `unverified` means "nothing checked it"
+and that *is* literally true of a build with no resolver. It is one line to
+revert and I have named which line.
+
+What is now proven: the core imports nothing from the daemon, and it produces,
+protects, seals, validates and adjudicates a record with the daemon's files
+deleted, on a virgin home, in a clean interpreter. What remains unproven is
+anything about a consumer that does not exist yet — the registration graph is
+guarded by three tests inside this tree and by the R9 raise everywhere else, and
+the raise is the part that survives extraction. The AST guard does not.
+
+What the boundary test still cannot see is unchanged: runtime coupling that does
+not travel through an import — shared `CONTEXTD_HOME` state, the SQLite schema
+itself, and config keys under `[ingest]`/`[browser]`/`[claude]` that the core
+would carry as dead defaults. That last one is small, visible in
+`contextd/__init__.py`, and worth a sweep at extraction time rather than now.
