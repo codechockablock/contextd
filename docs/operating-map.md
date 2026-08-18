@@ -127,10 +127,15 @@ they enabled still count in the field tally.
   `lane-nv-verifier-pqc`. This claim is recorded on the branch, not master,
   because the NV brief forbids master commits — visible from master only
   after merge, flagged in the lane report.
-- **State:** active
-- **Blockers:** — (Node 22 unavailable on this machine; the 22-specific gate
-  runs on Node 26 and is reported as untested)
-- **Last update:** 2026-08-18 — lane opened
+- **State:** complete on branch, awaiting operator review/merge — vendored
+  @noble/post-quantum 0.4.1 + @noble/hashes 1.8.0 (provenance in
+  scripts/vendor/PROVENANCE.md), two-tier verify wired, exit 3 pinned for
+  UNVERIFIABLE, FORMAT.md §5 updated, 882+35 vs 877+35 baseline, gates ALL
+  PASSED. Honest caveat: every gate ran on Node 26.5.0; the Node-22-specific
+  claim is untested on this machine (no Node 22 present, none installed by
+  ruling).
+- **Blockers:** —
+- **Last update:** 2026-08-18 — lane complete
 
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
