@@ -108,7 +108,7 @@ one ledger…") is superseded. Aimed at an engineer, not a buyer. Sharpen, don't
 ## Positioning sections — corrected inputs, use these not the program's originals
 
 **Microsoft `agent-governance-toolkit`** (checkout at
-`/private/tmp/claude-501/-Users-joseph/c5817bf3-6ce3-4231-aaf3-499777a6f280/scratchpad/agent-governance-toolkit`,
+`the session scratchpad checkout of agent-governance-toolkit`,
 commit `7d0cef5` — verify it still exists; if gone, re-clone read-only to scratchpad, never into
 the repo). The distinction: a flight recorder records the verdict; a gate IS the verdict.
 Verified cites: `intercept_tool_execution` (~155–224) runs `start_trace()` →
