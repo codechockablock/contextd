@@ -117,6 +117,26 @@ they enabled still count in the field tally.
 
 ## Lanes
 
+### verifier-pqc (Lane NV)
+- **Objective:** Make `scripts/verify_format_independent.mjs` genuinely runtime-
+  independent for ML-DSA checkpoints: vendored pure-JS ML-DSA verify (default)
+  + node:crypto capability fallback + a distinct UNVERIFIABLE-ON-THIS-RUNTIME
+  verdict with its own exit code. Lane R territory (`scripts/`), taken after
+  gate-v1.1 closed; verifier fix only, no ledger changes.
+- **Owning session:** local CC (Fable 5), dispatched 2026-08-18; branch
+  `lane-nv-verifier-pqc`. This claim is recorded on the branch, not master,
+  because the NV brief forbids master commits — visible from master only
+  after merge, flagged in the lane report.
+- **State:** complete on branch, awaiting operator review/merge — vendored
+  @noble/post-quantum 0.4.1 + @noble/hashes 1.8.0 (provenance in
+  scripts/vendor/PROVENANCE.md), two-tier verify wired, exit 3 pinned for
+  UNVERIFIABLE, FORMAT.md §5 updated, 882+35 vs 877+35 baseline, gates ALL
+  PASSED. Honest caveat: every gate ran on Node 26.5.0; the Node-22-specific
+  claim is untested on this machine (no Node 22 present, none installed by
+  ruling).
+- **Blockers:** —
+- **Last update:** 2026-08-18 — lane complete
+
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned
