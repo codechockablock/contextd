@@ -444,6 +444,58 @@ nothing before it**.
 **All signatures present on a checkpoint must verify.** A hybrid checkpoint
 whose ML-DSA half fails is a broken checkpoint, not a classical one.
 
+### Verification runtime requirements
+
+Everything in this document except ML-DSA verifies with the primitives every
+mainstream runtime has shipped for years: SHA-256, ECDSA P-256, an SQLite
+reader, a UTF-8 encoder. ML-DSA (FIPS 204) is younger: OpenSSL implements it
+from 3.5, which reaches Node.js at the 24 line and system Pythons unevenly. A
+verifier must therefore decide, per ML-DSA signature, one of exactly three
+things — verified, refuted, or **could not check** — and must never report
+the third as the first.
+
+The reference independent verifier, `scripts/verify_format_independent.mjs`,
+resolves this in two tiers:
+
+1. **Vendored pure-JS ML-DSA (the default).** A pinned copy of the ML-DSA
+   verification code from `@noble/post-quantum` 0.4.1 with its `@noble/hashes`
+   1.8.0 SHA-3/SHAKE dependency lives under `scripts/vendor/` — upstream
+   repos, exact versions, npm-tarball and per-file SHA-256 hashes, the
+   itemized import-path rewrites (the only modifications), and the MIT license
+   texts are all recorded in `scripts/vendor/PROVENANCE.md`. No `package.json`,
+   no install step, no network at verify time. Only `.verify` is wired: the
+   verifier is structurally incapable of producing a signature, and a test
+   pins that (`tests/test_format_independent.py::test_the_vendored_tree_is_self_contained_and_wired_verify_only`).
+2. **Runtime capability fallback.** If the vendored files are absent, the
+   verifier probes `node:crypto` at runtime and uses it where its OpenSSL
+   knows ML-DSA. If **neither** implementation is available, every ML-DSA
+   signature is reported as a distinct
+   `UNVERIFIABLE-ON-THIS-RUNTIME` line — not PASS, not FAIL — and the process
+   exits with a code reserved for exactly that state. A tampered ML-DSA
+   signature on any runtime that *can* check still fails: the tiers choose
+   which implementation runs, never whether one needs to.
+
+Exit codes, pinned:
+
+| Exit | Meaning |
+|---|---|
+| 0 | every check ran and passed; nothing was skipped |
+| 1 | a verification check failed, or the document disagrees with the bytes (or a spec gap under `--fail-on-spec-gap`) |
+| 2 | the archive could not be opened / usage error |
+| 3 | no check failed, but ≥ 1 signature was UNVERIFIABLE on this runtime |
+
+Exit 3 exists so that "couldn't check" is unmistakable to a caller that reads
+nothing but the exit status. A wrapper that treats any non-zero as failure
+stays safe; a wrapper that treats 3 as success is lying to itself.
+
+The independence claim, stated precisely: the verifier imports **zero contextd
+code** (only `node:` builtins statically, plus the vendored third-party tree
+above, dynamically), performs **zero network access at verify time**, and
+requires **zero package-manager steps** — the script plus `scripts/vendor/`
+plus this document is the whole toolchain, on any Node with `node:sqlite`
+(≥ 22). What independence does *not* claim is an independent specification;
+see the verifier's own header.
+
 ---
 
 ## 6. Witness and recovery files
