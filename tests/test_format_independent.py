@@ -35,7 +35,9 @@ Three things are being pinned here, in descending order of importance:
 """
 
 import json
+import re
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -68,15 +70,18 @@ requires_node = pytest.mark.skipif(
 )
 
 
-def run_verifier(archive: Path, *, cwd: Path | None = None):
+def run_verifier(archive: Path, *, cwd: Path | None = None,
+                 verifier: Path = VERIFIER, extra: tuple[str, ...] = ()):
     """Run the verifier and return (exit code, parsed findings, output).
 
     ``cwd`` defaults to the archive's own parent — never the repository — so
     nothing the verifier reports can have arrived by a relative path into
-    contextd.
+    contextd. ``verifier`` exists so a test can run a copy of the script from a
+    directory with no vendored files beside it; ``extra`` appends flags.
     """
     result = subprocess.run(
-        [NODE, str(VERIFIER), str(archive), "--vectors", str(VECTORS), "--json"],
+        [NODE, str(verifier), str(archive), "--vectors", str(VECTORS), "--json",
+         *extra],
         capture_output=True, text=True, timeout=300,
         cwd=str(cwd or archive.parent),
     )
@@ -296,7 +301,10 @@ def test_the_verifier_imports_nothing_but_node_builtins():
 
     An `import` of anything that is not a `node:` builtin would mean the second
     implementation shares state, code, or constants with the first, and every
-    result above would collapse back into self-confirmation.
+    result above would collapse back into self-confirmation. The one permitted
+    reach beyond node: builtins is a *dynamic* import of the vendored pure-JS
+    ML-DSA verifier under scripts/vendor/ — third-party, pinned, hashed in
+    scripts/vendor/PROVENANCE.md, and still zero contextd.
     """
     source = VERIFIER.read_text()
     imports = [
@@ -319,6 +327,45 @@ def test_the_verifier_imports_nothing_but_node_builtins():
     for forbidden in ("../contextd/", "contextd/db.py", "contextd/canonical.py",
                       "require('contextd", 'require("contextd'):
         assert forbidden not in source, f"the verifier reaches into {forbidden}"
+
+
+def test_the_vendored_tree_is_self_contained_and_wired_verify_only():
+    """The vendored ML-DSA verifier extends the trusted base; pin its shape.
+
+    Three mechanical properties: (1) every vendored file imports only relative
+    paths within scripts/vendor/ — a bare specifier would mean node_modules
+    resolution, i.e. an install step, i.e. no longer a self-contained artifact;
+    (2) nothing vendored reaches into contextd; (3) the verifier wires nothing
+    from the vendored module except `.verify` — the vendored code exposes
+    signing and keygen, and a verifier that can produce signatures has a
+    strictly larger attack surface than one that cannot.
+    """
+    vendor = REPO_ROOT / "scripts" / "vendor"
+    js_files = sorted(vendor.rglob("*.js"))
+    assert len(js_files) >= 9, f"expected the vendored tree, found {js_files}"
+    for path in js_files:
+        for line in path.read_text().splitlines():
+            if not line.startswith("import") or " from '" not in line:
+                continue
+            module = line.split(" from '")[1].split("'")[0]
+            assert module.startswith(("./", "../")), (
+                f"{path.name} imports {module!r}; vendored files must resolve "
+                f"with no package manager, so only relative imports are allowed"
+            )
+            assert "contextd" not in module
+    assert (vendor / "PROVENANCE.md").exists(), "vendored code with no provenance"
+
+    source = VERIFIER.read_text()
+    assert "./vendor/noble-post-quantum/ml-dsa.js" in source
+    # Verify-only wiring: the ML-DSA module's sign/keygen surface is never
+    # touched. `.verify(` appears; `.sign(` and keygen must not.
+    assert re.search(r"\.sign\(", source) is None, (
+        "the verifier calls a .sign(); it must be incapable of producing "
+        "signatures"
+    )
+    assert "keygen" not in source.replace("generateKeyPairSync", ""), (
+        "the verifier reaches for vendored keygen"
+    )
 
 
 @requires_node
@@ -540,6 +587,162 @@ def test_the_unmutated_archive_produces_no_verification_failures(archive):
     assert findings is not None, text
     assert findings["fail"] == [], findings["fail"]
     assert len(findings["pass"]) >= 14
+
+
+# --- ML-DSA across runtimes: two tiers, and a verdict that is neither -------
+#
+# node:crypto verifies ML-DSA only from the OpenSSL 3.5 line (Node >= 24), and
+# "independent, if your Node is new enough" is not the independence claim. So
+# the verifier carries a vendored pure-JS ML-DSA implementation
+# (scripts/vendor/, provenance pinned) as its default, probes node:crypto as
+# the fallback, and when it has NEITHER it says so with a distinct verdict and
+# a distinct exit code. These tests pin all three rungs — and, mattering most,
+# that no rung ever converts "couldn't check" into "checked and passed".
+
+UNVERIFIABLE_EXIT_CODE = 3  # pinned in the verifier header and FORMAT.md §5
+
+
+def _node_supports_mldsa() -> bool:
+    if NODE is None:
+        return False
+    probe = ("try{require('node:crypto').generateKeyPairSync('ml-dsa-44');"
+             "process.exit(0)}catch{process.exit(1)}")
+    return subprocess.run(
+        [NODE, "-e", probe], capture_output=True, timeout=60,
+    ).returncode == 0
+
+
+def _verifier_with_no_vendor_beside_it(tmp_path: Path) -> Path:
+    """A byte-identical copy of the verifier in a directory with no vendor/.
+
+    This is the honest way to model "the vendored files are absent": the
+    script resolves scripts/vendor/ relative to itself, so a copy elsewhere
+    genuinely cannot find them — no flag, no monkeypatching, the files are
+    simply not there.
+    """
+    lonely = tmp_path / "lonely"
+    lonely.mkdir()
+    copied = lonely / "verify_format_independent.mjs"
+    copied.write_bytes(VERIFIER.read_bytes())
+    return copied
+
+
+@requires_node
+def test_ml_dsa_checkpoints_verify_through_the_vendored_implementation(archive):
+    """The default path: pure-JS ML-DSA from scripts/vendor/, on any Node.
+
+    The backend attribution matters as much as the pass: on a new Node,
+    node:crypto could silently be doing the work and this suite would prove
+    nothing about the runtime the independence claim is actually for.
+    """
+    home, summary = archive
+    if not summary["hybrid"]:
+        pytest.skip("no ML-DSA checkpoints in this build's fixture")
+    code, findings, text = run_verifier(home)
+    assert findings is not None, text
+    assert findings["info"]["ml_dsa_backend"] == "vendored", (
+        f"the vendored implementation must be the default; this run used "
+        f"{findings['info']['ml_dsa_backend']}"
+    )
+    assert "checkpoint" in {p["check"] for p in findings["pass"]}, findings
+    assert findings["fail"] == [] and findings["unverifiable"] == []
+    assert code == 0, text
+
+
+@requires_node
+def test_a_corrupted_ml_dsa_signature_fails_via_the_vendored_path(
+    archive, tmp_path,
+):
+    """The negative control. A verifier that cannot fail is not a verifier:
+    one flipped byte in an ML-DSA checkpoint signature must be a FAIL from the
+    vendored implementation, exit 1 — the same complaint the OpenSSL path
+    would raise on a newer Node."""
+    home, summary = archive
+    if not summary["hybrid"]:
+        pytest.skip("no ML-DSA checkpoints in this build's fixture")
+    target = _mutated(home, tmp_path, "bad-mldsa-checkpoint")
+    flip_signature_byte(
+        target / "contextd.db", "service_checkpoints", "alg = 'ml-dsa-44'")
+
+    code, findings, text = run_verifier(target)
+    assert findings is not None, text
+    assert findings["info"]["ml_dsa_backend"] == "vendored"
+    assert code == 1, text
+    assert "checkpoint" in _fail_checks(findings), findings["fail"]
+    detail = " ".join(f["detail"] for f in findings["fail"])
+    assert "ml-dsa-44" in detail, detail
+    # Not UNVERIFIABLE: the implementation ran and REFUTED the signature.
+    assert findings["unverifiable"] == []
+
+
+@requires_node
+def test_without_any_ml_dsa_implementation_the_verdict_is_unverifiable(
+    archive, tmp_path,
+):
+    """Delete the vendored files, deny node:crypto: the degraded verdict.
+
+    Every ML-DSA checkpoint must report a distinct UNVERIFIABLE-ON-THIS-RUNTIME
+    line — not PASS, not FAIL — and the process must exit with the pinned
+    exit code 3, so a caller checking only the exit status cannot read
+    "couldn't check" as "checked and passed". Everything classical still
+    verifies: the degradation is exactly as wide as the missing capability.
+    """
+    home, summary = archive
+    if not summary["hybrid"]:
+        pytest.skip("no ML-DSA checkpoints in this build's fixture")
+    lonely_verifier = _verifier_with_no_vendor_beside_it(tmp_path)
+
+    code, findings, text = run_verifier(
+        home, verifier=lonely_verifier, extra=("--no-native-mldsa",))
+    assert findings is not None, text
+    assert findings["info"]["ml_dsa_backend"] == "unavailable"
+    assert code == UNVERIFIABLE_EXIT_CODE, (
+        f"'couldn't check' must exit {UNVERIFIABLE_EXIT_CODE}, got {code}:\n{text}"
+    )
+    assert findings["fail"] == [], "nothing was refuted, so nothing may FAIL"
+    assert len(findings["unverifiable"]) >= 1
+    for entry in findings["unverifiable"]:
+        assert "UNVERIFIABLE-ON-THIS-RUNTIME" in entry["detail"]
+    assert "UNVERIFIABLE-ON-THIS-RUNTIME" in text
+    # The count is exact: one line per ML-DSA checkpoint row, none swallowed.
+    with_db = home / "contextd.db"
+    n_mldsa = sqlite3.connect(with_db).execute(
+        "SELECT COUNT(*) FROM service_checkpoints WHERE alg LIKE 'ml-dsa-%'"
+    ).fetchone()[0]
+    assert len(findings["unverifiable"]) == n_mldsa
+    # Classical layers were unaffected by the missing capability.
+    checks = {p["check"] for p in findings["pass"]}
+    assert {"chain-hash", "service-signature", "service-tip", "attestation"} <= checks
+    # And no checkpoint pass line was emitted for a partially-checked table.
+    assert "checkpoint" not in checks
+
+
+@requires_node
+@pytest.mark.skipif(
+    not _node_supports_mldsa(),
+    reason="this node:crypto has no ML-DSA, so the native fallback tier "
+           "cannot be exercised here — the vendored-path tests above still "
+           "pin tampering detection on this runtime",
+)
+def test_the_native_fallback_is_not_a_bypass(archive, tmp_path):
+    """Vendored files absent, node:crypto capable: a tampered ML-DSA
+    checkpoint must still FAIL. The capability ladder chooses which
+    implementation runs; it must never decide that no implementation needs
+    to."""
+    home, summary = archive
+    if not summary["hybrid"]:
+        pytest.skip("no ML-DSA checkpoints in this build's fixture")
+    lonely_verifier = _verifier_with_no_vendor_beside_it(tmp_path)
+    target = _mutated(home, tmp_path, "bad-mldsa-native")
+    flip_signature_byte(
+        target / "contextd.db", "service_checkpoints", "alg = 'ml-dsa-44'")
+
+    code, findings, text = run_verifier(target, verifier=lonely_verifier)
+    assert findings is not None, text
+    assert findings["info"]["ml_dsa_backend"] == "node:crypto"
+    assert code == 1, text
+    assert "checkpoint" in _fail_checks(findings), findings["fail"]
+    assert findings["unverifiable"] == []
 
 
 # --- the errata note has to exist -------------------------------------------
