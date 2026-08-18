@@ -333,11 +333,12 @@ Briefly, with pointers:
   SQLite backend only**.
 - **No encryption at rest, no plugin system, no UI, no screen capture, no
   embeddings.** Each gets built when a concrete, logged failure demands it.
-- **No trajectory scoring.** Advisory trajectory-evidence scoring was built and
-  is deliberately **held unmerged**: its detector's calibrated true-positive
-  rate did not transfer from the development corpus to a held-out slice, and
-  the honest version was judged worth more than the feature line. It is not in
-  this package and its numbers are not product claims.
+- **No trajectory scoring.** Advisory trajectory-evidence scoring was built,
+  measured, and **dropped by operator decision** (2026-08-17): its detector's
+  calibrated true-positive rate did not transfer from the development corpus
+  to a held-out slice (100% → 40%), and a score that weak belongs in an eval
+  report, not a ledger. The measurement is the artifact worth keeping. It is
+  not in this package and its numbers are not product claims.
 
 ---
 

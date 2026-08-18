@@ -42,6 +42,18 @@ they enabled still count in the field tally.
 
 ## Decisions
 
+- 2026-08-18 — Operator rulings, batch: unified-stack Apache relicense merged
+  and pushed (public master no longer AGPL); the frontier-ops/unified-stack
+  name collision resolves by renaming unified-stack's package (agent
+  dispatched); **Lane 6 DROPPED** — branch gate-v1-lane-6 deleted local and
+  remote, README updated from "held" to "dropped"; the measurement (TPR 100%
+  dev → 40% held-out) is the artifact worth keeping. frontier-ops fable-spec
+  WIP retired to attic/fable-spec-wip. Rollback-copy deletion deferred.
+  gate-v1.1 chartered: three lanes to close every recorded gap that is
+  code-closable; explicitly excluded as not agent-closable on this machine:
+  hardened-deployment distance (doctor --strict 6/7, needs root-owned signer
+  and service uid) and true multi-machine network evidence.
+
 - 2026-08-13 — Open-loops capture verdict is `NOT EARNED` pending the real
   operator trial (protocol v2, docs/OPEN_LOOPS.md); machine-side results
   cannot substitute.
@@ -82,6 +94,30 @@ they enabled still count in the field tally.
   policy lint) not started; earn condition for stage 1 met.
 
 ## Lanes
+
+### gate-v1.1-lane-p
+- **Objective:** PostgreSQL parity — backup/handoff/ingest/migrate on the
+  backend seam; CI service container so the 18 Postgres tests run. Brief:
+  docs/reviews/lane-p-goal-prompt.md. Owns backup/handoff/ingest/ci.yml.
+- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
+- **State:** RUNNING — dispatched 2026-08-18
+- **Last update:** 2026-08-18 — chartered from the operator's fix-all-gaps ruling
+
+### gate-v1.1-lane-q
+- **Objective:** Authority follow-ups — exported signed checkpoint, in-flight
+  mandate resolve act, refusal-row cap, migrate dry-run fix. Brief:
+  docs/reviews/lane-q-goal-prompt.md. Owns attest/ledger_sig/schemas/migrate.
+- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
+- **State:** RUNNING — dispatched 2026-08-18
+- **Last update:** 2026-08-18 — chartered from the operator's fix-all-gaps ruling
+
+### gate-v1.1-lane-r
+- **Objective:** Verification hardening — independent-language format verifier,
+  TOCTOU pinning test, import-level network gate. Brief:
+  docs/reviews/lane-r-goal-prompt.md. Owns scripts/ and tests/ only.
+- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
+- **State:** RUNNING — dispatched 2026-08-18
+- **Last update:** 2026-08-18 — chartered from the operator's fix-all-gaps ruling
 
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
