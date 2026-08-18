@@ -51,6 +51,14 @@ from .rpc import (
     send_frame,
 )
 
+# Assurance resolvers register at import time (contextd/assurance.py). Importing
+# them here, at module scope, is what guarantees a daemon process never reads a
+# loop or decision event through a half-populated registry: every daemon process
+# starts at one of the four entry points that carry this import.
+from . import decisions, loops  # noqa: F401
+# aliased: mcp_server and service define their own `search` function
+from . import search as _search_registration  # noqa: F401
+
 SOCKET_NAME = "authd.sock"
 
 #: Operations at this tier return archive-derived bytes only through the gate:
@@ -164,37 +172,17 @@ def socket_path(root: Path | None = None) -> Path:
     return (root or home()) / SOCKET_NAME
 
 
-def hardened() -> bool:
-    """Whether this archive is configured to require the authority plane."""
-    return ((load_config().get("security") or {}).get("mode") or
-            "development") == "hardened"
-
-
-# --- the service process ----------------------------------------------------
-
-#: Set only inside the daemon process, before it opens the archive. It is a
-#: *marker*, not a security control: a hostile same-UID process can set it too.
-#: The real boundary in a hardened deployment is filesystem ownership — the DB
-#: is owned by the service UID and mode 0600, so a client cannot open it at all.
-#: This flag exists so development mode can simulate the boundary and so the
-#: failure is a clear refusal instead of an opaque permission error.
-_SERVICE_PROCESS = threading.local()
-
-
-def is_service_process() -> bool:
-    return getattr(_SERVICE_PROCESS, "value", False)
-
-
-class service_context:
-    """Mark the current thread as the authority plane."""
-
-    def __enter__(self):
-        self._previous = getattr(_SERVICE_PROCESS, "value", False)
-        _SERVICE_PROCESS.value = True
-        return self
-
-    def __exit__(self, *_exc):
-        _SERVICE_PROCESS.value = self._previous
+# `hardened`, `is_service_process` and `service_context` now live in
+# contextd/authority_mode.py: they answer authority-plane questions that the
+# core itself must ask before it opens the archive or accepts a first-key
+# bootstrap. Re-exported here because ~20 daemon and test call sites import
+# them from `.authd`, and because this is still where the marker gets set.
+from .authority_mode import (  # noqa: E402, F401
+    _SERVICE_PROCESS,
+    hardened,
+    is_service_process,
+    service_context,
+)
 
 
 def _tier_for(principal: Principal) -> str:

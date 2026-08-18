@@ -34,9 +34,13 @@ import json
 import random
 from itertools import combinations
 
+from .assurance import known_event_assurance
 from .db import append_event
 from .gate import disclose, est_tokens, select_items
-from .assurance import OPERATOR_AUTHORIZED, known_event_assurance
+# epistemic_type now lives in contextd/provenance.py — it is a pure classifier
+# over recorded facts, not experiment machinery. Re-exported for the callers
+# that have always imported it from here.
+from .provenance import epistemic_type  # noqa: F401
 from .search import search
 
 PROVENANCE_CLASSES = ("human", "model", "activity", "other")
@@ -59,58 +63,6 @@ def provenance_class(source, kind, meta: dict) -> str:
     if source == "fs":
         return "human"
     return "other"
-
-
-def epistemic_type(source, kind, meta: dict,
-                   verified_assurance: str | None = None) -> str:
-    """Epistemic type from what ingestion recorded.
-
-    Five levels, and the split between the middle two is the point:
-
-        observation                behavioral/file traces
-        attested_human_assertion   human text carrying a VERIFIED operator
-                                   attestation (contextd/attest.py)
-        claimed_human_assertion    text a transport label *says* is human —
-                                   `actor="human"`, `role="user"`,
-                                   `authority="operator"`. Every one of those
-                                   is a caller-writable string, so this level
-                                   means "recorded as human", never
-                                   "authenticated as human"
-        model_inference            model-written text
-        system                     kernel bookkeeping
-
-    The old vocabulary called the third level `human_assertion`, which read as
-    authentication and was not. Renaming it is the fix: no metadata-only path
-    can now produce an *attested* level, because that level is reachable only
-    through `assurance.is_authenticated_human`.
-
-    Grounding (contextd/provenance.py) is a different axis from authentication:
-    a claimed human assertion still terminates a derivation chain in non-model
-    content, which is what the closure verdict measures.
-    """
-    if kind in ("page_visit", "file_write", "file_delete"):
-        return "observation"
-    if kind in ("epoch", "reconcile", "egress", "egress_outcome",
-                "experiment", "exp_run", "exp_report", "outcome"):
-        return "system"
-
-    human_shaped = (
-        (kind == "note" and meta.get("actor") not in (None, "mcp"))
-        or (kind == "loop" and meta.get("authority") == "operator")
-        or (kind == "decision" and meta.get("authority") == "operator")
-        or meta.get("attestation") is not None
-        or (source == "claude_code" and kind == "message"
-            and meta.get("role") == "user")
-    )
-    if not human_shaped:
-        if kind in ("note", "loop", "decision") or (
-            source == "claude_code" and kind == "message"
-        ):
-            return "model_inference"
-        return "unknown"
-    if verified_assurance == OPERATOR_AUTHORIZED:
-        return "attested_human_assertion"
-    return "claimed_human_assertion"
 
 
 def _sha(text: str) -> str:

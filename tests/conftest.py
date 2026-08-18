@@ -19,6 +19,20 @@ os.environ["CONTEXTD_HOME"] = tempfile.mkdtemp(prefix="contextd-pytest-bootstrap
 # provenance.py, which asserts both halves of that guarantee.
 os.environ["CONTEXTD_INSECURE_TEST_SIGNER"] = "1"
 
+# The daemon's hook registrations are import-time side effects: contextd.search
+# registers the gate's retrieval provider, contextd.loops and
+# contextd.decisions register their assurance resolvers (lane T). A daemon
+# process gets them from its entry point; this suite is not a daemon process,
+# and before this import whether a recall test saw a provider depended on which
+# other test module pytest had already collected. Import them once, here, so
+# that is deterministic. The boundary claim itself — that the core registers
+# nothing on its own — is pinned in fresh interpreters by
+# tests/test_gate_retrieval_hook.py and tests/test_assurance_resolvers.py,
+# where this import cannot mask it.
+import contextd.decisions  # noqa: E402, F401
+import contextd.loops  # noqa: E402, F401
+import contextd.search  # noqa: E402, F401
+
 
 @pytest.fixture(autouse=True)
 def isolated_contextd_home(tmp_path, monkeypatch):

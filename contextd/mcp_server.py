@@ -15,6 +15,14 @@ from .ingest import ingest_note
 from .redact import sanitize_label
 from .rpc import RpcError
 
+# Assurance resolvers register at import time (contextd/assurance.py). Importing
+# them here, at module scope, is what guarantees a daemon process never reads a
+# loop or decision event through a half-populated registry: every daemon process
+# starts at one of the four entry points that carry this import.
+from . import decisions, loops  # noqa: F401
+# aliased: mcp_server and service define their own `search` function
+from . import search as _search_registration  # noqa: F401
+
 # CONTEXTD_CLIENT is a self-asserted label a client sets on its own subprocess.
 # It is an `origin_claim` and nothing more (docs/SECURITY.md §3): the process
 # that sets it is, under this threat model, the attacker. It survives only as a

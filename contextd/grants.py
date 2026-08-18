@@ -39,7 +39,6 @@ from .assurance import (
 from .attest import AttestationError, authorized_append, test_mode_authorization
 from .canonical import canonical_digest
 from .db import append_event_checked, now_iso
-from .loops import scope_str
 
 # closed registry: class -> allowed scope kinds (docs/GRANTS.md)
 CLASSES = {
@@ -49,6 +48,21 @@ CLASSES = {
 }
 
 GRANTED_AUTHORITY = "model-granted"
+
+
+def scope_str(scope: dict) -> str:
+    """Render a scope dict as the exact string a grant is recorded under.
+
+    This lives here, beside the closed class registry that constrains which
+    scope kinds each class accepts, because its output is not a display
+    string: it is what `canonical` covers in a signed grant act and what
+    `covering_grant` compares. `contextd/loops.py` re-exports it for the
+    daemon-side callers that have always imported it from there.
+    """
+    if scope.get("global"):
+        return "global"
+    return f"repo:{scope['repo']}"
+
 
 #: A grant may never delegate the power to grant. Without this, one delegation
 #: bootstraps unbounded authority.

@@ -8,10 +8,52 @@ import re
 from .db import append_event, append_event_checked, now_iso
 from .domains import blocked, load_skip_domains
 from .redact import redact
-from .search import search
+
+#: How the gate finds candidate events to consider disclosing. The daemon
+#: registers contextd.search here at its own import time; the evidence core
+#: does not name it, because retrieval is a consumer of the record rather than
+#: part of its lifecycle (lane T, ruling R1/R5).
+#:
+#: **An unregistered provider RAISES; it never returns empty** (ruling R9).
+#: Returning no candidates would assert "there is nothing here", which is a
+#: claim about the archive's contents that an unconfigured gate has not
+#: earned — a silent wrong answer, and this codebase does not ship those:
+#: absence is recorded, UNVERIFIABLE is not PASS, exit 3 is not exit 0.
+#:
+#: The rule this follows, uniformly: a hook whose absence changes an ANSWER
+#: raises when unregistered; a hook whose absence merely skips an optional side
+#: effect may no-op. A caller that genuinely wants absence-as-empty catches
+#: RetrievalNotRegistered and says so in its own code, so emptiness is opt-in
+#: rather than the default nobody chose.
+_RETRIEVAL = None
+
+
+def register_retrieval_provider(provider) -> None:
+    """Declare how candidate events are found.
+
+    `provider(conn, query, *, limit, since, until) -> list[row]`, each row
+    carrying at least `id` and `uri`. Last registration wins.
+    """
+    global _RETRIEVAL
+    _RETRIEVAL = provider
+
+
+def _search(conn, query, *, limit, since, until):
+    if _RETRIEVAL is None:
+        raise RetrievalNotRegistered(
+            "no retrieval provider is registered, so this gate cannot say what "
+            "the archive contains and will not answer as though it were empty. "
+            "Register one with contextd.gate.register_retrieval_provider(); "
+            "the daemon's provider registers itself when contextd.search is "
+            "imported. To treat absence as an empty result, catch "
+            "contextd.gate.RetrievalNotRegistered explicitly."
+        )
+    return _RETRIEVAL(conn, query, limit=limit, since=since, until=until)
+
 
 __all__ = [
     "GateError",
+    "RetrievalNotRegistered",
     "assemble",
     "check_budget",
     "disclose",
@@ -29,6 +71,10 @@ __all__ = [
 
 class GateError(Exception):
     pass
+
+
+class RetrievalNotRegistered(GateError):
+    """The gate was asked to find candidates with no retrieval provider."""
 
 
 def never_leave(cfg, uri) -> bool:
@@ -182,7 +228,8 @@ def select_items(
     themselves live outside the kernel until an experiment earns them."""
     items, used = [], 0
     seen_uris = set()
-    hits = search(conn, query, limit=40, since=since or None, until=until or None)
+    hits = _search(conn, query, limit=40, since=since or None,
+                   until=until or None)
     if ranked_ids is not None:
         by_id = {h["id"]: h for h in hits}
         hits = [by_id[i] for i in ranked_ids if i in by_id]

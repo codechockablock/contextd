@@ -337,7 +337,7 @@ def _service_account_uid() -> int:
 
 def _assert_bootstrap_boundary(conn: sqlite3.Connection) -> None:
     """Require the out-of-band service-admin boundary for first enrollment."""
-    from .authd import is_service_process
+    from .authority_mode import is_service_process
 
     if not is_service_process():
         raise AttestationError(
@@ -382,7 +382,7 @@ def _assert_development_bootstrap_boundary(conn: sqlite3.Connection) -> None:
     is development mode's documented trust model (attribution, not
     authentication); enrolling promptly closes the window forever.
     """
-    from .authd import hardened
+    from .authority_mode import hardened
 
     if hardened():
         raise AttestationError(

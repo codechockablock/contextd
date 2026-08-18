@@ -73,8 +73,50 @@ FORGEABLE_AUTHORITY_LABELS = frozenset({
 })
 
 
+#: Assurance resolvers for event types whose level is established by a reducer
+#: that does not live here — a loop's by replaying the loop reduction, a
+#: supersession's by verifying the edge. The module that owns the event type
+#: registers its own resolver at import time; nothing in this module imports
+#: those modules, which is what keeps the evidence core free of the daemon.
+#:
+#: **A type in RESOLVER_REQUIRED with no resolver RAISES** (ruling R9, applied
+#: uniformly to every hook in this boundary). Falling through to
+#: `assurance_of` would answer "unverified" — technically true of THIS BUILD,
+#: and read by an adjudicator as a fact about the EVENT. A loop the daemon's
+#: reducer would have resolved to operator_authorized would be reported as
+#: unverified by a build that merely forgot to register, and nothing in the
+#: output would distinguish the two. That is a silent wrong answer, which this
+#: codebase does not ship.
+#:
+#: Types NOT in RESOLVER_REQUIRED keep the metadata-only fallback, because for
+#: them "nothing checked it" is the whole truth rather than a gap.
+_RESOLVERS: dict[tuple[str, str], object] = {}
+
+#: (source, kind) pairs whose assurance is established by replaying a reducer,
+#: and therefore cannot be read off metadata at all. Named as strings, never
+#: imported: contextd/schemas.py already carries the same vocabulary, and the
+#: core must be able to say "I cannot verify this" without depending on the
+#: module that could.
+RESOLVER_REQUIRED = frozenset({("loop", "loop"), ("decision", "decision")})
+
+
+def register_assurance_resolver(source: str, kind: str, resolver) -> None:
+    """Declare how one event type's stored assurance is verified.
+
+    `resolver(conn, event_id) -> str` must return a level from
+    ASSURANCE_LEVELS. Registration is idempotent and last-wins so a reload
+    does not fail; there is deliberately no unregister, because a build that
+    can verify a type should not be able to forget how mid-process.
+    """
+    _RESOLVERS[(source, kind)] = resolver
+
+
 class AssuranceError(RuntimeError):
     """An action claimed an assurance level it has not established."""
+
+
+class ResolverNotRegistered(AssuranceError):
+    """A reducer-backed event type was resolved with no resolver registered."""
 
 
 # --- the five concepts ------------------------------------------------------
@@ -311,14 +353,18 @@ def known_event_assurance(conn, event_row) -> str:
                 scope="global",
                 content=event_row["content"] or None,
             )
-        if source == "loop" and kind == "loop":
-            from .loops import stored_loop_assurance
-
-            return stored_loop_assurance(conn, int(event_row["id"]))
-        if source == "decision" and kind == "decision":
-            from .decisions import stored_decision_assurance
-
-            return stored_decision_assurance(conn, int(event_row["id"]))
+        resolver = _RESOLVERS.get((source, kind))
+        if resolver is not None:
+            return resolver(conn, int(event_row["id"]))
+        if (source, kind) in RESOLVER_REQUIRED:
+            raise ResolverNotRegistered(
+                f"{source}/{kind} events carry an assurance that only its "
+                f"reducer can establish, and no resolver is registered — this "
+                f"build cannot say what this event's assurance is and will not "
+                f"report 'unverified' as though it had checked. Register one "
+                f"with contextd.assurance.register_assurance_resolver(); the "
+                f"daemon registers its own when contextd.{source}s is imported."
+            )
         return assurance_of(meta)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return UNVERIFIED

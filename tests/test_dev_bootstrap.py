@@ -51,10 +51,12 @@ def test_development_bootstrap_requires_the_acknowledgement_flag():
 
 
 def test_development_bootstrap_refuses_a_hardened_archive(monkeypatch):
-    import contextd.authd
+    # `hardened` is defined in contextd.authority_mode and re-exported by
+    # contextd.authd; patch it where attest reads it, not where it is aliased.
+    import contextd.authority_mode
 
     conn = connect()
-    monkeypatch.setattr(contextd.authd, "hardened", lambda: True)
+    monkeypatch.setattr(contextd.authority_mode, "hardened", lambda: True)
     with pytest.raises(AttestationError, match="configured hardened"):
         bootstrap_key(
             _p256_der(), "default", conn=conn,

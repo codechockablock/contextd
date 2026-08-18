@@ -61,34 +61,47 @@
 # Audits by filename or docstring put the surface in the wrong place;
 # following imports puts it here.
 # ============================================================================
-contextd.assurance: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.attest: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
+#
+# 2026-08-18, lane-t-severance: 26 lines LOST `socket=via:contextd.authd+
+# contextd.rpc`. Nothing gained reach; every change here is a removal. The
+# cause is one edge: contextd/db.py consulted `authd.hardened` and
+# `authd.is_service_process` through a function-local import, and since nearly
+# everything imports db, nearly everything inherited authd's reach into
+# contextd.rpc's AF_UNIX socket. Those two predicates now live in
+# contextd/authority_mode.py, which imports nothing but `threading` and the
+# package config loader. The evidence core therefore has NO import-level
+# network reach of any kind — socket capability is now confined to authd, rpc,
+# and the four daemon front-ends that inherit from them (cli, doctor,
+# mcp_server, service). The "modules that reach nothing by any path" note
+# above was written when that set was three; it is now most of the core.
+contextd.assurance: psycopg=via:contextd.backends.postgres
+contextd.attest: psycopg=via:contextd.backends.postgres
 contextd.authd: psycopg=via:contextd.backends.postgres, socket=direct
-contextd.backends: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.backends.postgres: psycopg=direct, socket=via:contextd.authd+contextd.rpc
-contextd.backends.sqlite: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.backends.transfer: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.backup: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.capability: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
+contextd.backends: psycopg=via:contextd.backends.postgres
+contextd.backends.postgres: psycopg=direct
+contextd.backends.sqlite: psycopg=via:contextd.backends.postgres
+contextd.backends.transfer: psycopg=via:contextd.backends.postgres
+contextd.backup: psycopg=via:contextd.backends.postgres
+contextd.capability: psycopg=via:contextd.backends.postgres
 contextd.cli: mcp=via:contextd.mcp_server, psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.compliance: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.db: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.decisions: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
+contextd.compliance: psycopg=via:contextd.backends.postgres
+contextd.db: psycopg=via:contextd.backends.postgres
+contextd.decisions: psycopg=via:contextd.backends.postgres
 contextd.doctor: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.experiment: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.export: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.gate: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.grants: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.handoff: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.ingest: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.ledger_sig: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.lineage: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.liveness: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.loops: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
+contextd.experiment: psycopg=via:contextd.backends.postgres
+contextd.export: psycopg=via:contextd.backends.postgres
+contextd.gate: psycopg=via:contextd.backends.postgres
+contextd.grants: psycopg=via:contextd.backends.postgres
+contextd.handoff: psycopg=via:contextd.backends.postgres
+contextd.ingest: psycopg=via:contextd.backends.postgres
+contextd.ledger_sig: psycopg=via:contextd.backends.postgres
+contextd.lineage: psycopg=via:contextd.backends.postgres
+contextd.liveness: psycopg=via:contextd.backends.postgres
+contextd.loops: psycopg=via:contextd.backends.postgres
 contextd.mcp_server: mcp=direct, psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.migrate: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.pinning: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
-contextd.provenance: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
+contextd.migrate: psycopg=via:contextd.backends.postgres
+contextd.pinning: psycopg=via:contextd.backends.postgres
+contextd.provenance: psycopg=via:contextd.backends.postgres
 contextd.rpc: socket=direct
-contextd.search: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc
+contextd.search: psycopg=via:contextd.backends.postgres
 contextd.service: psycopg=via:contextd.backends.postgres, socket=via:contextd.authd+contextd.rpc

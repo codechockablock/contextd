@@ -54,6 +54,13 @@ from experiments.handoff.common import (REPO, RESULTS, contextd_home,  # noqa: E
                                         extract_citations, record, run_claude,
                                         view_conn)
 
+# contextd.gate dispatches retrieval through a provider that contextd.search
+# registers at import time (lane T). A process that assembles a disclosure
+# without importing it gets an empty candidate set, not an error — importing it
+# here is what keeps this script's recall working. Pinned by
+# tests/test_gate_retrieval_hook.py::test_every_retrieval_caller_registers.
+import contextd.search  # noqa: F401
+
 CLAUDE_BIN = "claude"
 MODEL = "haiku"
 MIN_MESSAGES = 6

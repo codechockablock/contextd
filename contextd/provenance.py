@@ -41,8 +41,64 @@ import hashlib
 import json
 import re
 
-from .experiment import epistemic_type
-from .assurance import known_event_assurance
+from .assurance import OPERATOR_AUTHORIZED, known_event_assurance
+
+# Epistemic type is a different axis from the grounding levels below, and it
+# lives here rather than in contextd/experiment.py because it is a pure
+# classifier over what ingestion already recorded — no connection, no config,
+# no daemon state, nothing to default in the daemon's absence (R6). The
+# experiment harness re-exports it for its own callers.
+def epistemic_type(source, kind, meta: dict,
+                   verified_assurance: str | None = None) -> str:
+    """Epistemic type from what ingestion recorded.
+
+    Five levels, and the split between the middle two is the point:
+
+        observation                behavioral/file traces
+        attested_human_assertion   human text carrying a VERIFIED operator
+                                   attestation (contextd/attest.py)
+        claimed_human_assertion    text a transport label *says* is human —
+                                   `actor="human"`, `role="user"`,
+                                   `authority="operator"`. Every one of those
+                                   is a caller-writable string, so this level
+                                   means "recorded as human", never
+                                   "authenticated as human"
+        model_inference            model-written text
+        system                     kernel bookkeeping
+
+    The old vocabulary called the third level `human_assertion`, which read as
+    authentication and was not. Renaming it is the fix: no metadata-only path
+    can now produce an *attested* level, because that level is reachable only
+    through `assurance.is_authenticated_human`.
+
+    Grounding (contextd/provenance.py) is a different axis from authentication:
+    a claimed human assertion still terminates a derivation chain in non-model
+    content, which is what the closure verdict measures.
+    """
+    if kind in ("page_visit", "file_write", "file_delete"):
+        return "observation"
+    if kind in ("epoch", "reconcile", "egress", "egress_outcome",
+                "experiment", "exp_run", "exp_report", "outcome"):
+        return "system"
+
+    human_shaped = (
+        (kind == "note" and meta.get("actor") not in (None, "mcp"))
+        or (kind == "loop" and meta.get("authority") == "operator")
+        or (kind == "decision" and meta.get("authority") == "operator")
+        or meta.get("attestation") is not None
+        or (source == "claude_code" and kind == "message"
+            and meta.get("role") == "user")
+    )
+    if not human_shaped:
+        if kind in ("note", "loop", "decision") or (
+            source == "claude_code" and kind == "message"
+        ):
+            return "model_inference"
+        return "unknown"
+    if verified_assurance == OPERATOR_AUTHORIZED:
+        return "attested_human_assertion"
+    return "claimed_human_assertion"
+
 
 # Levels this module can assign, weakest to strongest. Semantic levels
 # (semantically_supported, contradicted, unresolved) are intentionally not

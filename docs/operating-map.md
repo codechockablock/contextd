@@ -171,6 +171,46 @@ they enabled still count in the field tally.
   first-fixture marker fires when `gen --backend llamacpp` writes the real
   corpus on the desktop (after ENV.lock/WEIGHTS.lock).
 
+### boundary-severance (Lane T)
+- **Objective:** Make the gate/evidence core import-clean so the Terminus
+  extraction is a `git archive`, not a surgery. Cuts edges in place; does NOT
+  extract, rename, create a `terminus` package, or dissolve the daemon.
+  Durable artifact: `tests/test_core_boundary.py`.
+- **Owning session:** local CC (Opus 5), dispatched 2026-08-18; branch
+  `lane-t-severance`, worked in a separate `git worktree` at `~/contextd-lane-t`
+  because Lane NV held the `~/contextd` checkout live. Claim recorded on the
+  branch per the NV precedent. `git merge-tree` verified clean against
+  `lane-nv-verifier-pqc` at open, mid-lane and at close.
+- **State:** **COMPLETE, awaiting operator merge.** The core's import closure
+  contains ZERO daemon modules (Phase A: 13 modules / 24 edges). Core 30
+  modules, daemon 13, boundary pinned by `tests/test_core_boundary.py` with no
+  exception list. Eight commits, one edge-group each. §5 verified twice — 17
+  byte probes byte-identical vs master at Phase B and again at closeout.
+  Amputation rehearsal passes on imports AND runtime with 13 daemon modules
+  plus `hooks/` and `experiments/` deleted: 30/30 core modules import with zero
+  daemon side-effects, and on a virgin home the core created an archive,
+  redacted a secret out of the write path, verified its chain, produced
+  compliance/lineage/provenance artifacts, built a signed bundle, validated it
+  with an authenticated service signature, sealed an encrypted export, and ran
+  the gate proof 20/20.
+- **Rulings executed:** R2/R3/R5 admissions; R4 halt then R8 admission of
+  `backup` whole (debt recorded at the CORE literal for extraction-time review
+  and renaming — manifest/sealing machinery wearing a daemon filename); R6
+  fail-closed MOVEs; R9 raise-on-unregistered applied to BOTH hooks, its
+  condition checked with no finding — no core path covertly depends on
+  retrieval; R10 full re-run.
+- **Open for the operator:** whether R9 should extend to the assurance
+  dispatch as implemented (`RESOLVER_REQUIRED` is the one line to empty if
+  not); the extraction-time review of backup's ~1,668 export-reachable lines.
+- **Filed, not claimed:** the db->authd severance stripped import-level socket
+  reach from 26 modules — the evidence core has no network capability at
+  import level. Deliberately absent from README/COMPARISON/SECURITY/FORMAT;
+  claimed only once the boundary test guards it.
+- **Blockers:** — (lands on master independent of NV, which still awaits its
+  Node-22 verification pass)
+- **Last update:** 2026-08-18 — closeout landed; report in
+  `docs/reviews/lane-t-triage.md`
+
 ## Done
 
 - 2026-08-18 — **gate-v1.1** (three lanes, merged to master `ce27e55`): Postgres

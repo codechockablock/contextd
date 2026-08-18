@@ -1,6 +1,8 @@
 """Lexical index: FTS5 queries and timeline reads. Embeddings are v0.1, on purpose."""
 
 import re
+
+from .gate import register_retrieval_provider
 from datetime import datetime, timezone
 
 # occurrence time: visit time for browser events, ingest time for the rest
@@ -96,3 +98,10 @@ def timeline(conn, since=None, until=None, source=None, kind=None, limit=200,
         "ORDER BY id DESC LIMIT ?",
         args,
     ).fetchall()
+
+
+# contextd/gate.py dispatches here rather than importing this module: the gate
+# is core, retrieval is not. Registration happens at import time, and the
+# daemon entry points import this module at module scope so no daemon process
+# can assemble a disclosure through an unregistered gate.
+register_retrieval_provider(search)
