@@ -1,0 +1,129 @@
+# The import-level network surface of contextd/, pinned.
+#
+# Generated and checked by scripts/network_imports.py, which parses every
+# module under contextd/ with `ast`, follows package-internal imports
+# transitively, and reports which modules can reach a socket-capable
+# dependency. Regenerate with `--list`; explain with `--explain`.
+#
+# THIS IS NOT THE SAME GATE AS tests/network_surface.txt. That one greps for
+# the words http/socket/urllib/requests and pins the files allowed to contain
+# them. This one ignores spelling and follows capability. They disagree, on
+# purpose, and both are kept:
+#
+#   * the grep sees `socket.socket(...)` typed into a fresh file, and sees
+#     network vocabulary in comments and strings, which no import graph can;
+#   * this sees `import psycopg` — full network reach, none of the four
+#     words — and sees that `from urllib.parse import urlparse` is not network
+#     reach at all, which the grep gets backwards. Most of network_surface.txt
+#     is pinned for exactly that false positive.
+#
+# Lines beginning with `#` are commentary and are not compared. Every other
+# line is compared exactly, in order. A NEW line means a module can reach the
+# network that could not before: justify it here in the SAME commit, or remove
+# the import.
+#
+# `=direct` means the module imports the capability itself. `=via:a+b` means it
+# inherits it from a and b. A module flipping from `via:` to `direct` is a real
+# change and fails the gate, even though its reach was already non-zero.
+#
+# ============================================================================
+# WHERE CAPABILITY ENTERS: four modules, three dependencies. Everything below
+# that says `via:` inherits from these and adds nothing of its own.
+# ============================================================================
+
+contextd.assurance: socket=via:contextd.authd+contextd.rpc
+contextd.attest: socket=via:contextd.authd+contextd.rpc
+
+# ENTRY 1/4 — contextd.authd, `import socket` (authd.py:34).
+# The authority plane's listener. AF_UNIX only: authd.py:260 constructs
+# `socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)` and the module enforces
+# a path-length limit rather than a host or port, because there is no host or
+# port. This is local IPC between processes on one machine and reaches no
+# network — but `socket` is genuinely imported, and a gate that let AF_UNIX
+# suppress the entry would be a gate that could be switched to AF_INET by a
+# one-word edit without anyone noticing. It is listed, and the constraint is
+# recorded here rather than assumed from the module name.
+contextd.authd: socket=direct
+
+# ENTRY 2/4 — contextd.backends.postgres, `import psycopg` (postgres.py:318).
+# Real, outbound, remote TCP: the multi-host backend speaks the PostgreSQL
+# wire protocol to whatever `--postgres-url` names. This is the entry the
+# lexical gate structurally cannot see — `psycopg` contains none of the four
+# words it greps for — and it is the reason this file exists.
+#
+# Two properties keep it honest rather than merely disclosed: the import is
+# function-local, so it costs nothing and fails loudly on a default install
+# that never configured Postgres (`psycopg` is the `postgres` extra, not a
+# base dependency); and SQLite remains the default, so the shipped
+# configuration has this capability present in the tree and unreachable at
+# runtime. Being function-local is also exactly why a top-of-file import scan
+# would miss it and an `ast.walk` does not.
+contextd.backends.postgres: psycopg=direct, socket=via:contextd.authd+contextd.rpc
+
+contextd.backends.sqlite: socket=via:contextd.authd+contextd.rpc
+contextd.backends.transfer: socket=via:contextd.authd+contextd.rpc
+contextd.backup: socket=via:contextd.authd+contextd.rpc
+contextd.capability: socket=via:contextd.authd+contextd.rpc
+contextd.cli: mcp=via:contextd.mcp_server, socket=via:contextd.authd+contextd.rpc
+contextd.compliance: socket=via:contextd.authd+contextd.rpc
+contextd.db: socket=via:contextd.authd+contextd.rpc
+contextd.decisions: socket=via:contextd.authd+contextd.rpc
+contextd.doctor: socket=via:contextd.authd+contextd.rpc
+contextd.experiment: socket=via:contextd.authd+contextd.rpc
+contextd.export: socket=via:contextd.authd+contextd.rpc
+contextd.gate: socket=via:contextd.authd+contextd.rpc
+contextd.grants: socket=via:contextd.authd+contextd.rpc
+contextd.handoff: socket=via:contextd.authd+contextd.rpc
+contextd.ingest: socket=via:contextd.authd+contextd.rpc
+contextd.ledger_sig: socket=via:contextd.authd+contextd.rpc
+contextd.lineage: socket=via:contextd.authd+contextd.rpc
+contextd.liveness: socket=via:contextd.authd+contextd.rpc
+contextd.loops: socket=via:contextd.authd+contextd.rpc
+
+# ENTRY 3/4 — contextd.mcp_server, `from mcp.server.mcpserver import MCPServer`
+# (mcp_server.py:8). `mcp` is a base dependency, not an extra, and the MCP SDK
+# ships HTTP/SSE server transports alongside the stdio one contextd actually
+# uses. So the capability is present in every install even though the
+# configured transport is stdio. Flagged by package name: this script does not
+# parse site-packages, because a manifest that depended on the internals of a
+# third-party release could not be pinned across versions.
+contextd.mcp_server: mcp=direct, socket=via:contextd.authd+contextd.rpc
+
+contextd.migrate: socket=via:contextd.authd+contextd.rpc
+contextd.pinning: socket=via:contextd.authd+contextd.rpc
+contextd.provenance: socket=via:contextd.authd+contextd.rpc
+
+# ENTRY 4/4 — contextd.rpc, `import socket`. The client half of the authority
+# plane, dialing the AF_UNIX socket authd listens on. Same constraint and same
+# reasoning as ENTRY 1: local IPC, listed anyway.
+contextd.rpc: socket=direct
+
+contextd.service: socket=via:contextd.authd+contextd.rpc
+
+# ============================================================================
+# WHAT IS ABSENT, AND WHY THAT IS THE INTERESTING PART
+#
+# Thirteen modules under contextd/ reach no socket-capable dependency by any
+# path: contextd/__init__.py, backends/__init__.py, backends/base.py,
+# backends/paramstyle.py, backends/pgdriver.py, canonical.py, correlate.py,
+# domains.py, export_crypto.py, redact.py, schemas.py, scratch.py, search.py.
+#
+# The encoder that every signature is computed over, the closed event
+# registry, and the privacy floor are network-free — not by assertion in a
+# README, but because nothing they import, at any depth, can open a
+# connection.
+#
+# backends/pgdriver.py is the one worth pausing on. Its whole subject is
+# psycopg — the module docstring's first line is "A `sqlite3`-shaped surface
+# over psycopg 3" — and it does not import it. It is a pure adapter over
+# objects handed to it, so the capability enters one module over, at
+# backends/postgres.py:318. Any audit that went by file names, docstrings, or
+# vocabulary would put the network surface in the wrong place; following
+# imports puts it in the right one. That is the difference this gate is for.
+#
+# Note also the contrast with tests/network_surface.txt, which pins
+# contextd/domains.py and contextd/__init__.py as network-vocabulary files.
+# Both are network-free by capability, and both mention URLs. Neither gate is
+# wrong; they answer different questions, and only one of them can be answered
+# by reading the text of a file.
+# ============================================================================

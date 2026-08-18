@@ -7,12 +7,26 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-PY=.venv/bin/python
+
+# Prefer the repo venv, fall back to whatever is on PATH. The hardcoded
+# `.venv/bin/python` made this script unrunnable from a git worktree, where
+# the venv lives in the main checkout and not beside the source: every stage
+# reported "No such file or directory" and the battery exited FAILED without
+# having run a single check. A gate that cannot run is worse than no gate,
+# because it fails loudly enough to look like it worked.
+if [ -x .venv/bin/python ]; then
+    PY=.venv/bin/python
+    RUFF=.venv/bin/ruff
+else
+    PY=$(command -v python3 || command -v python)
+    RUFF=$(command -v ruff)
+    echo "note: no .venv here; using $PY and ${RUFF:-<no ruff>}"
+fi
 
 fail=0
 
 echo "== ruff =="
-.venv/bin/ruff check . || fail=1
+"$RUFF" check . || fail=1
 
 echo "== pytest =="
 "$PY" -m pytest -q || fail=1
@@ -34,6 +48,17 @@ if [ "${1:-full}" != "fast" ]; then
         echo "network grep: surface changed vs tests/network_surface.txt"
         fail=1
     fi
+
+    echo "== network imports =="
+    # The companion to the grep above, and deliberately NOT a replacement for
+    # it. The grep is lexical: it sees `socket.socket(...)` the moment it is
+    # typed, and it sees network vocabulary in comments and strings. It also
+    # cannot tell that `import psycopg` is full network reach with none of its
+    # four words in it, or that `urllib.parse` is no network reach at all —
+    # which is why most of tests/network_surface.txt is pinned false
+    # positives. This one walks the import graph instead and pins capability.
+    # Two gates, two failure modes, both cheap.
+    "$PY" scripts/network_imports.py || fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then

@@ -534,6 +534,149 @@ def test_the_provenance_label_is_a_claim_about_context_not_a_measurement():
     assert pinning.pin_state(conn)["anomalies"] == []
 
 
+def test_toctou_the_pin_binds_the_bytes_presented_not_the_bytes_on_disk(tmp_path):
+    """The fourth item in `pinning`'s "What the pin does NOT bind" list, which
+    was the only one of the four with no test.
+
+    A pin binds the bytes the caller said it read. It does not bind the bytes
+    on disk, and it does not bind the bytes the model received. Mutate the file
+    between the digest and the read and the ledger records a clean, matched,
+    untainted act about content nobody ever verified.
+
+    This test DEMONSTRATES the window and pins its exact shape. It deliberately
+    does not close it: closing it would require the core to open files, which
+    would make contextd's trust boundary include the filesystem it is supposed
+    to be making claims *about*, and would be a design change this test has no
+    business smuggling in. The assertion is therefore the documented behaviour —
+    the label is a claim about what the caller presented — not a fix.
+
+    Note what is NOT wrong here. The chain is intact, the digest arithmetic is
+    correct, and the record is honest about what it actually asserts. The gap
+    is between what the record asserts and what a reader may assume it asserts,
+    which is why it is written down in the module docstring and now here.
+    """
+    skill = tmp_path / "triage.md"
+    skill.write_text(GOOD_SKILL)
+    conn = connect()
+
+    # 1. Time of check. The caller reads the file and pins what it read.
+    at_check = skill.read_text()
+    art = pinning.artifact("skill", "skills/triage.md", at_check)
+    [first] = pinning.observe(conn, [art])
+    assert first["status"] == "pinned"
+
+    # 2. The window. The file changes underneath, by an attacker who owns the
+    #    filesystem but not the ledger.
+    skill.write_text(POISONED_SKILL)
+
+    # 3. Time of use. What reaches the model is the mutated file; what reaches
+    #    contextd is the artifact digested at step 1. Nothing in the API forces
+    #    those to be the same value, and nothing detects that they are not.
+    at_use = skill.read_text()
+    assert at_use != at_check, "the fixture failed to mutate the file"
+    assert (
+        pinning.artifact("skill", "skills/triage.md", at_use).digest != art.digest
+    ), "the two bodies must digest differently or there is no window to show"
+
+    # Gate mode is the strictest thing contextd has, and it admits the act:
+    # the presented digest matches its pin, so there is nothing to refuse.
+    event_id = pinning.pinned_append(
+        conn, artifacts=[art], session="toctou", mode=pinning.MODE_GATE)
+
+    # 4. The record is clean in every way the ledger can measure.
+    [entry] = _meta(conn, event_id)["provenance"]["instructions"]
+    assert entry["status"] == "matched"
+    assert entry["digest"] == art.digest
+    assert pinning.pin_state(conn)["anomalies"] == []
+    assert pinning.acts_touched_by(conn, art.digest)[0]["tainted"] is False
+    assert verify_chain(conn)["ok"]
+
+    # 5. And it is clean about bytes that were never what the model read. The
+    #    poisoned body appears nowhere in the archive, under any status.
+    poisoned_digest = pinning.artifact(
+        "skill", "skills/triage.md", POISONED_SKILL).digest
+    assert pinning.acts_touched_by(conn, poisoned_digest) == []
+    assert poisoned_digest not in json.dumps(_meta(conn, event_id))
+
+
+def test_toctou_the_pin_matches_even_when_the_file_does_not_exist(tmp_path):
+    """Why the window cannot be closed from inside `pinning`: the module never
+    opens the file, and this is what that looks like from outside.
+
+    Deleting the artifact entirely changes nothing about the pin, because the
+    filesystem was never an input. Any fix would have to make it one — the core
+    would have to do the reading itself — and that is a trust-boundary decision,
+    not a bug fix. Stating it as a test keeps the limitation a property of the
+    design rather than an oversight someone might "fix" locally.
+    """
+    skill = tmp_path / "triage.md"
+    skill.write_text(GOOD_SKILL)
+    conn = connect()
+
+    body = skill.read_text()
+    art = pinning.artifact("skill", "skills/triage.md", body)
+    pinning.observe(conn, [art])
+
+    skill.unlink()
+    assert not skill.exists()
+
+    # Same body, no file. Identical digest, and `observe` reports "unchanged"
+    # — it saw nothing to record, because nothing it looks at changed.
+    again = pinning.artifact("skill", "skills/triage.md", body)
+    assert again.digest == art.digest
+    [result] = pinning.observe(conn, [again])
+    assert result["status"] == "unchanged"
+
+    # And an act still labels it "matched", with the artifact's file long gone.
+    event_id = pinning.pinned_append(
+        conn, artifacts=[again], session="no-file", mode=pinning.MODE_GATE)
+    [entry] = _meta(conn, event_id)["provenance"]["instructions"]
+    assert entry["status"] == "matched"
+
+
+def test_toctou_the_window_closes_only_when_the_caller_presents_what_it_read():
+    """The precise boundary of the limitation, so it is not read as broader
+    than it is.
+
+    Divergence detection works — it is caller honesty, not the mechanism, that
+    the TOCTOU window exploits. A caller that presents the bytes it actually
+    read gets exactly the divergence and the gate-mode refusal the design
+    promises. The two tests above and this one bracket the property from both
+    sides: the pin is exact about what it is given, and silent about how the
+    caller got it.
+    """
+    conn = connect()
+    pinned = pinning.artifact("skill", "skills/triage.md", GOOD_SKILL)
+    pinning.observe(conn, [pinned])
+
+    honest = pinning.artifact("skill", "skills/triage.md", POISONED_SKILL)
+    [result] = pinning.observe(conn, [honest])
+    assert result["status"] == "diverged"
+
+    with pytest.raises(pinning.PinRefused) as caught:
+        pinning.pinned_append(conn, artifacts=[honest], session="honest",
+                              mode=pinning.MODE_GATE)
+    assert caught.value.reason == "pin_diverged"
+
+
+def test_toctou_the_limitation_is_still_documented_where_a_reader_will_find_it():
+    """The docstring is the contract this lane asserted against, so a silent
+    edit to it must break something.
+
+    If someone deletes the TOCTOU paragraph from `contextd/pinning.py` because
+    the tests above make it look handled, this fails — which is the point. The
+    tests demonstrate the window; the docstring is what tells a reader the
+    window is known and intended, and neither is sufficient alone.
+    """
+    doc = pinning.__doc__
+    assert "What the pin does NOT bind" in doc
+    assert "live TOCTOU" in doc, (
+        "pinning.py must keep documenting the time-of-check/time-of-use window; "
+        "tests/test_instruction_pinning.py asserts against this text"
+    )
+    assert "The body is supplied by the caller, not read by contextd" in doc
+
+
 # --- P9: the claim ---------------------------------------------------------
 
 _PIN_SCRIPT = """

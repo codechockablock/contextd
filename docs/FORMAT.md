@@ -25,6 +25,76 @@ load-bearing; read it before assuming coverage.
 
 ---
 
+## Errata
+
+> **What this section is.** A record that this document once drifted from the
+> code, what the drift was, and when it was closed. All three items below are
+> **FIXED** in the body above. The section is kept — rather than deleted along
+> with the bugs — because "the document currently agrees with the code" and
+> "the document has never disagreed with the code" are different claims, and
+> only the first one is true.
+>
+> How they were found: `scripts/verify_format_independent.mjs`, a second
+> implementation of this document written in JavaScript against the prose
+> below and importing nothing from `contextd`, was run against an archive
+> built by `tests/format_archive_support.py`. Per "Why this document exists"
+> above, the code was taken as correct and the document as buggy. That
+> verifier is now run on every test pass, so the next drift is caught by
+> machine rather than by review.
+
+**E1 — §1's `source` enumeration omitted `health`.** *(disagreement; FIXED)*
+
+§1 gave the producing planes as `note`, `fs`, `chrome`, `safari`,
+`claude_code`, `gate`, `eval`, `loop`, `grant`, `decision`, `mandate`, `tx`,
+`pin`, `act` — fourteen values, omitting **`health`**.
+
+`("health", "sweep")` is a registered event type (`contextd/schemas.py:566`,
+in `HARNESS_SCHEMAS`), appended by `hooks/health_sweep.py:243`, and
+`launchd/com.contextd.health.plist` runs that hook on a `StartInterval` of
+1800 seconds — so a running archive accumulates roughly 48 rows a day whose
+`source` the document did not admit. They were never rare.
+
+The document also contradicted itself: **§8 rule 1 names `health`** ("Verdict
+and instrument records — `health`, `restore_drill`, `lineage_audit`,
+experiment rows — are content-free by construction") while §1's enumeration
+excluded it. §9 exists so that silence is not read as coverage, which makes a
+written-out list stronger evidence of closure than silence, not weaker — so
+the list could not be defended as merely illustrative.
+
+*Fix:* §1 now lists fifteen values including `health`, states that the list is
+closed, and names §7 as the authority it must be regenerated from. §7's
+`HARNESS_SCHEMAS` paragraph, which had summarized the registry in prose and is
+how the omission survived, now enumerates all nine of its members. Pinned by
+`tests/test_format_independent.py::test_the_independent_verifier_agrees_with_the_documented_source_vocabulary`,
+which compares §1's list against the sources in a live archive on every run.
+
+**E2 — two under-specifications blocked §10's own recipe.** *(gaps; FIXED)*
+
+Neither was listed in §9, and both were needed to execute the "minimal
+verification recipe" this document closes with:
+
+- **§10 step 5** rebuilds tip and checkpoint payloads whose first field is
+  `archive_uuid`, and nothing said where that value lives. It is
+  `archive_identity.uuid WHERE singleton = 1` (`contextd/db.py:111`), a table
+  §5's "Signature tables" list did not mention.
+- **§10 step 6** said to verify "against the `operator_keys` entry for
+  `key_id`" without giving that table's schema, in a document that spells out
+  all four service-signature tables column by column. The column is
+  `public_der` and it holds a **raw DER SubjectPublicKeyInfo blob** — not PEM,
+  unlike `service_keys.public_pem` one section away.
+
+Both were recoverable by a reader who inspects the SQLite schema, which ships
+inside the archive, so §10's promise was never dead — only not executable from
+the prose alone.
+
+*Fix:* §4 gained "Where the operator key lives" and "Where `archive_uuid`
+comes from", giving both schemas and stating the DER-versus-PEM asymmetry
+explicitly in both directions; §5 names both tables and pins ECDSA signatures
+as DER-encoded `(r, s)`; §10 steps 4–6 name the exact column and encoding each
+one reads.
+
+---
+
 ## 1. The `events` table
 
 Source: `contextd/db.py:25–36` (DDL), `contextd/db.py:837` (`_prepare_row`).
@@ -35,7 +105,7 @@ One append-only table holds every record. Ten columns, in this order:
 |---|---|---|
 | `id` | `INTEGER PRIMARY KEY` | Monotonic event id, from 1. Also the chain position. |
 | `ts` | `TEXT NOT NULL` | Timezone-aware ISO-8601, normalized to UTC, e.g. `2026-08-18T00:26:52+00:00`. Lexicographic order equals chronological order. |
-| `source` | `TEXT NOT NULL` | Producing plane: `note`, `fs`, `chrome`, `safari`, `claude_code`, `gate`, `eval`, `loop`, `grant`, `decision`, `mandate`, `tx`, `pin`, `act`. |
+| `source` | `TEXT NOT NULL` | Producing plane: `note`, `fs`, `chrome`, `safari`, `claude_code`, `gate`, `eval`, `loop`, `grant`, `decision`, `mandate`, `tx`, `pin`, `act`, `health`. Fifteen values, and the list is closed — it is exactly the set of first elements of the `(source, kind)` registry keys in §7, which is itself closed. §7 is the authority; this column note is a convenience that must be regenerated from it. |
 | `kind` | `TEXT NOT NULL` | Record type within the source. `(source, kind)` is the registry key. |
 | `uri` | `TEXT` | Subject locator when one exists (file path, page URL). May be NULL. |
 | `content` | `TEXT` | The record's text, post-redaction. NULL for content-free records (§8). |
@@ -185,6 +255,41 @@ unknown keys are refused** (`attest.py:60–65`, `ACTION_FIELDS`):
 **Signature:** ECDSA P-256 with SHA-256 over `canonical_bytes(DOMAIN, action)`
 (`attest.py:899`), by a key registered in `operator_keys`.
 
+### Where the operator key lives
+
+`operator_keys` (`db.py:67–73`). A verifier needs the exact column and the
+exact encoding, so both are given here rather than left to inference:
+
+```
+operator_keys(key_id TEXT PRIMARY KEY,
+              public_der BLOB NOT NULL,
+              signer TEXT NOT NULL,
+              registered TEXT NOT NULL,
+              revoked TEXT)
+```
+
+`public_der` is a **raw DER SubjectPublicKeyInfo blob** — *not* PEM. This
+differs from `service_keys.public_pem` (§5), which is PEM, and the difference
+is easy to miss because the two tables sit one section apart and do the same
+job. A verifier loads `public_der` as DER/SPKI directly, with no base64 and no
+armour to strip.
+
+`revoked` is a timestamp or NULL. A signature made by a key that has since
+been revoked still verifies mathematically; whether it should still be
+*honoured* is a policy question this format does not answer.
+
+### Where `archive_uuid` comes from
+
+`archive_identity(singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+uuid TEXT NOT NULL)` (`db.py:111`), read as
+`SELECT uuid FROM archive_identity WHERE singleton = 1`. Minted once per
+archive (`attest.py:186`, `archive_uuid`).
+
+This value is a field of the signed object here in §4, and it is also the
+first field of both signature payloads in §5, so **§10 steps 5 and 6 are not
+executable without it.** It is named here because a verification recipe that
+depends on a value the document never locates is not a recipe.
+
 ### TTLs
 
 - Default 300 s, maximum 900 s (`attest.py:95–96`, `DEFAULT_TTL_SECONDS`,
@@ -299,9 +404,27 @@ Schema version 3 (`db.py:119–151`). Every one carries `alg`:
   primary key `(tip_id, alg)` — one row per scheme, which is what makes a
   hybrid checkpoint representable.
 
-Signatures are hex-encoded strings. `cutover = 1` marks a tip adopted at
-migration: it attests only that the service observed this tip at this time,
-and **retroactively authenticates nothing before it**.
+`service_keys.public_pem` is **PEM** (SubjectPublicKeyInfo, base64 with
+armour). Note the asymmetry with `operator_keys.public_der` in §4, which holds
+the same kind of key as **raw DER**. Two tables, two encodings; a verifier
+must not assume one from the other.
+
+Two further tables are not signature tables but are required to *rebuild* the
+payloads above, so they are named here rather than left to be discovered:
+
+- `archive_identity(singleton, uuid)` (`db.py:111`) — supplies `archive_uuid`,
+  the first field of both the tip and checkpoint payloads. Read it as
+  `SELECT uuid FROM archive_identity WHERE singleton = 1`. Fully described in
+  §4.
+- `operator_keys(key_id, public_der, signer, registered, revoked)`
+  (`db.py:67–73`) — the operator public keys §10 step 6 verifies against.
+  Fully described in §4.
+
+Signatures are hex-encoded strings, and ECDSA signatures are **DER-encoded
+`(r, s)`**, not the fixed-width `r || s` concatenation some libraries default
+to. `cutover = 1` marks a tip adopted at migration: it attests only that the
+service observed this tip at this time, and **retroactively authenticates
+nothing before it**.
 
 **All signatures present on a checkpoint must verify.** A hybrid checkpoint
 whose ML-DSA half fails is a broken checkpoint, not a classical one.
@@ -413,8 +536,18 @@ Artifact kinds are closed: `skill`, `tool`, `prompt_fragment`
 `(fs, file_delete)`, `(claude_code, message)`, `(claude_code, epoch)`,
 `(chrome|safari, page_visit)`.
 
-`HARNESS_SCHEMAS` (`schemas.py:470+`): reconciler markers, lineage audit and
-calibration runs, and experiment bookkeeping.
+`HARNESS_SCHEMAS` (`schemas.py:470+`), enumerated rather than summarized,
+because summarizing it is how `health` came to be missing from §1:
+`(claude_code, reconcile)`, `(eval, exp_run)`, `(eval, exp_report)`,
+`(eval, experiment)`, `(eval, lineage_audit)`, `(eval, lineage_cal_run)`,
+`(eval, lineage_judge)`, `(eval, restore_drill)`, `(health, sweep)`.
+
+`(health, sweep)` is the **only** member of the `health` plane and the reason
+that plane exists. It carries the periodic health sweep's verdict
+(`schemas.py:566`), it is appended by `hooks/health_sweep.py:243`, and
+`launchd/com.contextd.health.plist` runs that hook on a `StartInterval` of
+1800 seconds — so a running archive accumulates roughly 48 of these rows a
+day. Like every instrument record it is content-free (§8 rule 1).
 
 ### Disclosures
 
@@ -497,18 +630,28 @@ For an adjudicator with the raw SQLite file and nothing else:
 3. If `chain-witness.json` is present, confirm it names the last row (§6).
 4. For any row with a `service_signatures` entry: rebuild the envelope
    payload (§5), canonically encode it under `contextd.ServiceEnvelopeV1`
-   (§3), and verify under the algorithm named in that row's `alg`, using the
-   public key from `service_keys`.
-5. For each `service_checkpoints` row: rebuild the checkpoint payload (§5) —
-   including `alg` only for non-classical schemes — and verify. All rows for
-   a `tip_id` must verify.
+   (§3), and verify under the algorithm named in that row's `alg`, using
+   `service_keys.public_pem` (PEM) for that `key_id`.
+5. Read `archive_uuid` once, as `SELECT uuid FROM archive_identity WHERE
+   singleton = 1` (§4). Then for each `service_tips` row rebuild the tip
+   payload, and for each `service_checkpoints` row rebuild the checkpoint
+   payload (§5) — including `alg` only for non-classical schemes — and verify.
+   All rows for a `tip_id` must verify.
 6. For any row whose `meta.attestation` is present: canonically encode
    `attestation.action` under `contextd.OperatorActionV1` (§3, §4) and verify
-   the ECDSA P-256 signature against the `operator_keys` entry for `key_id`.
+   the ECDSA P-256 signature against `operator_keys.public_der` for that
+   `key_id` — **raw DER, not PEM** (§4). Check `signer` before believing the
+   result: only `secure_enclave` is a presence-bound hardware key (§4).
 
 Steps 1–3 need only SHA-256. Steps 4–6 need a signature verifier and no part
-of this codebase.
+of this codebase — every table, column and encoding they depend on is named
+above, which is a property this recipe did not have before the errata.
 
 The frozen vectors in `tests/vectors/operator_action_v1.json` freeze
 input → bytes → digest, so a second implementation in another language can be
 checked against exact bytes before it is trusted against a real archive.
+
+A worked second implementation exists: `scripts/verify_format_independent.mjs`
+performs all six steps in JavaScript, importing nothing from `contextd`. It is
+run against a live archive by `tests/test_format_independent.py`. If this
+document drifts from the code again, that is what should notice.
