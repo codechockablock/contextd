@@ -304,6 +304,41 @@ def assert_supported_schema(path: Path | None = None) -> int:
     return version
 
 
+class PostgresMigrationUnsupported(SchemaVersionError):
+    """In-place security migration was asked of a Postgres archive."""
+
+
+def _refuse_postgres_migration(path: Path | None) -> None:
+    """Refuse in-place migration of a Postgres archive, by name.
+
+    A Postgres archive is created at the current schema version by
+    `backends.postgres` and has no pre-hardening state to migrate: there is no
+    ``user_version`` pragma, no legacy cursor layout, no unhardened blob store
+    reachable from the connection, and the authority tables exist from the first
+    ``connect()``. So the honest answer is a refusal that names the substitute,
+    not a second migration engine that would have nothing to do.
+
+    ``path`` being explicit means the caller is naming a SQLite file directly —
+    a bundle database, a restored archive — which is legitimate even in a
+    process configured for Postgres, so only the default (open "the" archive)
+    is refused.
+    """
+    if path is not None:
+        return
+    from .backends import postgres_configured
+
+    if postgres_configured():
+        raise PostgresMigrationUnsupported(
+            "this archive is configured for the Postgres backend "
+            "(CONTEXTD_DATABASE_URL is set); in-place security migration is "
+            "SQLite-only. A Postgres archive is created at schema version "
+            f"{SCHEMA_VERSION} and has nothing to migrate. To move an existing "
+            "SQLite archive onto Postgres use "
+            "contextd.backends.transfer.migrate_sqlite_to_postgres, which "
+            "re-inserts every event through the chain-continuity trigger."
+        )
+
+
 def open_archive_for_migration(
     path: Path | None = None, *, read_only: bool = False
 ) -> sqlite3.Connection:
@@ -312,8 +347,16 @@ def open_archive_for_migration(
     This is the only supported way for the migration planner to inspect an old
     archive.  In particular it does not call ``connect()``, create tables, stamp
     ``user_version``, switch journal mode, recover a witness, or reap scratch.
+
+    It is also SQLite-only, and refuses rather than pretending otherwise. The
+    whole module downstream of it drives ``PRAGMA user_version``, which has no
+    Postgres analogue; without this guard a `ctx security migrate` run against a
+    Postgres archive opened whatever ``contextd.db`` happened to sit in the same
+    home — a different archive, or none — and either migrated the wrong file or
+    died on a raw driver syntax error naming ``PRAGMA``. Neither is an answer.
     """
     _guard_direct_access()
+    _refuse_postgres_migration(path)
     path = path or (home() / "contextd.db")
     if not path.exists() or path.is_symlink():
         raise SchemaVersionError("migration requires a regular existing archive")

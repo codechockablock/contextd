@@ -831,13 +831,36 @@ def _add_manifest_file(files: list[dict[str, Any]], root: Path, relative: str) -
     )
 
 
-def _snapshot_database(conn: sqlite3.Connection, destination: Path) -> None:
+def _snapshot_database(conn, destination: Path) -> dict | None:
+    """Write the archive's payload database into the staging directory.
+
+    SQLite has an online backup API and `PGConnection` deliberately does not
+    pretend to (it has no ``backup`` attribute, and inventing one would have
+    meant a file copy of something that is not a file). The bundle format is
+    nevertheless the same on both backends: a Postgres archive is *rendered* as
+    an ordinary SQLite archive by row export, so `validate_bundle`, restore, the
+    retention pass, and every adversarial-bundle test apply unchanged, and a
+    bundle stays verifiable independently of the backend that produced it.
+
+    Returns the export summary on Postgres — the caller needs the attested tip
+    to write the bundle's chain witness — and None on SQLite, where the witness
+    is a real file that gets copied.
+    """
+    from .backends import backend_for
+
+    if backend_for(conn).name != "sqlite":
+        from .backends.transfer import export_postgres_to_sqlite
+
+        result = export_postgres_to_sqlite(conn, destination)
+        os.chmod(destination, 0o600)
+        return result
     snapshot = sqlite3.connect(destination)
     try:
         conn.backup(snapshot)
     finally:
         snapshot.close()
     os.chmod(destination, 0o600)
+    return None
 
 
 def _referenced_blobs(database: Path) -> set[str]:
@@ -1278,8 +1301,72 @@ def prune_bundles(
         os.close(destination_fd)
 
 
+def _open_source_archive(conn, backend, source_home: Path) -> int:
+    """Open the archive root, having proved this connection belongs to it.
+
+    The point of the check is that ``source_home`` names the tree whose blob
+    store, config, and chain state are about to be copied, so a caller must not
+    be able to pair one archive's database with another archive's files. The
+    proof differs by backend because what "belongs to" *means* differs:
+
+    * **SQLite** — the connection is a file. Compare the ``(dev, ino)`` of the
+      file it has open against ``source_home/contextd.db``. String comparison
+      would be defeated by a symlink; this is not.
+    * **Postgres** — the connection has no file, which is exactly why
+      `PGConnection` carries an explicit ``archive_root`` (`postgres.py`,
+      finding 1). Compare the ``(dev, ino)`` of *that* directory against the
+      directory just opened, so a Postgres connection cannot be backed up
+      against a home it does not serve.
+    """
+    import stat
+
+    mismatch = "database connection does not belong to the source archive"
+    if backend.name == "sqlite":
+        database_row = conn.execute("PRAGMA database_list").fetchone()
+        database_file = (
+            database_row["file"]
+            if isinstance(database_row, sqlite3.Row)
+            else database_row[2]
+        )
+        if not database_file:
+            raise BackupError(mismatch)
+    else:
+        archive_root = getattr(conn, "archive_root", None)
+        if archive_root is None:
+            raise BackupError(mismatch)
+    try:
+        source_fd = _open_directory(source_home)
+    except BackupError as exc:
+        raise BackupError(mismatch) from exc
+    try:
+        if backend.name == "sqlite":
+            source_database = os.stat(
+                DATABASE_NAME, dir_fd=source_fd, follow_symlinks=False
+            )
+            connected_database = os.stat(database_file, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(source_database.st_mode)
+                or not stat.S_ISREG(connected_database.st_mode)
+                or (source_database.st_dev, source_database.st_ino)
+                != (connected_database.st_dev, connected_database.st_ino)
+            ):
+                raise BackupError(mismatch)
+        else:
+            opened = os.fstat(source_fd)
+            declared = os.stat(_absolute(Path(archive_root)))
+            if (opened.st_dev, opened.st_ino) != (declared.st_dev, declared.st_ino):
+                raise BackupError(mismatch)
+    except OSError as exc:
+        os.close(source_fd)
+        raise BackupError(mismatch) from exc
+    except BackupError:
+        os.close(source_fd)
+        raise
+    return source_fd
+
+
 def create_backup(
-    conn: sqlite3.Connection,
+    conn,
     source_home: Path,
     destination: Path,
     *,
@@ -1307,44 +1394,10 @@ def create_backup(
             or (expected_head_id == 0) != (expected_head_hash == "")
         ):
             raise BackupError("expected backup head is malformed")
-    database_row = conn.execute("PRAGMA database_list").fetchone()
-    database_file = (
-        database_row["file"]
-        if isinstance(database_row, sqlite3.Row)
-        else database_row[2]
-    )
-    if not database_file:
-        raise BackupError("database connection does not belong to the source archive")
-    try:
-        source_fd = _open_directory(source_home)
-    except BackupError as exc:
-        raise BackupError(
-            "database connection does not belong to the source archive"
-        ) from exc
-    try:
-        import stat
+    from .backends import backend_for
 
-        source_database = os.stat(
-            DATABASE_NAME, dir_fd=source_fd, follow_symlinks=False
-        )
-        connected_database = os.stat(database_file, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(source_database.st_mode)
-            or not stat.S_ISREG(connected_database.st_mode)
-            or (source_database.st_dev, source_database.st_ino)
-            != (connected_database.st_dev, connected_database.st_ino)
-        ):
-            raise BackupError(
-                "database connection does not belong to the source archive"
-            )
-    except OSError as exc:
-        os.close(source_fd)
-        raise BackupError(
-            "database connection does not belong to the source archive"
-        ) from exc
-    except BackupError:
-        os.close(source_fd)
-        raise
+    backend = backend_for(conn)
+    source_fd = _open_source_archive(conn, backend, source_home)
     try:
         destination_fd = _open_directory(destination, create=True)
     except BaseException:
@@ -1389,8 +1442,17 @@ def create_backup(
                     )
             _assert_path_matches_fd(destination, destination_fd, "backup destination")
             _assert_path_matches_fd(stage, stage_fd, "backup staging directory")
-            _snapshot_database(conn, database)
-            for name in OPTIONAL_STATE_NAMES:
+            exported = _snapshot_database(conn, database)
+            # A Postgres archive has no witness and no recovery journal — the
+            # tip lives in the database (docs/FORMAT.md §9) — so those two names
+            # are not copied from its root at all. Copying them would be worse
+            # than useless: a root that used to hold a SQLite archive still has
+            # a `chain-witness.json` naming a tip from a different history, and
+            # the bundle would carry it as if it attested this one.
+            state_names = (
+                OPTIONAL_STATE_NAMES if exported is None else ("config.toml",)
+            )
+            for name in state_names:
                 try:
                     os.stat(name, dir_fd=source_fd, follow_symlinks=False)
                 except FileNotFoundError:
@@ -1402,6 +1464,18 @@ def create_backup(
                     name,
                     f"archive state {name}",
                 )
+            if exported is not None:
+                # The bundle's witness is rendered from `chain_tip`, the tip the
+                # database itself attests, read inside the export's snapshot and
+                # already cross-checked against `events` there. So the file
+                # `_validate_chain_state` is about to check is not a restatement
+                # of the rows it is checked against — it is the other artifact,
+                # carried across from the only place Postgres keeps one.
+                db_module._atomic_json(
+                    stage / "chain-witness.json",
+                    db_module._witness_value(exported["attested_tip"]),
+                )
+                os.chmod(stage / "chain-witness.json", 0o600)
         snapshot = _validate_database(database)
         _validate_chain_state(stage, snapshot)
 

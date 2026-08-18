@@ -499,13 +499,20 @@ def cmd_security(args):
     if args.security_action == "migrate":
         from .migrate import MigrationError, migrate as run_migration
         from .db import (SchemaVersionError, open_archive_for_migration)
-        conn = open_archive_for_migration(read_only=bool(args.dry_run))
+        # Opening is inside the try because opening is where several of the
+        # refusals live — a newer archive, a missing one, and a Postgres archive
+        # (migration is SQLite-only) are all decided before `migrate` is
+        # reached. Outside it, exactly the refusals most worth reading reached
+        # the operator as a traceback.
+        conn = None
         try:
+            conn = open_archive_for_migration(read_only=bool(args.dry_run))
             result = run_migration(conn, dry_run=args.dry_run)
         except (MigrationError, SchemaVersionError) as e:
             sys.exit(f"refused: {e}")
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True, default=str))
         elif result["applied"]:

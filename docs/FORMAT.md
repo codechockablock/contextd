@@ -474,9 +474,18 @@ Stated plainly, because silence here would be read as coverage.
   the database; `content_hash` names them. The on-disk arrangement is not
   specified.
 - **Backup bundle (`.ctxbackup`) and sealed export formats.** Both are
-  manifest-hashed and service-signed, and both are **SQLite-only**
-  (`contextd/backup.py:834–839` uses SQLite's online backup API, which has no
-  PostgreSQL counterpart). Their internal layout is out of scope here.
+  manifest-hashed and service-signed, and the bundle's payload database is
+  always SQLite. That is no longer a backend restriction: SQLite's online
+  backup API has no PostgreSQL counterpart, so a Postgres archive is *rendered*
+  into a SQLite archive by row export (`contextd/backends/transfer.py`) instead
+  of copied. One bundle format therefore serves both backends, and a bundle
+  restores into a working SQLite archive whichever produced it — including its
+  `chain-witness.json`, which for a Postgres source is written from the
+  `chain_tip` row rather than copied from a file that does not exist (§6).
+  Restoring *into* a Postgres archive is deliberately not supported; move a
+  restored archive onto a server with `migrate_sqlite_to_postgres`, which
+  re-inserts every row through the chain-continuity trigger. Their internal
+  layout is out of scope here.
 - **Key enrollment, Secure Enclave handles, and the `.sekey` blob.** Device-
   bound and platform-specific; see `docs/OPERATOR_CEREMONY.md`.
 - **The FTS5 index.** Derived, rebuildable, and not evidence. Nothing in the

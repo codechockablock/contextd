@@ -10,6 +10,32 @@ jobs:
     strategy:
       matrix:
         python: ["3.11", "3.13"]
+    # The Postgres backend tests used to skip here — every one of them, on every
+    # run — because no server was reachable. A suite that reports "18 skipped"
+    # forever is not coverage of the multi-host protocol; it is a standing
+    # promise to test it later. This container is what turns the skip into a
+    # result. Version 18 matches the release the backend was designed and
+    # verified against; the real floor is 14, for `CREATE OR REPLACE TRIGGER`.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          # Trust auth, deliberately: this container is created and destroyed
+          # inside one job on the runner's own network, holds no archive, and
+          # is dropped and recreated per test. A password here would be a
+          # credential committed to the repository that protects nothing —
+          # and `scripts/audit_repository_privacy.py` is right to say so.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: contextd_test
+        ports:
+          - 5432:5432
+        # Without the health check the first test races the postmaster's
+        # startup and fails as if the backend were broken.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,7 +44,38 @@ jobs:
       # [pqc] pins the `cryptography` floor that exposes native ML-DSA, so the
       # post-quantum checkpoint tests actually execute here instead of skipping
       # on whatever version the base floor happens to resolve to.
-      - run: pip install -e '.[dev,pqc]'
+      # [postgres] installs psycopg. It is an optional extra on purpose — a
+      # single-host SQLite install needs nothing — so CI has to ask for it.
+      - run: pip install -e '.[dev,pqc,postgres]'
       - run: ruff check .
-      - run: pytest -q
+      # Run the suite BOTH ways, and in this order. Without a URL is the
+      # configuration every existing single-host install runs, and it has to
+      # keep passing on its own: if the SQLite paths ever grew a dependency on
+      # a reachable server, a Postgres-only run would hide it.
+      - name: pytest (SQLite only — the default install)
+        run: pytest -q
+      # The tests create and drop a database per test, so this must point at a
+      # throwaway server. The service container above is exactly that.
+      - name: pytest (with Postgres — no skips)
+        run: pytest -q --postgres-url "$CONTEXTD_TEST_POSTGRES_URL"
+        env:
+          CONTEXTD_TEST_POSTGRES_URL: >-
+            postgresql://postgres@localhost:5432/contextd_test
       - run: python tests/smoke.py
+      # Zero network code is a README commitment, and `scripts/gates.sh` says it
+      # "mirrors .github/workflows/ci.yml exactly" — but this step did not
+      # exist, so the gate enforcing that commitment had only ever run on a
+      # developer's machine. The files allowed to mention network vocabulary
+      # (parse-only URL detection, the authority-plane unix socket, psycopg's
+      # connection string) are pinned in tests/network_surface.txt; a new match
+      # means a new socket surface to justify, by editing the manifest in the
+      # same commit that adds it.
+      #
+      # No `shell: bash` on purpose: the default `bash -e` leaves pipefail off,
+      # so this step's result is `diff`'s exit status and nothing else —
+      # matching what gates.sh evaluates. A separate import-level companion gate
+      # is being added to gates.sh in parallel and will need its own line here.
+      - name: network surface (lexical — mirrors scripts/gates.sh)
+        run: |
+          grep -rl "http\|socket\|urllib\|requests" contextd/ --include='*.py' \
+            | sort | diff -u tests/network_surface.txt -

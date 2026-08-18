@@ -129,7 +129,14 @@ from .pgdriver import PGConnection
 #: existing single-host install is untouched and nothing is auto-migrated.
 DATABASE_URL_ENV = "CONTEXTD_DATABASE_URL"
 
-SCHEMA_VERSION = 2
+#: Version 3 added the ``alg`` column to the three signature tables and the
+#: `service_checkpoints` table, bringing this schema level with `db.SCHEMA`.
+#: Their absence was not cosmetic: `ledger_sig._load_or_create_key` inserts
+#: ``alg`` unconditionally, so a Postgres archive could not register a service
+#: key at all — which silently disabled **manifest signing for every backup
+#: taken from one**, and would have crashed the append path of any archive
+#: migrated in past its signed cutover.
+SCHEMA_VERSION = 3
 
 #: Arbitrary fixed key for the bootstrap advisory lock. Scoped to schema
 #: creation only; the append path never takes it.
@@ -218,14 +225,16 @@ CREATE TABLE IF NOT EXISTS service_keys (
   key_id     TEXT PRIMARY KEY,
   public_pem TEXT NOT NULL,
   created    BIGINT NOT NULL,
-  retired    BIGINT
+  retired    BIGINT,
+  alg        TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256'
 );
 CREATE TABLE IF NOT EXISTS service_signatures (
   event_id  BIGINT PRIMARY KEY,
   key_id    TEXT NOT NULL,
   digest    TEXT NOT NULL,
   signature TEXT NOT NULL,
-  signed_at BIGINT NOT NULL
+  signed_at BIGINT NOT NULL,
+  alg       TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256'
 );
 CREATE TABLE IF NOT EXISTS service_tips (
   tip_id     BIGINT PRIMARY KEY,
@@ -233,9 +242,46 @@ CREATE TABLE IF NOT EXISTS service_tips (
   key_id     TEXT NOT NULL,
   signature  TEXT NOT NULL,
   signed_at  BIGINT NOT NULL,
-  cutover    INTEGER NOT NULL DEFAULT 0
+  cutover    INTEGER NOT NULL DEFAULT 0,
+  alg        TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256'
+);
+CREATE TABLE IF NOT EXISTS service_checkpoints (
+  tip_id     BIGINT NOT NULL,
+  alg        TEXT NOT NULL,
+  chain_hash TEXT NOT NULL,
+  key_id     TEXT NOT NULL,
+  signature  TEXT NOT NULL,
+  signed_at  BIGINT NOT NULL,
+  PRIMARY KEY (tip_id, alg)
 );
 """
+
+#: Additive DDL for an archive created by an older build, keyed by the version
+#: it is being lifted *from*. Deliberately separate from ``SCHEMA`` and applied
+#: **without** ``PROTOCOL``: re-running the trigger DDL on an initialized
+#: archive would silently recreate a dropped append-only trigger and repair away
+#: the only evidence that history was mutable — the exact hazard
+#: ``_assert_protocol_installed`` exists to make loud.
+UPGRADES = {
+    version: """
+ALTER TABLE service_keys
+  ADD COLUMN IF NOT EXISTS alg TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256';
+ALTER TABLE service_signatures
+  ADD COLUMN IF NOT EXISTS alg TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256';
+ALTER TABLE service_tips
+  ADD COLUMN IF NOT EXISTS alg TEXT NOT NULL DEFAULT 'ecdsa-p256-sha256';
+CREATE TABLE IF NOT EXISTS service_checkpoints (
+  tip_id     BIGINT NOT NULL,
+  alg        TEXT NOT NULL,
+  chain_hash TEXT NOT NULL,
+  key_id     TEXT NOT NULL,
+  signature  TEXT NOT NULL,
+  signed_at  BIGINT NOT NULL,
+  PRIMARY KEY (tip_id, alg)
+);
+"""
+    for version in (1, 2)
+}
 
 #: Append-only is enforced by the database, and the trigger covers TRUNCATE as
 #: well as UPDATE and DELETE — a row-level trigger alone would not fire for
@@ -409,6 +455,20 @@ class PostgresBackend(StorageBackend):
         **append** path takes no advisory lock, only the `chain_tip` row lock.
         """
         conn = self.raw_connect()
+        # A server-backed archive still has a filesystem side: the blob store,
+        # scratch, the service signing key, config.toml, and the directory a
+        # backup names as its source all live under the archive root.
+        # `connect_sqlite` creates it as a side effect of creating the database
+        # file; nothing did here, so a fresh Postgres archive worked until the
+        # first oversized ingest or the first backup and then failed on a
+        # missing directory.
+        try:
+            root = Path(conn.archive_root)
+            root.mkdir(parents=True, exist_ok=True)
+            os.chmod(root, 0o700)
+        except BaseException:
+            conn.close()
+            raise
         try:
             conn.execute("BEGIN")
             conn.execute("SELECT pg_advisory_xact_lock(?)", (BOOTSTRAP_LOCK_KEY,))
@@ -419,9 +479,14 @@ class PostgresBackend(StorageBackend):
             # dropped append-only trigger and repair away the only evidence that
             # history was mutable. An initialized archive therefore gets no DDL
             # and is checked instead, below.
-            if version < SCHEMA_VERSION:
+            if version == 0:
                 conn.run_ddl(SCHEMA)
                 conn.run_ddl(PROTOCOL)
+            elif version < SCHEMA_VERSION:
+                # An initialized archive gets additive DDL only, so lifting its
+                # schema version can never resurrect enforcement it lost.
+                conn.run_ddl(UPGRADES[version])
+            if version < SCHEMA_VERSION:
                 conn.execute(
                     "INSERT INTO schema_meta (singleton, version) VALUES (1, ?) "
                     "ON CONFLICT (singleton) DO UPDATE SET version = excluded.version",

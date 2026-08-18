@@ -48,7 +48,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from .db import SCHEMA_VERSION, SCHEMA, _atomic_json, _db_tip, chain_state_paths, now_iso
+from .db import (SCHEMA_VERSION, SCHEMA, _atomic_json, _db_tip, _witness_value,
+                 chain_state_paths, now_iso)
 from .gate import disclose, est_tokens, redact, select_items
 from .liveness import capture_liveness, stale_line
 
@@ -96,6 +97,38 @@ class HandoffError(RuntimeError):
     pass
 
 
+def _assert_compilable(conn) -> None:
+    """Checkpoint compilation is SQLite-only, and says so by name.
+
+    Selection reads event metadata through SQLite's ``json_extract`` and ranks
+    task-hint recall through FTS5. `backends/base.py` already declares search
+    out of scope for Postgres rather than substituting ``ts_rank``, and the
+    same reasoning applies here: a checkpoint compiled under different
+    selection is not the same artifact, and quietly returning one would be
+    worse than refusing.
+
+    Before this, the refusal was a raw driver error naming ``json_extract`` —
+    technically loud, but it told the operator nothing about what to do. There
+    IS something to do, and it is not a workaround: freeze a view and compile
+    from that. A frozen view is an ordinary SQLite archive on either backend
+    (:func:`freeze_view_from_connection`), so the compiled package is byte-for-
+    byte the one a single-host archive would have produced at that tip.
+    """
+    from .backends import backend_for
+
+    backend = backend_for(conn)
+    if backend.name == "sqlite":
+        return
+    raise HandoffError(
+        f"checkpoint compilation is SQLite-only; the {backend.name} backend "
+        "does not implement the SQLite JSON and FTS5 selection this reads "
+        "through (contextd/backends/base.py declares search out of scope "
+        "rather than silently ranking differently). Freeze a view first — "
+        "handoff.freeze_view_from_connection(conn, dest_home, tip) writes an "
+        "ordinary SQLite archive — and compile the checkpoint from that."
+    )
+
+
 def freeze_view(src_db: Path, dest_home: Path, until_id: int) -> dict:
     """Copy events 1..until_id into a fresh archive home at dest_home.
 
@@ -103,53 +136,113 @@ def freeze_view(src_db: Path, dest_home: Path, until_id: int) -> dict:
     is written to match the new tip. FTS is rebuilt by the schema triggers on
     insert. Cursors and blobs are deliberately not copied: a view ingests
     nothing, and blob events (content NULL) never enter selection anyway.
+
+    ``src_db`` is a SQLite archive file. For a Postgres archive — which has no
+    file to open read-only — use :func:`freeze_view_from_connection`.
     """
+    src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
+    try:
+        return _freeze(src, dest_home, until_id, Path(src_db).parent)
+    finally:
+        src.close()
+
+
+def freeze_view_from_connection(conn, dest_home: Path, until_id: int) -> dict:
+    """Freeze a view from an already-open archive, on either backend.
+
+    A Postgres archive cannot be frozen through :func:`freeze_view`: there is no
+    database file to open, and there is no witness file to read a tip from
+    either. The handoff therefore derives the view's chain state from the
+    database itself — the same move `backup.create_backup` makes — and the
+    received view is an ordinary SQLite archive that verifies on its own.
+
+    The view is SQLite whichever backend produced it, and that is the point: a
+    handoff exists to be opened somewhere else, and "somewhere else" must not be
+    required to have a Postgres cluster.
+    """
+    from .backends import backend_for
+
+    root = getattr(conn, "archive_root", None)
+    if root is None:
+        from .db import _connection_root
+
+        root = _connection_root(conn)
+    return _freeze(conn, dest_home, until_id, Path(root),
+                   backend=backend_for(conn))
+
+
+def _freeze(src, dest_home: Path, until_id: int, source_root: Path,
+            backend=None) -> dict:
     dest_home = Path(dest_home)
     if dest_home.exists() and any(dest_home.iterdir()):
         raise HandoffError(f"destination {dest_home} is not empty")
-    src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
-    src.row_factory = sqlite3.Row
     tip = src.execute(
         "SELECT id, chain_hash FROM events WHERE id <= ? "
         "ORDER BY id DESC LIMIT 1", (until_id,)).fetchone()
     if tip is None:
-        src.close()
         raise HandoffError(f"no events at or before #{until_id}")
     real_tip = src.execute("SELECT MAX(id) AS m FROM events").fetchone()["m"]
 
     dest_home.mkdir(parents=True, exist_ok=True)
     os.chmod(dest_home, 0o700)
-    dst = sqlite3.connect(dest_home / "contextd.db")
-    dst.row_factory = sqlite3.Row
-    dst.executescript(SCHEMA)
-    # A frozen view is built from the current schema by construction, so it is
-    # current-version by definition. Without this stamp it reads as version 0
-    # and the migration guard refuses to open it — a fresh database would be
-    # mistaken for a pre-hardening archive awaiting migration.
-    dst.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    rows = src.execute(
-        "SELECT id, ts, source, kind, uri, content, content_hash, meta, "
-        "prev_hash, chain_hash FROM events WHERE id <= ? ORDER BY id",
-        (until_id,))
-    n = 0
-    dst.execute("BEGIN")
-    for r in rows:
-        dst.execute(
-            "INSERT INTO events (id, ts, source, kind, uri, content, "
-            "content_hash, meta, prev_hash, chain_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            tuple(r))
-        n += 1
-    dst.execute("INSERT INTO chain_state(singleton, witness_initialized) VALUES (1, 1)")
-    dst.commit()
-    src.close()
-    witness_tip = _db_tip(dst)
-    dst.close()
+    if backend is not None and backend.name != "sqlite":
+        # One row exporter for both consumers: the view a handoff produces and
+        # the database a backup bundle carries are the same artifact, built the
+        # same way, so there is exactly one place where a Postgres archive is
+        # rendered as a SQLite one.
+        from .backends.transfer import export_postgres_to_sqlite
+
+        summary = export_postgres_to_sqlite(
+            src, dest_home / "contextd.db", up_to=until_id, carried=False)
+        n, witness_tip = summary["events"], summary["tip"]
+    else:
+        n, witness_tip = _freeze_sqlite_rows(src, dest_home, until_id)
+    # The witness stamp was hardcoded to protocol version 1 here while the rest
+    # of the build wrote 2. Nothing broke — version 1 is still read, and
+    # `db._restamp_witness_version` rewrites it on the view's first connect — but
+    # a view is built from the CURRENT schema by construction (that is exactly
+    # why `user_version` is stamped below), so labelling its witness with an
+    # older protocol was a claim the file could not support. `_witness_value` is
+    # now the single place the stamp comes from, on both backends.
     _atomic_json(chain_state_paths(dest_home)["witness"],
-                 {"version": 1, **witness_tip})
-    (dest_home / "config.toml").write_text(_view_config(Path(src_db).parent))
+                 _witness_value(witness_tip))
+    (dest_home / "config.toml").write_text(_view_config(source_root))
     os.chmod(dest_home / "config.toml", 0o600)
     return {"home": str(dest_home), "events": n, "tip": witness_tip["id"],
             "source_tip": real_tip, "frozen": now_iso()}
+
+
+def _freeze_sqlite_rows(src, dest_home: Path, until_id: int) -> tuple[int, dict]:
+    dst = sqlite3.connect(dest_home / "contextd.db")
+    dst.row_factory = sqlite3.Row
+    try:
+        dst.executescript(SCHEMA)
+        # A frozen view is built from the current schema by construction, so it
+        # is current-version by definition. Without this stamp it reads as
+        # version 0 and the migration guard refuses to open it — a fresh
+        # database would be mistaken for a pre-hardening archive awaiting
+        # migration.
+        dst.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        rows = src.execute(
+            "SELECT id, ts, source, kind, uri, content, content_hash, meta, "
+            "prev_hash, chain_hash FROM events WHERE id <= ? ORDER BY id",
+            (until_id,))
+        n = 0
+        dst.execute("BEGIN")
+        for r in rows:
+            dst.execute(
+                "INSERT INTO events (id, ts, source, kind, uri, content, "
+                "content_hash, meta, prev_hash, chain_hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                tuple(r))
+            n += 1
+        dst.execute(
+            "INSERT INTO chain_state(singleton, witness_initialized) VALUES (1, 1)")
+        dst.commit()
+        return n, _db_tip(dst)
+    finally:
+        dst.close()
 
 
 def drop_view(dest_home: Path) -> None:
@@ -205,6 +298,7 @@ def select_checkpoint_context(conn, cfg, budget: int = 4000,
     slice cannot carry every active loop, the section names the omitted ids
     and count: silent loss is forbidden by contract.
     """
+    _assert_compilable(conn)
     from .decisions import reduce_supersessions
     from .loops import select_loop_section
     loop_sec = select_loop_section(conn, budget, repo_path)

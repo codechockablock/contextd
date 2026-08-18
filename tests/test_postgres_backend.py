@@ -516,3 +516,403 @@ def test_migration_leaves_the_source_archive_usable(pg_url, tmp_path, monkeypatc
     assert verify_chain_read_only(source)["ok"]
     source.close()
     dest.close()
+
+
+def test_migration_carries_the_signature_algorithm_tags(
+    pg_url, tmp_path, monkeypatch
+):
+    """A signature record whose scheme tag is lost falls back to "the only
+    scheme that existed before the column did", so dropping `alg` in transit
+    would relabel a post-quantum key as P-256 and every signature under it
+    would stop verifying on the far side.
+    """
+    from contextd.backends.postgres import PostgresBackend
+    from contextd.backends.transfer import migrate_sqlite_to_postgres
+
+    source = _sqlite_archive(tmp_path, monkeypatch, "sqlite-home", events=1)
+    source.execute(
+        "INSERT INTO service_keys (key_id, public_pem, created, retired, alg) "
+        "VALUES (?,?,?,NULL,?)",
+        ("f" * 32, "-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----\n",
+         1, "ml-dsa-65"))
+    source.execute(
+        "INSERT INTO service_checkpoints "
+        "(tip_id, alg, chain_hash, key_id, signature, signed_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (1, "ml-dsa-65", "ab" * 32, "f" * 32, "cd" * 32, 2))
+    source.commit()
+
+    monkeypatch.setenv("CONTEXTD_DATABASE_URL", pg_url)
+    dest = PostgresBackend().connect()
+    summary = migrate_sqlite_to_postgres(source, dest)
+    assert summary["carried"]["service_checkpoints"] == 1
+    assert dest.execute(
+        "SELECT alg FROM service_keys WHERE key_id = ?", ("f" * 32,)
+    ).fetchone()["alg"] == "ml-dsa-65"
+    assert dest.execute(
+        "SELECT alg FROM service_checkpoints WHERE tip_id = 1"
+    ).fetchone()["alg"] == "ml-dsa-65"
+    source.close()
+    dest.close()
+
+
+# --- schema parity --------------------------------------------------------
+
+def test_a_postgres_archive_can_register_a_service_key(pg_conn):
+    """Schema version 3. Without the `alg` column `_load_or_create_key`'s
+    INSERT fails, which silently left every backup manifest unsigned."""
+    from contextd.ledger_sig import CLASSICAL_ALG, _load_or_create_key
+
+    _private, key_id = _load_or_create_key(pg_conn)
+    row = pg_conn.execute(
+        "SELECT key_id, alg FROM service_keys WHERE key_id = ?", (key_id,)
+    ).fetchone()
+    assert row["alg"] == CLASSICAL_ALG
+
+
+def test_an_older_postgres_archive_is_upgraded_without_reinstalling_triggers(
+    pg_url, monkeypatch
+):
+    """Additive DDL only. Re-running the trigger DDL to lift a schema version
+    would recreate a dropped append-only trigger and repair away the only
+    evidence that history was writable in the interval."""
+    from contextd.backends.postgres import PostgresBackend
+    from contextd.db import ChainStateError
+
+    monkeypatch.setenv("CONTEXTD_DATABASE_URL", pg_url)
+    conn = PostgresBackend().connect()
+    conn.execute("ALTER TABLE service_keys DROP COLUMN alg")
+    conn.execute("DROP TABLE service_checkpoints")
+    conn.execute("UPDATE schema_meta SET version = 2 WHERE singleton = 1")
+    conn.commit()
+    conn.close()
+
+    upgraded = PostgresBackend().connect()
+    assert upgraded.execute("SELECT alg FROM service_keys").fetchall() == []
+    assert upgraded.execute(
+        "SELECT to_regclass('service_checkpoints') AS t"
+    ).fetchone()["t"] is not None
+    assert int(upgraded.execute(
+        "SELECT version FROM schema_meta WHERE singleton = 1"
+    ).fetchone()["version"]) == 3
+
+    # ...and lifting the version still refuses an archive whose enforcement is
+    # gone, rather than quietly reinstalling it on the way past.
+    upgraded.execute("DROP TRIGGER events_no_update ON events")
+    upgraded.execute("UPDATE schema_meta SET version = 2 WHERE singleton = 1")
+    upgraded.commit()
+    upgraded.close()
+    with pytest.raises(ChainStateError, match="append-only enforcement"):
+        PostgresBackend().connect()
+
+
+def test_a_fresh_postgres_archive_creates_its_archive_root(
+    pg_url, tmp_path, monkeypatch
+):
+    """A server-backed archive still has a filesystem side — the blob store,
+    scratch, the service signing key, and the directory a backup names as its
+    source all live under the archive root."""
+    from contextd.backends.postgres import PostgresBackend
+
+    root = tmp_path / "never-created"
+    monkeypatch.setenv("CONTEXTD_DATABASE_URL", pg_url)
+    monkeypatch.setenv("CONTEXTD_HOME", str(root))
+    assert not root.exists()
+    conn = PostgresBackend().connect()
+    try:
+        assert root.is_dir()
+        assert root.stat().st_mode & 0o777 == 0o700
+    finally:
+        conn.close()
+
+
+# --- backup: same bundle format, produced from rows -----------------------
+#
+# `PGConnection` has no ``backup()`` and never will: SQLite's online backup API
+# copies a file, and there is no file. The bundle is produced instead by
+# rendering the archive as a SQLite archive (`backends/transfer.py`), so the
+# `.ctxbackup` format does not fork per backend — which is what lets every
+# adversarial-bundle test, the retention pass, and the restore drill keep
+# applying to a bundle whichever backend made it.
+
+def _history(conn, events=4):
+    from contextd.db import append_event
+
+    return [append_event(conn, "test", "note", content=f"pg event {i}")
+            for i in range(events)]
+
+
+def test_backup_from_postgres_restores_into_a_verifying_sqlite_archive(
+    pg_conn, tmp_path, monkeypatch
+):
+    """The round trip this lane exists for: create on Postgres, restore, and
+    have the received archive verify as an ordinary archive."""
+    from contextd import home
+    from contextd.backup import create_backup, restore_backup, validate_bundle
+    from contextd.db import connect, verify_chain
+    from contextd.search import search
+
+    _history(pg_conn, events=4)
+    source_home = home()
+    result = create_backup(pg_conn, source_home, tmp_path / "backups")
+    assert result["events"] == 4
+
+    bundle = result["bundle"]
+    trust = source_home / "backup-trust.json"
+    verified = validate_bundle(bundle, trust_store=trust)
+    # Not "unsigned but tolerated": the manifest carries a real service
+    # signature and authenticates against pins taken from the live archive.
+    assert verified["authentication"]["authenticated"] is True
+    assert verified["snapshot"]["events"] == 4
+
+    destination = tmp_path / "restored"
+    restore_backup(bundle, destination, trust_store=trust)
+
+    monkeypatch.delenv("CONTEXTD_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CONTEXTD_HOME", str(destination))
+    restored = connect()
+    try:
+        chain = verify_chain(restored)
+        assert chain["ok"] and chain["checked"] == 4
+        # FTS is rebuilt by the ordinary insert trigger during the export, so
+        # the restored archive is searchable even though the Postgres archive
+        # it came from declares search out of scope.
+        assert [row["id"] for row in search(restored, "event")] == [1, 2, 3, 4]
+    finally:
+        restored.close()
+
+
+def test_backup_from_postgres_carries_referenced_blobs(pg_conn, tmp_path):
+    """Blob payloads live on the filesystem on both backends, so the bundle
+    must carry the ones its events reference."""
+    from contextd import home
+    from contextd.backup import create_backup, validate_bundle
+    from contextd.db import append_event, store_blob
+
+    digest = store_blob(b"an oversized payload that lives outside the rows" * 64)
+    append_event(pg_conn, "fs", "file_write", uri="/x/big.md",
+                 content_hash=digest, meta={"size": 3072, "blob": digest})
+    result = create_backup(pg_conn, home(), tmp_path / "backups")
+    assert result["blobs"] == 1
+    verified = validate_bundle(result["bundle"],
+                               trust_store=home() / "backup-trust.json")
+    assert verified["manifest"]["blobs"] == [digest]
+    assert (result["bundle"] / "store" / digest[:2] / digest).is_file()
+
+
+def test_backup_from_postgres_refuses_a_tip_that_diverges_from_history(
+    pg_conn, tmp_path
+):
+    """`chain_tip` disagreeing with `events` is the one signal a Postgres
+    archive has that history was written with the continuity trigger
+    disabled. A backup must refuse it, not render it into a valid bundle."""
+    from contextd import home
+    from contextd.backup import create_backup
+    from contextd.db import ChainStateError
+
+    _history(pg_conn, events=2)
+    pg_conn.execute("UPDATE chain_tip SET id = 9 WHERE singleton = 1")
+    pg_conn.commit()
+    with pytest.raises(ChainStateError, match="does not match recorded tip"):
+        create_backup(pg_conn, home(), tmp_path / "backups")
+
+
+def test_backup_refuses_a_postgres_connection_from_another_archive_root(
+    pg_conn, tmp_path
+):
+    """A Postgres connection has no file to identify it, so the archive root it
+    carries is what binds it to a home — and that is checked, not trusted."""
+    from contextd.backup import BackupError, create_backup
+
+    _history(pg_conn, events=1)
+    other = tmp_path / "not-this-archive"
+    other.mkdir()
+    with pytest.raises(BackupError, match="does not belong to the source archive"):
+        create_backup(pg_conn, other, tmp_path / "backups")
+
+
+def test_backup_from_postgres_ignores_a_stale_sqlite_witness_in_the_root(
+    pg_conn, tmp_path
+):
+    """A root that used to hold a SQLite archive still has a witness file
+    naming a tip from a different history. Copying it into the bundle would
+    present it as an attestation of THIS one."""
+    import json
+
+    from contextd import home
+    from contextd.backup import create_backup, validate_bundle
+
+    _history(pg_conn, events=3)
+    stale = {"version": 2, "id": 999, "chain_hash": "ab" * 32}
+    (home() / "chain-witness.json").write_text(json.dumps(stale))
+    (home() / "chain-recovery.json").write_text(json.dumps(
+        {"version": 2, "previous": stale,
+         "outcomes": [{"id": 1000, "chain_hash": "cd" * 32}]}))
+
+    bundle = create_backup(pg_conn, home(), tmp_path / "backups")["bundle"]
+    assert not (bundle / "chain-recovery.json").exists()
+    assert json.loads((bundle / "chain-witness.json").read_text())["id"] == 3
+    assert validate_bundle(
+        bundle, trust_store=home() / "backup-trust.json"
+    )["snapshot"]["head_id"] == 3
+
+
+def test_backup_bundles_from_both_backends_have_the_same_shape(
+    pg_conn, tmp_path, monkeypatch
+):
+    """One format, two producers. If these diverge, every consumer of a bundle
+    has to learn which backend made it."""
+    from contextd import home
+    from contextd.backup import create_backup
+    from contextd.db import append_event, connect
+
+    _history(pg_conn, events=2)
+    pg_bundle = create_backup(pg_conn, home(), tmp_path / "pg-backups")["bundle"]
+    pg_files = sorted(p.relative_to(pg_bundle).as_posix()
+                      for p in pg_bundle.rglob("*") if p.is_file())
+
+    monkeypatch.delenv("CONTEXTD_DATABASE_URL", raising=False)
+    sqlite_home = tmp_path / "sqlite-home"
+    sqlite_home.mkdir()
+    monkeypatch.setenv("CONTEXTD_HOME", str(sqlite_home))
+    sconn = connect()
+    for i in range(2):
+        append_event(sconn, "test", "note", content=f"sqlite event {i}")
+    sq_bundle = create_backup(
+        sconn, sqlite_home, tmp_path / "sq-backups")["bundle"]
+    sq_files = sorted(p.relative_to(sq_bundle).as_posix()
+                      for p in sq_bundle.rglob("*") if p.is_file())
+    sconn.close()
+
+    assert pg_files == sq_files == [
+        "chain-witness.json", "contextd.db", "manifest.json", "manifest.sha256",
+    ]
+
+
+# --- handoff --------------------------------------------------------------
+
+def test_handoff_freezes_a_postgres_archive_into_a_verifying_view(
+    pg_conn, tmp_path, monkeypatch
+):
+    """A Postgres archive has no witness file to read a tip from, so the view's
+    chain state is derived from the database. The received view is an ordinary
+    SQLite archive — a handoff must not require the receiver to run a cluster."""
+    from contextd.db import connect, verify_chain
+    from contextd.handoff import freeze_view_from_connection
+
+    ids = _history(pg_conn, events=5)
+    cutoff = ids[2]
+    view = tmp_path / "view"
+    info = freeze_view_from_connection(pg_conn, view, cutoff)
+
+    assert info["tip"] == cutoff and info["events"] == cutoff
+    assert info["source_tip"] == ids[-1]
+
+    monkeypatch.delenv("CONTEXTD_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CONTEXTD_HOME", str(view))
+    vconn = connect()
+    try:
+        chain = verify_chain(vconn)
+        assert chain["ok"] and chain["checked"] == cutoff
+        # the future is unreachable because the rows are absent, not filtered
+        assert vconn.execute(
+            "SELECT COUNT(*) c FROM events WHERE id > ?", (cutoff,)
+        ).fetchone()["c"] == 0
+    finally:
+        vconn.close()
+
+
+def test_checkpoint_compilation_refuses_postgres_and_names_the_route(
+    pg_conn, tmp_path, monkeypatch
+):
+    """Selection reads SQLite JSON and FTS5, which this backend declares out of
+    scope. The refusal has to name the route that works, because there is one:
+    freeze a view — an ordinary SQLite archive — and compile from that."""
+    from contextd import load_config
+    from contextd.db import append_event, connect
+    from contextd.handoff import (HandoffError, compile_checkpoint,
+                                  freeze_view_from_connection)
+
+    for i in range(3):
+        append_event(pg_conn, "claude_code", "message", uri=f"claude://x{i}",
+                     content=f"dialogue line {i}", meta={"role": "user"})
+
+    with pytest.raises(HandoffError, match="compilation is SQLite-only"):
+        compile_checkpoint(pg_conn, load_config())
+
+    # the route the refusal names actually works
+    view = tmp_path / "view"
+    freeze_view_from_connection(pg_conn, view, 3)
+    monkeypatch.delenv("CONTEXTD_DATABASE_URL", raising=False)
+    monkeypatch.setenv("CONTEXTD_HOME", str(view))
+    vconn = connect()
+    try:
+        out = compile_checkpoint(vconn, load_config(), budget=2000)
+        assert "dialogue line 2" in out["package"]
+        assert out["tip"] == 3
+    finally:
+        vconn.close()
+
+
+# --- ingest ---------------------------------------------------------------
+
+def test_ingest_runs_against_postgres_including_cursor_watermarks(
+    pg_conn, tmp_path, monkeypatch
+):
+    """`ingest.py` imports sqlite3 for the BROWSER history file, not for the
+    archive. Everything it writes goes through the backend-neutral db surface,
+    so the whole ingest surface — including the cursor and watermark machinery
+    that decides what has already been seen — runs here unchanged."""
+    import json
+    import sqlite3
+
+    from contextd import load_config
+    from contextd.db import get_cursor, verify_chain_read_only
+    from contextd.ingest import ingest_note, scan_chrome, scan_claude, scan_fs
+
+    cfg = load_config()
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    (watched / "one.md").write_text("the first watched body")
+    (watched / "two.md").write_text("the second watched body")
+    cfg["ingest"]["watch_dirs"] = [str(watched)]
+    cfg["ingest"]["text_extensions"] = [".md"]
+    cfg["ingest"]["never_ingest"] = []
+    cfg["ingest"]["max_file_bytes"] = 1024 * 1024
+
+    assert scan_fs(pg_conn, cfg)["file_write"] == 2
+    # the cursor is what makes the second pass a no-op rather than a re-ingest
+    assert scan_fs(pg_conn, cfg)["file_write"] == 0
+    assert sorted(get_cursor(pg_conn, "fs")["seen"]) == [
+        str(watched / "one.md"), str(watched / "two.md")]
+    (watched / "one.md").unlink()
+    assert scan_fs(pg_conn, cfg)["file_delete"] == 1
+
+    # browser watermark: a synthetic Chrome history file, scanned twice
+    history = tmp_path / "History"
+    browser = sqlite3.connect(history)
+    browser.execute(
+        "CREATE TABLE urls (url TEXT, title TEXT, last_visit_time INTEGER)")
+    browser.execute("INSERT INTO urls VALUES "
+                    "('https://example.org/a', 'A', 13300000000000000)")
+    browser.commit()
+    browser.close()
+    monkeypatch.setattr("contextd.ingest.CHROME_HISTORY", str(history))
+    assert scan_chrome(pg_conn, cfg)["page_visit"] == 1
+    assert get_cursor(pg_conn, "chrome")["watermark"] == 13300000000000000
+    assert scan_chrome(pg_conn, cfg)["page_visit"] == 0
+
+    # claude transcript cursor: byte offsets survive in the archive's cursors
+    projects = tmp_path / "projects" / "p"
+    projects.mkdir(parents=True)
+    (projects / "sess.jsonl").write_text(json.dumps({
+        "type": "user", "uuid": "u" * 20,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"content": "a transcript line worth keeping"}}) + "\n")
+    cfg["claude"]["projects_dir"] = str(tmp_path / "projects")
+    assert scan_claude(pg_conn, cfg)["message"] == 1
+    assert scan_claude(pg_conn, cfg)["message"] == 0
+    assert get_cursor(pg_conn, "claude_code:p/sess.jsonl")["o"] > 0
+
+    ingest_note(pg_conn, "a deliberate note")
+    assert verify_chain_read_only(pg_conn)["ok"]
