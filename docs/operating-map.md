@@ -83,16 +83,6 @@ they enabled still count in the field tally.
 
 ## Lanes
 
-### gate-v1-lane-5
-- **Objective:** Release surface — README (operator-ruled one-liner), quickstart
-  container-tested, SECURITY.md coverage, versioned record-format spec,
-  COMPARISON.md updated to merged reality, EU AI Act export (corrected
-  articles), packaging. Brief: docs/reviews/lane-5-goal-prompt.md.
-- **Owning session:** Claude Code / Fable 5 (orchestrator-dispatched worktree)
-- **State:** RUNNING — dispatched 2026-08-17 evening
-- **Blockers:** —
-- **Last update:** 2026-08-17 — dispatched after lanes 1–4 merged (`1c5b1c8`)
-
 ### operator-trial
 - **Objective:** Protocol v2 field trial of open-loops assisted capture —
   ~5 real working sessions, honest window-end confession list, verdict earned
@@ -105,6 +95,18 @@ they enabled still count in the field tally.
 - **Last update:** 2026-08-15 — map reconciled to the archive marker
 
 ## Done
+
+- 2026-08-17 — **gate-v1-lane-5** (Claude Code / Fable 5, merged to master):
+  the release surface, closing the Gate v1.0 program — all six lanes resolved
+  (1–5 merged, 6 held by ruling). README rebuilt on the operator-ruled ledger
+  line, quickstart proven verbatim in a fresh python:3.12 container,
+  docs/FORMAT.md = contextd-record-format v1 (mutation-tested spec suite),
+  root SECURITY.md disclosure process + checkpoint-window and Postgres-trust
+  coverage, `ctx compliance` deterministic EU AI Act record-keeping artifact
+  (corrected articles; renders no verdict), COMPARISON.md at merged reality
+  with test ids. Two false old-README claims deleted (search-is-unlogged;
+  campaign attribution). Suite 802+18 (820 with Postgres, zero skips), gates
+  ALL PASSED. Version recommendation 0.6.0 — operator decision, not applied.
 
 - 2026-08-17 — **gate-v1** (Claude Code / Fable 5, PR #1 merged to master as
   `1c5b1c8`): the Gate v1.0 program, lanes 1–4 of 6, orchestrator-verified —
