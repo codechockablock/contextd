@@ -136,7 +136,7 @@ DATABASE_URL_ENV = "CONTEXTD_DATABASE_URL"
 #: key at all — which silently disabled **manifest signing for every backup
 #: taken from one**, and would have crashed the append path of any archive
 #: migrated in past its signed cutover.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Arbitrary fixed key for the bootstrap advisory lock. Scoped to schema
 #: creation only; the append path never takes it.
@@ -172,6 +172,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_uri ON events(uri, id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
+CREATE INDEX IF NOT EXISTS idx_refusal_by_nonce
+  ON events (((meta::jsonb) ->> 'nonce')) WHERE kind = 'refuse';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_egress_outcome_once
   ON events (((meta::jsonb) ->> 'egress_id')) WHERE kind = 'egress_outcome';
 
@@ -282,6 +284,10 @@ CREATE TABLE IF NOT EXISTS service_checkpoints (
 """
     for version in (1, 2)
 }
+UPGRADES[3] = """
+CREATE INDEX IF NOT EXISTS idx_refusal_by_nonce
+  ON events (((meta::jsonb) ->> 'nonce')) WHERE kind = 'refuse';
+"""
 
 #: Append-only is enforced by the database, and the trigger covers TRUNCATE as
 #: well as UPDATE and DELETE — a row-level trigger alone would not fire for
@@ -579,6 +585,10 @@ class PostgresBackend(StorageBackend):
             if row
             else {"id": 0, "chain_hash": ""}
         )
+
+    def json_field(self, column: str, key: str) -> str:
+        assert key.isidentifier(), key
+        return f"(({column})::jsonb ->> '{key}')"
 
     def table_names(self, conn) -> set[str]:
         return {

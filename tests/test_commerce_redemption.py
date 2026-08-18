@@ -1191,7 +1191,7 @@ def test_refusal_cap_query_seeks_an_index_instead_of_scanning(
     conn = connect()
     # the statement the module really runs, not a copy of it
     plan = conn.execute(
-        "EXPLAIN QUERY PLAN " + attest._REFUSAL_COUNT_SQL,
+        "EXPLAIN QUERY PLAN " + attest._refusal_count_sql(conn),
         ("n", "act_mismatch", 4),
     ).fetchall()
     detail = " ".join(str(r["detail"]) for r in plan)

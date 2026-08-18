@@ -592,9 +592,10 @@ def test_an_older_postgres_archive_is_upgraded_without_reinstalling_triggers(
     assert upgraded.execute(
         "SELECT to_regclass('service_checkpoints') AS t"
     ).fetchone()["t"] is not None
+    from contextd.backends.postgres import SCHEMA_VERSION as PG_SCHEMA_VERSION
     assert int(upgraded.execute(
         "SELECT version FROM schema_meta WHERE singleton = 1"
-    ).fetchone()["version"]) == 3
+    ).fetchone()["version"]) == PG_SCHEMA_VERSION
 
     # ...and lifting the version still refuses an archive whose enforcement is
     # gone, rather than quietly reinstalling it on the way past.

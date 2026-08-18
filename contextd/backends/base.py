@@ -116,6 +116,20 @@ class StorageBackend(ABC):
     def db_tip(self, conn: Any) -> dict:
         """The highest event row, as ``{"id", "chain_hash"}``."""
 
+    def json_field(self, column: str, key: str) -> str:
+        """SQL for reading one text field out of a JSON ``column``.
+
+        The two engines spell this differently (SQLite ``json_extract``,
+        Postgres ``->>`` over a cast), and the difference is invisible until a
+        query written on one backend runs inside the other's append
+        transaction — which is exactly where the refusal-budget count runs, on
+        the path an attacker controls the frequency of. ``key`` must be a
+        static identifier from code, never caller input; the assertion is the
+        contract.
+        """
+        assert key.isidentifier(), key
+        raise NotImplementedError
+
     @abstractmethod
     def table_names(self, conn: Any) -> set[str]:
         """Tables present, for schema-presence checks that must not mutate.

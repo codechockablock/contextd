@@ -95,6 +95,10 @@ class SQLiteBackend(StorageBackend):
 
         return _db_tip(conn)
 
+    def json_field(self, column: str, key: str) -> str:
+        assert key.isidentifier(), key
+        return f"json_extract({column}, '$.{key}')"
+
     def table_names(self, conn) -> set[str]:
         return {
             row[0]

@@ -1149,16 +1149,29 @@ def refusal_cap() -> int:
 #: query *plan* explains the statement this module actually runs rather than a
 #: copy of it. `kind = 'refuse'` is an inline literal on purpose — see
 #: `_refusal_budget_spent`. It must track :data:`REFUSAL_KIND`.
-_REFUSAL_COUNT_SQL = (
-    "SELECT COUNT(*) FROM ("
-    "  SELECT 1 FROM events"
-    "  WHERE kind = 'refuse'"
-    "    AND json_extract(meta, '$.nonce') = ?"
-    "    AND json_extract(meta, '$.reason') = ?"
-    "  LIMIT ?"
-    ")"
-)
-assert f"kind = '{REFUSAL_KIND}'" in _REFUSAL_COUNT_SQL
+def _refusal_count_sql(conn) -> str:
+    """The budget-count query, in the connected backend's JSON dialect.
+
+    Written as SQLite-only json_extract until the merge with the Postgres
+    backend made refusals reachable there, where that function does not
+    exist — so the losing host CRASHED inside ``bind`` instead of being
+    refused. Both dialects are indexed by a partial expression index named
+    idx_refusal_by_nonce (contextd/db.py; contextd/backends/postgres.py), so
+    the inline `kind = 'refuse'` literal keeps the seek on both engines.
+    """
+    from .backends import backend_for
+    b = backend_for(conn)
+    sql = (
+        "SELECT COUNT(*) FROM ("
+        "  SELECT 1 FROM events"
+        f"  WHERE kind = '{REFUSAL_KIND}'"
+        f"    AND {b.json_field('meta', 'nonce')} = ?"
+        f"    AND {b.json_field('meta', 'reason')} = ?"
+        "  LIMIT ?"
+        ")"
+    )
+    assert f"kind = '{REFUSAL_KIND}'" in sql
+    return sql
 
 
 def _refusal_budget_spent(conn, nonce: str, reason: str, cap: int) -> bool:
@@ -1185,7 +1198,7 @@ def _refusal_budget_spent(conn, nonce: str, reason: str, cap: int) -> bool:
     """
     if cap <= 0:                       # explicitly disabled; record everything
         return False
-    row = conn.execute(_REFUSAL_COUNT_SQL, (nonce, reason, int(cap))).fetchone()
+    row = conn.execute(_refusal_count_sql(conn), (nonce, reason, int(cap))).fetchone()
     return int(row[0]) >= cap
 
 
