@@ -25,7 +25,7 @@ Everything the machinery cannot do for you, with the exact act.
 2. **Open a NEW grant-calibration field window when the post-gate-v1 code
    settles** (docs/GRANT_CALIBRATION.md): the r1 window is CLOSED as of
    2026-08-18 — see Decisions. Opening act: `ctx grant add loop.confirm
-   --repo /Users/joseph/contextd --for <duration>`, then resume the morning
+   --repo ~/contextd --for <duration>`, then resume the morning
    review ritual for confirmations made under the new window.
 
 Resolved 2026-08-15 (evening), by the operator: **production signer
