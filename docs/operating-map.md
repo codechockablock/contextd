@@ -173,29 +173,40 @@ they enabled still count in the field tally.
 
 ### boundary-severance (Lane T)
 - **Objective:** Make the gate/evidence core import-clean so the Terminus
-  extraction is a `git archive`, not a surgery. Cuts edges in place; explicitly
-  does NOT extract, rename, create a `terminus` package, or dissolve the daemon.
-  Durable artifact is `tests/test_core_boundary.py`.
+  extraction is a `git archive`, not a surgery. Cuts edges in place; does NOT
+  extract, rename, create a `terminus` package, or dissolve the daemon.
+  Durable artifact: `tests/test_core_boundary.py`.
 - **Owning session:** local CC (Opus 5), dispatched 2026-08-18; branch
   `lane-t-severance`, worked in a separate `git worktree` at `~/contextd-lane-t`
-  because Lane NV holds the `~/contextd` checkout live. Claim recorded on the
-  branch, not master, per the NV precedent — the brief forbids master commits.
-- **State:** **HALTED at the Phase A gate, awaiting operator ratification.**
-  Triage complete and committed (`docs/reviews/lane-t-triage.md`); zero
-  modules modified. AST re-measure confirms the brief's §2 shape exactly —
-  13 daemon modules in the core closure, 9 core sources, 24 direct edges
-  (§2's 21 undercounted duplicate call sites; no new module either side).
-  Headline finding: **0 INLINE, 1 HOOK, 23 of 24 sites need ratification.**
-  The boundary is six modules on the wrong side of the line, not conveniences
-  the core could inline — and `redact`, `correlate`, `backup` decide signed or
-  stored bytes, so §5 forbids hooking them.
-- **Blockers:** operator ratification of (1) RECLASSIFY `redact`, `assurance`,
-  `correlate`, `domains`, `scratch`, `backup` into core; (2) the `search`
-  question — reclassify or hook, Phase B is blocked on it; (3) `lineage`
-  admission (proposed per §1, closure-neutral); (4) release of four MOVEs
-  (`authd.hardened`/`is_service_process`, `loops.scope_str`,
-  `experiment.epistemic_type`), ~20 lines total.
-- **Last update:** 2026-08-18 — Phase A landed, halted for ratification
+  because Lane NV held the `~/contextd` checkout live. Claim recorded on the
+  branch per the NV precedent. Verified `git merge-tree` clean against
+  `lane-nv-verifier-pqc` at open and at close.
+- **State:** **Phase B complete but for one operator-reserved item.** The core's
+  import closure contains exactly one daemon module, `backup`, held open by
+  ruling R4. Everything else is severed: closure 13 daemon modules / 24 edges
+  -> 1 / 1. Six commits, one edge-group each. §5 verified — 17 byte probes
+  (canonical encoding, redaction, keyed correlation ids, attestation digests,
+  schema coercion, frozen vector file) byte-identical vs master. Amputation
+  rehearsal passes on imports AND runtime with 13 daemon modules plus `hooks/`
+  and `experiments/` deleted: 29/29 core modules import with zero daemon
+  side-effects, and the core created an archive from a virgin home, redacted a
+  secret out of the write path, verified its chain, failed closed at the gate,
+  built a signed bundle, sealed an encrypted export, and ran the gate proof.
+- **Findings worth carrying:** (1) R4 HALT — 47 of backup.py's 52 defs are
+  reachable from export's two imports, so there is no bounded primitive to
+  move; admitting it is the operator's signature and is the last act of the
+  severance. (2) R3 fired ADMIT — `keyed` is a closed-registry field kind and
+  keyed_id's output IS the stored byte. (3) The authd split was six lines, not
+  a signature extraction — attest.py already held all of OperatorActionV1.
+  (4) Severing db->authd removed import-level socket reach from 26 modules;
+  the evidence core now has none of any kind. (5) The loop/decision assurance
+  branches were covered by nothing — the suite passed with them deleted — so
+  the lane wrote the 20 tests that now cover the hooks.
+- **Blockers:** operator ratification of `backup` (R4). Recorded in the
+  boundary test as `PENDING_RATIFICATION`, checked in both directions so it
+  cannot outlive its reason; emptying it completes the severance.
+- **Last update:** 2026-08-18 — Phase B landed; report in
+  `docs/reviews/lane-t-triage.md`
 
 ## Done
 

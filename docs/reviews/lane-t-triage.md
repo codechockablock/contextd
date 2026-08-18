@@ -365,3 +365,274 @@ to behave correctly. It also cannot see whether a moved function *behaves*
 identically — only that the edge is gone. And it proves nothing about bytes: only
 the amputation rehearsal plus the frozen FORMAT vectors do that, and neither has
 run against a severed tree yet, because no severance has happened.
+
+---
+
+# Phase B — execution against the ruling
+
+Executed after operator ratification. Six commits, one edge-group each; the
+suite is green at every one of them except for `test_core_boundary`, which was
+the lane's declared red from the moment it landed and closes at commit six.
+
+## Closure, commit by commit
+
+| After | Daemon modules in the core closure | Direct edges |
+|---|---|---|
+| Phase A baseline | 13 | 24 |
+| `scope_str` → grants | 13 | 23 |
+| `epistemic_type` → provenance | 12 (experiment out) | 22 |
+| authd predicates → `authority_mode` | 9 (authd, ingest, rpc out) | 19 |
+| assurance resolver registry | 7 (loops, decisions out) | 19 |
+| gate retrieval provider | 6 (search out) | 18 |
+| CORE literal grows (R2/R3/R5) | **1 — `backup`, and only `backup`** | 1 |
+
+R7 was recomputed after the literal grew. The closure gained exactly one
+module, `backup`, which R4 names. **No unnamed module was dragged in; there is
+no silent widening to report.** Out of the closure entirely: `authd`, `cli`,
+`decisions`, `doctor`, `experiment`, `handoff`, `ingest`, `liveness`, `loops`,
+`mcp_server`, `rpc`, `search`, `service`.
+
+## R3 — correlate: the ADMIT branch fired
+
+Read the call site as instructed. `schemas.py:947` is inside `_coerce`, the
+per-field coercion for `kind == "keyed"` — a **declared field kind in the
+closed registry**, not a call to a utility. `Field`'s own docstring: *keyed —
+persisted only as a keyed correlation id under `stored_as`; the raw value is
+never written.* `_validate` then writes `out[spec.stored_as or name]`, so
+`keyed_id`'s return value **is** the stored byte for `query_id`, `session_id`
+and `task_hint_id`.
+
+Schema-semantic on both prongs of R3, so the helper-MOVE branch does not apply.
+It is also not a lone helper: `keyed_id` needs `_load_key`, `key_path`,
+`KEY_NAME` and the 0600/`O_EXCL` key-creation race handling, which is the whole
+93-line module, and whose location `ctx security doctor` already reports on
+because it determines whether the unguessability claim holds at all.
+
+**Branch recorded: ADMIT.**
+
+## R4 — backup: HALT, and the number that decides it
+
+Read the call site as instructed. `export.create_sealed_export` does not merely
+ask backup for a consistent copy — it binds `result["manifest_sha256"]` into
+`seal()` as AEAD associated data. That hash is worthless unless the manifest is
+the *signed*, trust-store-validated one, so `_sign_manifest`,
+`ManifestTrustStore`, `write_manifest_trust_store` and `_validate_bundle_tree`
+are all inside export's correctness, not beside it.
+
+Quantified rather than judged by eye — the transitive call closure of export's
+two imports within `backup.py`:
+
+```
+backup.py: 2020 lines, 52 module-level defs
+reachable from export's two imports: 47 defs, 1668 lines of def bodies
+NOT reachable: 5 defs, 185 lines
+would stay behind: _assert_secure_regular_file, _empty_destination_identity,
+                   bundle_identity, normalized_path, restore_backup
+```
+
+There is no bounded snapshot/consistent-copy primitive to move. "MOVE the
+needed function" would relocate ~90% of the module under a different name,
+which is the same admission R4 reserved, wearing a disguise. **Export's
+correctness genuinely spans backup's surface, so this is the HALT R4
+specifies.** It is recorded in the boundary test as `PENDING_RATIFICATION`,
+checked in both directions so the exception cannot outlive its reason, and
+emptying it is the last act of the severance.
+
+## R6 — the fail-closed condition, per move
+
+- **`authd.hardened` / `is_service_process` → `contextd/authority_mode.py`.**
+  Nothing in core ever sets the marker, so with the daemon absent it is False,
+  and False is the *refusing* branch at both call sites: `db._refuse_direct_access`
+  keeps its refusal, `attest._assert_bootstrap_boundary` raises. A hardened
+  archive with no authority service refuses to open rather than falling back to
+  direct SQLite. Documented in the new module's docstring and beside the marker.
+  `hardened()` reads operator configuration, not daemon state.
+- **`loops.scope_str` → `grants.py`** and **`experiment.epistemic_type` →
+  `provenance.py`.** Both pure functions of their arguments: no connection, no
+  config, no daemon state, nothing to default. R6's condition is vacuous for
+  them and each says so inline.
+
+## The hooks, and the honest problem with them
+
+Both hook defaults fail closed, and both are documented at their registration
+points:
+
+- **assurance resolvers.** Unregistered types fall through to `assurance_of`,
+  which has no connection, no key registry and no signature and therefore
+  cannot return anything above `LEGACY_UNVERIFIED`. An unknown type
+  under-claims; it cannot over-claim.
+- **gate retrieval.** No provider means no candidates: the gate discloses
+  *less*. This is exactly the property `domains` lacks, which is why R2 made
+  domains core and R5 made search a hook.
+
+**What the ruling could not have anticipated, reported rather than smoothed
+over: both unregistered defaults are SILENT.** A process that assembles without
+importing `contextd.search` gets "no matching events", indistinguishable from
+an empty archive. `tests/smoke.py` caught precisely that, through
+`hooks/synthesis_recall.py` — a daemon process that is not one of the four
+entry points.
+
+Three things were done about it rather than one:
+
+1. The four daemon process entry points (`cli`, `mcp_server`, `service`,
+   `authd`) import the registering modules at module scope, so no daemon
+   process can run through a half-populated registry.
+2. The true set of out-of-package retrieval callers is **six files, not the
+   twenty that merely mention the gate** — `disclose()` takes a payload and
+   never searches, so `lineage_audit`, `loop_scan`, `checkpoint_compile` and
+   `reconcile` are unaffected. `hooks/synthesis_recall.py` and five
+   `experiments/handoff/` scripts now import the provider, each with the reason
+   inline.
+3. `test_every_retrieval_caller_registers` walks `hooks/` and `experiments/`
+   with `ast` and fails on any file that retrieves without importing the
+   provider. The rule is now checked, not remembered.
+
+`tests/conftest.py` imports the three registering modules explicitly. Before
+that, whether a recall test saw a provider depended on which other test module
+pytest had already collected — order-dependence that happened to pass. The
+boundary claim itself is pinned in fresh interpreters where that import cannot
+mask it.
+
+### The coverage that did not exist
+
+The loop/decision branches of `known_event_assurance` were exercised by
+**nothing**: the full suite passes with both deleted outright. That was measured
+before the hook was written, not assumed, and it is why this lane adds
+`tests/test_assurance_resolvers.py` and `tests/test_gate_retrieval_hook.py`
+(16 tests) rather than trusting the suite to notice a regression. Writing them
+is how the missing `decisions` registration was found.
+
+## An unplanned security dividend
+
+`db.py` consulted `authd` through a function-local import, and nearly
+everything imports `db`, so nearly the whole tree inherited reach into
+`rpc`'s AF_UNIX socket. Severing that one edge removed
+`socket=via:contextd.authd+contextd.rpc` from **26 modules**. Nothing gained
+reach; every line in the pinned manifest's diff is a removal.
+
+**The evidence core now has no import-level network capability of any kind.**
+Socket reach is confined to `authd` and `rpc` (direct) and the four daemon
+front-ends that inherit from them. `tests/network_imports.txt` was regenerated
+with that justification in its own header, per its rule that a surface change
+and its explanation move in the same commit.
+
+## §5 — the bit-stability proof
+
+Seventeen probes covering every byte path the severance touched, run against a
+`git archive` of master and of this branch, in the same interpreter, with a
+fixed correlation key so keyed ids are comparable:
+
+```
+=== §5 BIT-STABILITY: master vs lane-t-severance HEAD ===
+IDENTICAL — no serialized byte moved
+```
+
+Probes: canonical bytes + digest, `redact`, `sanitize_content`,
+`sanitize_label`, `sanitize_text`, `keyed_id` (query / session / null),
+`intent_digest`, `canonical_scope`, `_normalize_arguments`,
+`_normalized_content`, `_digest`, `validate_event_meta`,
+`validate_egress_meta`, and the sha256 of `attest.export_vectors`' frozen
+cross-language vector file.
+
+One honest note about how that check was built: the first version of it
+reported IDENTICAL while both sides were crashing on a wrong signature. The
+probe count is now asserted, and the outputs above are real values.
+
+## The amputation rehearsal (R7)
+
+Deletion list updated to the post-ruling boundary — 13 daemon modules, plus
+`hooks/` and `experiments/` entirely. `backup.py` is **retained**, because R4
+left it unadmitted; that retention is the open item, not an oversight. Run in a
+throwaway venv with a real `pip install -e .`, never touching `~/contextd/.venv`
+(rebinding that editable install would have broken Lane NV's checkout). Virgin
+`CONTEXTD_HOME`, no `CONTEXTD_INSECURE_TEST_SIGNER`, no `CONTEXTD_CLIENT`.
+
+```
+IMPORTS: core imports clean with daemon absent — 29/29 modules
+IMPORTS: daemon modules pulled in as a side effect: NONE
+
+RUNTIME 1. archive created from a virgin home: True
+RUNTIME 2. appended [1, 2, 3] | redaction ran on the write path -> AWS key [REDACTED:aws_key] must never survive the write
+RUNTIME 3. chain verify: {'ok': True, 'checked': 3, 'first_bad': None, 'ts_warnings': 0}
+RUNTIME 4. gate with no retrieval provider (fail-closed): True
+RUNTIME 5. disclose ran; egress events in the ledger: 1
+RUNTIME 6. compliance record: ['archive', 'checkpoints', 'framing', 'integrity', 'limitations', 'report'] ...
+RUNTIME 7. lineage stats: ['alert_notes', 'anchors', 'depth_counts', 'derived_events', 'derived_notes', 'epochs'] ...
+RUNTIME 8. backup bundle: contextd-20260818-185157.ctxbackup | events 4 | manifest 8023a749ea05
+RUNTIME 9. sealed export: contextd-20260818-185157.ctxexport | sealed_bytes 133554 | manifest 7cc272009c6b
+RUNTIME 10. final chain verify: {'ok': True, 'checked': 4, 'first_bad': None, 'ts_warnings': 0}
+```
+
+and the gate proof, on the amputated tree:
+
+```
+SUMMARY {"atomic": {"chain_ok": true, "crashed": 0, "elapsed_s": 0.15, "mode": "atomic",
+"n": 8, "ok": true, "refusals": 7, "successes": 1}, "baseline": {"crashed": 0,
+"doubles": 7, "elapsed_s": 0.17, "mode": "baseline", "n": 8, "redemptions": 8,
+"refusals": 0}}   exit=0
+```
+
+R7 asked the rehearsal to see runtime and not only imports. It does: the core
+created an archive from nothing, redacted a secret out of the write path,
+verified its chain, failed closed at the gate, produced compliance and lineage
+artifacts, built a signed bundle, sealed an encrypted export, and re-verified
+the chain — with the daemon's files deleted.
+
+One thing the rehearsal found that is worth keeping: `backup` refused to run
+under `/private/tmp` with *"manifest trust store parent /private/tmp is
+group/world-writable"*. Not a severance defect — a security control working,
+and the reason the rehearsal is rooted outside the world-writable temp tree.
+
+## Final gates
+
+```
+ruff check contextd/ tests/ hooks/ experiments/   All checks passed!
+python -m pytest -q                                897 passed, 35 skipped
+python tests/smoke.py                              ALL PASSED
+examples/gate_proof/concurrent_redemption.py       20/20 passed
+tests/test_network_imports.py                      17 passed
+git diff master --stat                             29 files, +1366 -134
+```
+
+Baseline was 877 passed / 35 skipped. The 20 added tests are this lane's:
+`test_core_boundary` (3), `test_assurance_resolvers` (9),
+`test_gate_retrieval_hook` (8) — 20 net after the boundary file's three.
+
+## Scope note
+
+`§6` confines the diff to core modules, hook-registration sites in daemon
+modules, `tests/`, and this document. Two files sit outside that reading and
+are flagged rather than buried: `hooks/synthesis_recall.py` and five
+`experiments/handoff/` scripts. Under the new design they *are* registration
+sites — without the import they silently retrieve nothing — and `tests/smoke.py`
+fails without the first of them. `tests/network_imports.txt` also moved,
+required by its own same-commit rule.
+
+## The honest paragraph, second pass
+
+The verdict I would still second-guess is not one I made: it is `search`.
+R5 is coherent and I implemented it, but the silent-empty-result failure mode
+is a worse ergonomic than the triage predicted when it called the no-op default
+"byte-clean". It is byte-clean. It is not obvious. The `ast` guard converts
+that into a caught error for anything in-tree, and it cannot help a consumer
+outside this repository — which, after an extraction, is what every consumer
+will be. If Terminus ships a gate whose retrieval provider is unregistered by
+default, the first integration will spend an afternoon on it. A default that
+*raises* until something is registered would be the kinder design, and it is a
+product decision, so it is not mine.
+
+Of my own calls, `backup` is the one I feel most and resolved least: I halted,
+which is right, but the halt is the second-largest module in the core's closure
+sitting unresolved, and the extraction cannot happen until it is settled either
+way.
+
+What the boundary test still cannot see is unchanged from Phase A, minus one
+item: runtime coupling that does not travel through an import — shared
+`CONTEXTD_HOME` state, the SQLite schema itself, config keys the core would
+carry as dead defaults. The `threading.local` marker is no longer on that list;
+it moved into core and its absence now fails closed. What is newly on the list
+is the registration graph itself: the boundary test proves the core imports
+nothing from the daemon, and says nothing about whether a daemon process
+remembered to register what the core will ask it for. Three tests now cover
+that for the paths in this tree. Nothing covers it for a consumer that does not
+exist yet.
