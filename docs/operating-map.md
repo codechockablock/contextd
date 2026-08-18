@@ -27,11 +27,10 @@ Everything the machinery cannot do for you, with the exact act.
    2026-08-18 — see Decisions. Opening act: `ctx grant add loop.confirm
    --repo ~/contextd --for <duration>`, then resume the morning
    review ritual for confirmations made under the new window.
-3. **Close D1 and D2 in `~/md-signal/PREREG.md` §10** (Lane D,
-   mandate-divergence signal). D1 — construct wording: reply "ratify" or
-   "rename"; it cannot close by silence and Phase 1 is stopped on it.
-   D2 — the numbers table: adjust, or dispatch Phase 1 and the proposals
-   freeze as written. Also: name the repo (placeholder `md-signal`).
+3. **Name the Lane D repo** (placeholder `~/md-signal`) — cosmetic,
+   non-blocking. D1/D2 were closed by the operator 2026-08-18
+   ("ratify — and D2 proposals stand as written"); ruling recorded in
+   PREREG.md §10, commit `5734e34`.
 
 Resolved 2026-08-15 (evening), by the operator: **production signer
 enrolled** — key `0885eb01…` (secure_enclave, tag=default); first signed
@@ -45,6 +44,15 @@ under r1 metadata authority, are expired and inert, and the confirmations
 they enabled still count in the field tally.
 
 ## Decisions
+
+- 2026-08-18 — Operator: **Lane D D1 RATIFIED, D2 frozen as proposed**
+  ("ratify — and D2 proposals stand as written"): the mandate-divergence
+  construct stands verbatim under its v0 mandate-relative
+  operationalization; all evaluation numbers frozen (0.75 / +0.05 /
+  ≤0.60 / 0.70-at-kill, sizes, quotas, windows). Recorded in
+  `~/md-signal/PREREG.md` §10 @ `5734e34`. Phase 1 (fixture factory)
+  unblocked; its first gate is the factory-spec freeze before any
+  generation.
 
 - 2026-08-18 — Operator: **grant-calibration field window r1 CLOSED at 2/20
   confirmations, 2 grant-active days, 0 vetoes — a regime break, not a
@@ -126,17 +134,19 @@ they enabled still count in the field tally.
   registered advisory evidence (Gate v2 program).
 - **Owning session:** local CC (Fable 5), dispatched 2026-08-18; repo
   `~/md-signal` (new, outside this repo; operator names it)
-- **State:** blocked — Phase 0 done (`587c4b0`: PREREG.md frozen, AUDIT.md
-  audit-of-record, settled-negative entry filed in the operator registry);
-  Phase 1 gated on PREREG.md §10 decisions
-- **Blockers:** D1 (construct wording — explicit "ratify"/"rename",
-  cannot close by silence) and D2 (numbers — dispatch ratifies); operator
-  queue item 3. Kill date 2026-10-16 stands regardless.
-- **Last update:** 2026-08-18 — Phase 0 complete. Two corrections to the
-  charter recorded: the "Lane 6 interface already in the schema" premise
-  is refuted on master (Phase 4 registers it instead), and the charter's
-  label-shuffle leakage test was vacuous (replaced by a falsifiable
-  nuisance-only probe).
+- **State:** active — Phase 0 closed (`587c4b0` prereg + audit;
+  settled-negative filed; D1 ratified / D2 frozen by operator ruling
+  2026-08-18, recorded @ `5734e34`). Next: Phase 1 (fixture factory),
+  ready to dispatch as its own tranche; first gate is the factory-spec
+  freeze (nuisance list, untrusted class set, event-type enumerations —
+  AUDIT.md F7) before any generation.
+- **Blockers:** — (repo naming outstanding, non-blocking; kill date
+  2026-10-16 stands)
+- **Last update:** 2026-08-18 — D1/D2 closed by the operator; lane
+  unblocked. Phase 0 had recorded two charter corrections: the "Lane 6
+  interface already in the schema" premise refuted on master (Phase 4
+  registers it instead), and the vacuous label-shuffle leakage test
+  replaced by a falsifiable nuisance-only probe.
 
 ## Done
 
