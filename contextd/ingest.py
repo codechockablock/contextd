@@ -1,6 +1,23 @@
 """Four ingesters, on purpose: watched text files, deliberate notes, browser
 history, and Claude Code dialogue. Every additional ingester must be earned by
-a documented retrieval failure."""
+a documented retrieval failure.
+
+**On `sqlite3` in this module, and why it is not a backend leak.** The three
+uses below are all one thing: reading a *browser's* history database, which is
+a SQLite file belonging to Chrome or Safari and has nothing to do with where
+this archive stores its events. Every write this module makes to the archive
+goes through `db.append_event`, `db.get_cursor`, `db.set_cursor`,
+`db.last_hash`, and `db.store_blob`, all of which are already backend-neutral —
+so the ingest surface runs against a Postgres archive unchanged, including the
+cursor/watermark machinery that decides what has already been ingested. That is
+asserted by `tests/test_postgres_backend.py` rather than assumed, because "it
+imports sqlite3" is exactly the shape that looks like a gap and is not one.
+
+What genuinely does not follow the archive to a second host is `store_blob`:
+oversized payloads are content-addressed under `home()/store`, which is local
+to the host that ingested them (see `create_backup`'s "missing referenced
+blob"). That is a real limit of a multi-host archive, and a loud one — never a
+silent partial backup."""
 
 import fnmatch
 import hashlib
