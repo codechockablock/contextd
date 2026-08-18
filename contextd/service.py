@@ -22,9 +22,9 @@ from .authority_mode import hardened
 from .rpc import RpcError
 
 # Assurance resolvers register at import time (contextd/assurance.py). Importing
-# them here, at module scope, is what guarantees a daemon process never reads a
-# loop or decision event through a half-populated registry: every daemon process
-# starts at one of the four entry points that carry this import.
+# them here, at module scope, is what guarantees a process never reads a
+# loop or decision event through a half-populated registry: every entry point
+# into the operation layer carries this import.
 from . import decisions, loops  # noqa: F401
 # aliased: mcp_server and service define their own `search` function
 from . import search as _search_registration  # noqa: F401
@@ -101,9 +101,9 @@ def recall(query: str, budget: int = 8000, purpose: str = "", since: str = "",
 def search(query: str, limit: int = 10, client: str = "cli") -> dict:
     if hardened():
         return _call("search", query=query, limit=limit, client=client)
-    from .authd import AuthorityService, op_search, service_context
+    from .authd import op_search, service_context
     with service_context():
-        return op_search(AuthorityService.__new__(AuthorityService), None,
+        return op_search(None, None,
                          "model", {"query": query, "limit": limit,
                                    "client": client})
 
@@ -113,9 +113,9 @@ def timeline(since: str = "", until: str = "", source: str = "",
     if hardened():
         return _call("timeline", since=since, until=until, source=source,
                      limit=limit, client=client)
-    from .authd import AuthorityService, op_timeline, service_context
+    from .authd import op_timeline, service_context
     with service_context():
-        return op_timeline(AuthorityService.__new__(AuthorityService), None,
+        return op_timeline(None, None,
                            "model", {"since": since, "until": until,
                                      "source": source, "limit": limit,
                                      "client": client})
@@ -132,9 +132,9 @@ def note(text: str, client: str = "cli") -> dict:
 def loop_candidate(text: str, scope_repo: str = "") -> dict:
     if hardened():
         return _call("loop_candidate", text=text, scope_repo=scope_repo)
-    from .authd import AuthorityService, op_loop_candidate, service_context
+    from .authd import op_loop_candidate, service_context
     with service_context():
-        return op_loop_candidate(AuthorityService.__new__(AuthorityService),
+        return op_loop_candidate(None,
                                  None, "model",
                                  {"text": text, "scope_repo": scope_repo})
 
@@ -143,9 +143,9 @@ def loop_list(scope_repo: str = "", include_candidates: bool = True) -> dict:
     if hardened():
         return _call("loop_list", scope_repo=scope_repo,
                      include_candidates=include_candidates)
-    from .authd import AuthorityService, op_loop_list, service_context
+    from .authd import op_loop_list, service_context
     with service_context():
-        return op_loop_list(AuthorityService.__new__(AuthorityService), None,
+        return op_loop_list(None, None,
                             "model", {"scope_repo": scope_repo,
                                       "include_candidates": include_candidates})
 
@@ -153,9 +153,9 @@ def loop_list(scope_repo: str = "", include_candidates: bool = True) -> dict:
 def loop_confirm(loop_id: int, reason: str = "") -> dict:
     if hardened():
         return _call("loop_confirm", loop_id=loop_id, reason=reason)
-    from .authd import AuthorityService, op_loop_confirm, service_context
+    from .authd import op_loop_confirm, service_context
     with service_context():
-        return op_loop_confirm(AuthorityService.__new__(AuthorityService),
+        return op_loop_confirm(None,
                                None, "model",
                                {"loop_id": loop_id, "reason": reason})
 
@@ -163,9 +163,9 @@ def loop_confirm(loop_id: int, reason: str = "") -> dict:
 def loop_dismiss(loop_id: int, reason: str = "") -> dict:
     if hardened():
         return _call("loop_dismiss", loop_id=loop_id, reason=reason)
-    from .authd import AuthorityService, op_loop_dismiss, service_context
+    from .authd import op_loop_dismiss, service_context
     with service_context():
-        return op_loop_dismiss(AuthorityService.__new__(AuthorityService),
+        return op_loop_dismiss(None,
                                None, "model",
                                {"loop_id": loop_id, "reason": reason})
 
@@ -173,9 +173,9 @@ def loop_dismiss(loop_id: int, reason: str = "") -> dict:
 def status() -> dict:
     if hardened():
         return _call("status")
-    from .authd import AuthorityService, op_status, service_context
+    from .authd import op_status, service_context
     with service_context():
-        return op_status(AuthorityService.__new__(AuthorityService), None,
+        return op_status(None, None,
                          "model", {})
 
 
@@ -228,10 +228,10 @@ def note_deliberate(text: str, authorization) -> dict:
     blob = _authorization_blob(authorization)
     if hardened():
         return _call("note_deliberate", text=text, authorization=blob)
-    from .authd import AuthorityService, op_note_deliberate, service_context
+    from .authd import op_note_deliberate, service_context
     with service_context():
         return op_note_deliberate(
-            AuthorityService.__new__(AuthorityService), None, "operator",
+            None, None, "operator",
             {"text": text, "authorization": blob},
         )
 
@@ -244,9 +244,9 @@ def raw_read(event_id: int, authorization) -> dict:
     blob = _authorization_blob(authorization)
     if hardened():
         return _call("raw_read", event_id=event_id, authorization=blob)
-    from .authd import AuthorityService, op_raw_read, service_context
+    from .authd import op_raw_read, service_context
     with service_context():
-        return op_raw_read(AuthorityService.__new__(AuthorityService), None,
+        return op_raw_read(None, None,
                            "operator", {"event_id": event_id,
                                         "authorization": blob})
 
@@ -256,9 +256,9 @@ def backup(destination: str, authorization, keep: int = 0) -> dict:
     if hardened():
         return _call("backup", destination=destination, keep=keep,
                      authorization=blob)
-    from .authd import AuthorityService, op_backup, service_context
+    from .authd import op_backup, service_context
     with service_context():
-        return op_backup(AuthorityService.__new__(AuthorityService), None,
+        return op_backup(None, None,
                          "operator", {"destination": destination, "keep": keep,
                                       "authorization": blob})
 
@@ -267,9 +267,9 @@ def export(destination: str, authorization) -> dict:
     blob = _authorization_blob(authorization)
     if hardened():
         return _call("export", destination=destination, authorization=blob)
-    from .authd import AuthorityService, op_export, service_context
+    from .authd import op_export, service_context
     with service_context():
-        return op_export(AuthorityService.__new__(AuthorityService), None,
+        return op_export(None, None,
                          "operator",
                          {"destination": destination, "authorization": blob})
 
@@ -279,10 +279,10 @@ def restore(bundle: str, destination: str, authorization) -> dict:
     if hardened():
         return _call("restore", bundle=bundle, destination=destination,
                      authorization=blob)
-    from .authd import AuthorityService, op_restore, service_context
+    from .authd import op_restore, service_context
     with service_context():
         return op_restore(
-            AuthorityService.__new__(AuthorityService), None, "operator",
+            None, None, "operator",
             {"bundle": bundle, "destination": destination,
              "authorization": blob},
         )
@@ -296,10 +296,10 @@ def grant_add(cls: str, scope_repo: str, expires: str, reason: str,
     }
     if hardened():
         return _call("grant_add", **payload)
-    from .authd import AuthorityService, op_grant_add, service_context
+    from .authd import op_grant_add, service_context
     with service_context():
         return op_grant_add(
-            AuthorityService.__new__(AuthorityService), None, "operator", payload
+            None, None, "operator", payload
         )
 
 
@@ -310,10 +310,10 @@ def grant_revoke(grant_id: int, reason: str, authorization) -> dict:
     }
     if hardened():
         return _call("grant_revoke", **payload)
-    from .authd import AuthorityService, op_grant_revoke, service_context
+    from .authd import op_grant_revoke, service_context
     with service_context():
         return op_grant_revoke(
-            AuthorityService.__new__(AuthorityService), None, "operator", payload
+            None, None, "operator", payload
         )
 
 
@@ -324,10 +324,10 @@ def key_register(public_der: bytes, signer_tag: str, authorization) -> dict:
     }
     if hardened():
         return _call("key_register", **payload)
-    from .authd import AuthorityService, op_key_register, service_context
+    from .authd import op_key_register, service_context
     with service_context():
         return op_key_register(
-            AuthorityService.__new__(AuthorityService), None, "operator", payload
+            None, None, "operator", payload
         )
 
 
@@ -338,10 +338,10 @@ def key_revoke(key_id: str, authorization) -> dict:
     }
     if hardened():
         return _call("key_revoke", **payload)
-    from .authd import AuthorityService, op_key_revoke, service_context
+    from .authd import op_key_revoke, service_context
     with service_context():
         return op_key_revoke(
-            AuthorityService.__new__(AuthorityService), None, "operator", payload
+            None, None, "operator", payload
         )
 
 
@@ -354,10 +354,10 @@ def loop_add_operator(text: str, scope_repo: str, authorization,
     }
     if hardened():
         return _call("loop_add_operator", **payload)
-    from .authd import AuthorityService, op_loop_add_operator, service_context
+    from .authd import op_loop_add_operator, service_context
     with service_context():
         return op_loop_add_operator(
-            AuthorityService.__new__(AuthorityService), None, "operator", payload
+            None, None, "operator", payload
         )
 
 
@@ -369,11 +369,11 @@ def loop_transition_operator(loop_id: int, transition: str, reason: str,
     }
     if hardened():
         return _call("loop_transition_operator", **payload)
-    from .authd import (AuthorityService, op_loop_transition_operator,
+    from .authd import (op_loop_transition_operator,
                         service_context)
     with service_context():
         return op_loop_transition_operator(
-            AuthorityService.__new__(AuthorityService), None, "operator", payload
+            None, None, "operator", payload
         )
 
 
@@ -385,9 +385,9 @@ def decision_supersede_operator(old: int, new: int, reason: str,
     }
     if hardened():
         return _call("decision_supersede_operator", **payload)
-    from .authd import (AuthorityService, op_decision_supersede_operator,
+    from .authd import (op_decision_supersede_operator,
                         service_context)
     with service_context():
         return op_decision_supersede_operator(
-            AuthorityService.__new__(AuthorityService), None, "operator", payload
+            None, None, "operator", payload
         )

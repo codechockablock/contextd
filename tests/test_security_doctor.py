@@ -3,8 +3,8 @@
 The failure mode this suite exists to prevent is a doctor that returns "ok"
 because a component is *absent*. An unimplemented checkpoint is a failing
 `protected_checkpoint`, not an exemption from it; development mode is a failing
-`protected_daemon`, not a different rubric. A green doctor on this tree would
-itself be the bug.
+`no_insecure_fallback`, not a different rubric. A green doctor on this tree
+would itself be the bug.
 """
 
 import json
@@ -56,10 +56,10 @@ def test_every_invariant_is_reported_separately():
 def test_a_failing_invariant_names_what_was_observed_not_what_was_wanted():
     connect().close()
     report = run()
-    daemon = report["invariants"]["protected_daemon"]
-    assert daemon["ok"] is False
-    assert "development" in daemon["detail"]
-    assert "docs/DEPLOYMENT.md" in daemon["remedy"]
+    fallback = report["invariants"]["no_insecure_fallback"]
+    assert fallback["ok"] is False
+    assert "development mode" in fallback["detail"]
+    assert fallback["remedy"]
 
 
 def test_development_mode_is_not_hardened():
@@ -73,25 +73,12 @@ def test_development_mode_is_not_hardened():
 
 # --- each invariant fails for its own reason -------------------------------
 
-def test_protected_daemon_fails_without_a_service_boundary():
-    connect().close()
-    result = run()["invariants"]["protected_daemon"]
-    assert result["ok"] is False
-
-
 def test_production_signer_fails_without_an_enrolled_hardware_key():
     conn = connect()
     operator(conn)                      # registers a TEST key, not a hardware one
     result = run(conn)["invariants"]["production_signer"]
     assert result["ok"] is False
     assert "signer helper" in result["detail"] or "Secure Enclave" in result["detail"]
-
-
-def test_raw_archive_inaccessible_fails_while_the_client_can_read_it():
-    connect().close()
-    result = run()["invariants"]["raw_archive_inaccessible"]
-    assert result["ok"] is False
-    assert os.access(home() / "contextd.db", os.R_OK)
 
 
 def test_service_signatures_fails_while_nothing_is_signed():

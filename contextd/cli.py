@@ -502,9 +502,6 @@ def cmd_security(args):
         if getattr(args, "json", False):
             argv.append("--json")
         sys.exit(doctor_main(argv))
-    if args.security_action == "serve":
-        from .authd import main as authd_main
-        sys.exit(authd_main(["--socket", args.socket] if args.socket else []))
     if args.security_action == "migrate":
         from .migrate import MigrationError, migrate as run_migration
         from .db import (SchemaVersionError, open_archive_for_migration)
@@ -1520,8 +1517,6 @@ def main():
     sd.add_argument("--strict", action="store_true",
                     help="exit nonzero unless every invariant holds")
     sd.add_argument("--json", action="store_true")
-    sv = ssub.add_parser("serve", help="run the authority service (foreground)")
-    sv.add_argument("--socket", default=None)
     sm = ssub.add_parser("migrate",
                          help="migrate a pre-hardening archive (append-only)")
     sm.add_argument("--dry-run", action="store_true",
