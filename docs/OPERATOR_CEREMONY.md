@@ -6,7 +6,7 @@ archive and key registry. No RPC can enroll the first key.
 
 ## Preconditions
 
-- The daemon and CLI are installed from root-owned code under
+- The CLI is installed from root-owned code under
   `/usr/local/libexec/contextd`.
 - The archive database is owned by `_contextd`, mode `0600`; its parent is not
   group/world-writable.
@@ -45,12 +45,14 @@ never contained a key. A revoked key does not reopen bootstrap.
 
 ## Normal operation and rotation
 
-An ordinary desktop client asks the daemon to prepare an action. The daemon
-mints its nonce, monotonic sequence, normalized arguments, content/reason
-digests, and expiry; it returns both the exact canonical bytes and a summary.
-The root-owned native signer decodes those bytes and constructs its own trusted
-prompt before requesting fresh user presence. The daemon verifies and spends
-the action once at the protected operation.
+An ordinary desktop client asks the attestation layer to prepare an action
+(there is no resident daemon since lane X; preparation runs in-process
+against the archive). The preparation mints its nonce, monotonic sequence,
+normalized arguments, content/reason digests, and expiry; it returns both the
+exact canonical bytes and a summary. The root-owned native signer decodes
+those bytes and constructs its own trusted prompt before requesting fresh
+user presence. The protected operation verifies and spends the action once,
+inside the same transaction as the act.
 
 Additional keys use the normal, already-attested path:
 

@@ -2,7 +2,7 @@
 
 The design rule here is that a doctor which prints one aggregate verdict is
 useless: the operator needs to know *which* property is missing, because the
-remedies are different and some of them are "you have not installed the service
+remedies are different and some of them are "you have not enrolled a signer
 yet" rather than "you are under attack".
 
 So every invariant is reported on its own, with:
@@ -24,12 +24,10 @@ from pathlib import Path
 from . import home, load_config
 from .attest import (DEVELOPMENT_SIGNER_HELPER, INSTALLED_SIGNER_HELPER,
                      SIGNER_SECURE_ENCLAVE, registered_keys)
-from .authd import hardened, inspect_deployment, socket_path
+from .authority_mode import hardened
 
 INVARIANTS = (
-    "protected_daemon",
     "production_signer",
-    "raw_archive_inaccessible",
     "service_signatures",
     "protected_checkpoint",
     "no_plaintext_scratch",
@@ -42,41 +40,6 @@ def _check(ok: bool, detail: str, remedy: str = "") -> dict:
     if not ok and remedy:
         out["remedy"] = remedy
     return out
-
-
-def _protected_daemon(deployment: dict) -> dict:
-    """Root-owned installed code, a dedicated service UID, and an archive this
-    UID does not own."""
-    if not hardened():
-        return _check(
-            False,
-            "security.mode is 'development': the client plane opens the "
-            "archive directly and there is no service boundary",
-            "set [security] mode = \"hardened\" and install the daemon "
-            "(docs/DEPLOYMENT.md §4)",
-        )
-    code = deployment["installed_code"]
-    archive = deployment["archive"]
-    if not deployment["service_uid_present"]:
-        return _check(False, "no _contextd service account exists",
-                      "create the service account (docs/DEPLOYMENT.md §4)")
-    if not code.get("exists") or code.get("uid") != 0:
-        return _check(
-            False,
-            f"installed code at /usr/local/libexec/contextd is "
-            f"{'absent' if not code.get('exists') else 'not root-owned'}",
-            "install the daemon from root-owned code (docs/DEPLOYMENT.md §4)",
-        )
-    if archive.get("owned_by_caller"):
-        return _check(
-            False,
-            f"the archive is owned by this uid ({deployment['uid']}), so the "
-            f"client plane can read and rewrite it",
-            "move the archive under the service account "
-            "(docs/DEPLOYMENT.md §4)",
-        )
-    return _check(True, "root-owned installed code, dedicated service uid, "
-                        "archive not owned by the calling uid")
 
 
 def _production_signer(conn) -> dict:
@@ -116,26 +79,6 @@ def _production_signer(conn) -> dict:
                         f"registered, no software keys")
 
 
-def _raw_archive_inaccessible(deployment: dict) -> dict:
-    """Can this process, right now, read the raw database?"""
-    path = home() / "contextd.db"
-    readable = os.access(path, os.R_OK)
-    if not hardened():
-        return _check(False,
-                      "development mode: the raw archive is readable from the "
-                      "client boundary",
-                      "switch to hardened mode and move the archive under the "
-                      "service account")
-    if readable:
-        return _check(
-            False,
-            "the raw archive is readable by this uid; the gate can be bypassed "
-            "by opening the file",
-            "chown the archive to the service account and chmod 0600",
-        )
-    return _check(True, "the raw archive is not readable from this boundary")
-
-
 def _service_signatures(conn) -> dict:
     """Service-signed authoritative envelopes and chain tips.
 
@@ -151,14 +94,14 @@ def _service_signatures(conn) -> dict:
         return _check(
             False,
             f"service-signature verification is unavailable: {exc}",
-            "run the explicit security migration from the authority plane",
+            "run the explicit security migration (ctx security migrate)",
         )
     if report["cutover_anomalies"]:
         return _check(
             False,
             "; ".join(report["cutover_anomalies"]),
             "do not append; establish or repair the signed cutover from a "
-            "known-good authority service",
+            "known-good archive",
         )
     if report["missing_events"]:
         sample = ", ".join(f"#{n}" for n in report["missing_events"][:8])
@@ -168,7 +111,7 @@ def _service_signatures(conn) -> dict:
             f"{len(report['missing_events'])} post-cutover event(s) lack a "
             f"required service signature: {sample}{suffix}",
             "treat the unsigned tail as unaccepted and investigate the "
-            "authority append path before any further write",
+            "append path before any further write",
         )
     if report["bad_events"] or report["bad_tips"]:
         return _check(
@@ -185,18 +128,18 @@ def _service_signatures(conn) -> dict:
             "nothing has been service-signed, so integrity rests on the "
             "SQLite hash chain and the local witness — both of which a "
             "same-uid attacker can recompute",
-            "run the authority service so accepted events and chain tips are "
-            "signed as they are appended",
+            "run the security migration; the library append path then signs "
+            "accepted events and chain tips as they are appended",
         )
     if not key_path().exists():
         return _check(False, "the service signing key is missing",
-                      "the authority plane cannot sign; investigate before use")
+                      "the append path cannot sign; investigate before use")
     if not report["coverage_ok"]:
         return _check(
             False,
             f"signature coverage does not reach current tip "
             f"#{report['current_tip']}",
-            "stop the service and investigate the lagging or missing signed tip",
+            "stop appending and investigate the lagging or missing signed tip",
         )
     return _check(
         True,
@@ -310,28 +253,34 @@ def run(conn=None) -> dict:
     else:
         open_error = ""
 
-    deployment = inspect_deployment()
+    # A conn of None here means the archive refused to open from this
+    # boundary — under hardened configuration that is the fail-closed rule
+    # working, and the doctor reports what it could not inspect rather than
+    # guessing.
     try:
         checks = {
-            "protected_daemon": _protected_daemon(deployment),
             "production_signer": (
                 _production_signer(conn) if conn is not None
                 else _check(False, f"cannot inspect the key registry: "
                                    f"{open_error}",
-                            "run this from the authority plane")),
-            "raw_archive_inaccessible": _raw_archive_inaccessible(deployment),
+                            "hardened configuration fails closed; inspect "
+                            "from a boundary that may open the archive")),
             "service_signatures": (
                 _service_signatures(conn) if conn is not None
-                else _check(False, "not implemented", "implement Mission 6")),
+                else _check(False, "cannot inspect the ledger",
+                            "hardened configuration fails closed; inspect "
+                            "from a boundary that may open the archive")),
             "protected_checkpoint": (
                 _protected_checkpoint(conn) if conn is not None
                 else _check(False, "cannot inspect the archive",
-                            "run this from the authority plane")),
+                            "hardened configuration fails closed; inspect "
+                            "from a boundary that may open the archive")),
             "no_plaintext_scratch": _no_plaintext_scratch(),
             "no_insecure_fallback": (
                 _no_insecure_fallback(conn) if conn is not None
                 else _check(False, "cannot inspect the key registry",
-                            "run this from the authority plane")),
+                            "hardened configuration fails closed; inspect "
+                            "from a boundary that may open the archive")),
         }
     finally:
         if own and conn is not None:
@@ -340,7 +289,6 @@ def run(conn=None) -> dict:
     failing = [name for name, result in checks.items() if not result["ok"]]
     return {
         "mode": "hardened" if hardened() else "development",
-        "socket": str(socket_path()),
         "invariants": checks,
         "failing": failing,
         "hardened": not failing,

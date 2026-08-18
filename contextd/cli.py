@@ -129,7 +129,7 @@ def cmd_search(args):
     result is redacted, budgeted, and receipted like any other disclosure.
     """
     from . import service as authority
-    from .rpc import RpcError
+    from .authd import RpcError
     try:
         result = authority.search(" ".join(args.query), limit=args.limit,
                                   client="cli")
@@ -502,9 +502,6 @@ def cmd_security(args):
         if getattr(args, "json", False):
             argv.append("--json")
         sys.exit(doctor_main(argv))
-    if args.security_action == "serve":
-        from .authd import main as authd_main
-        sys.exit(authd_main(["--socket", args.socket] if args.socket else []))
     if args.security_action == "migrate":
         from .migrate import MigrationError, migrate as run_migration
         from .db import (SchemaVersionError, open_archive_for_migration)
@@ -1365,7 +1362,8 @@ def main():
     sp.add_argument("--authorize", action="store_true",
                     help="require a fresh hardware-signed operator action")
     sub.add_parser("ingest", help="run all ingesters once")
-    sub.add_parser("watch", help="run ingesters on a loop (the daemon)")
+    sub.add_parser("watch",
+                   help="run ingest scans on a foreground loop (ctrl-c stops)")
     sp = sub.add_parser("search", help="local FTS search (not logged)")
     sp.add_argument("query", nargs="+")
     sp.add_argument("--limit", type=int, default=10)
@@ -1520,8 +1518,6 @@ def main():
     sd.add_argument("--strict", action="store_true",
                     help="exit nonzero unless every invariant holds")
     sd.add_argument("--json", action="store_true")
-    sv = ssub.add_parser("serve", help="run the authority service (foreground)")
-    sv.add_argument("--socket", default=None)
     sm = ssub.add_parser("migrate",
                          help="migrate a pre-hardening archive (append-only)")
     sm.add_argument("--dry-run", action="store_true",

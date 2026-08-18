@@ -4,9 +4,10 @@
 that can't be quietly rewritten, and that an AI's authorization is spent
 *inside*, in the same transaction as the act. Nothing happens off the books.**
 
-One local daemon. A SQLite ledger (or PostgreSQL, for multi-host), an FTS
-index, a disclosure gate, and an authority plane. No cloud, no account, no
-hosted service.
+One local library plus event-time hooks and timers — no resident process. A
+SQLite ledger (or PostgreSQL, for multi-host), an FTS index, a disclosure
+gate, and an authority plane. No cloud, no account, no hosted service, no
+daemon: continuous ambient capture between events is not part of the design.
 
 Most systems in this space record a decision *next to* the act. contextd makes
 the authorization a row that the act consumes: the single-use nonce is spent by
@@ -93,7 +94,9 @@ Ingest, disclosure, and audit:
 .venv/bin/ctx compliance                 # EU AI Act logging evidence (§ below)
 ```
 
-Run the daemon in the foreground with `ctx watch`, or install the launchd agent:
+`ctx watch` is a foreground polling loop over the same one-shot scan (like
+`tail -f`; ctrl-c stops it — it is the seed of a future socket-activated
+watcher, not a daemon). Run it yourself, or let launchd supervise it:
 
 ```bash
 cp launchd/com.contextd.watch.plist ~/Library/LaunchAgents/
@@ -271,7 +274,7 @@ product-embedded systems.
 
 ---
 
-## The rest of the daemon
+## The rest of the system
 
 Beyond the authority plane, contextd is a working personal context system.
 Briefly, with pointers:

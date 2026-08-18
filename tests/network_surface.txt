@@ -1,13 +1,8 @@
-contextd/__init__.py
 contextd/assurance.py
 contextd/attest.py
 contextd/authd.py
 contextd/backends/postgres.py
-contextd/cli.py
-contextd/doctor.py
 contextd/domains.py
 contextd/gate.py
 contextd/ingest.py
 contextd/mcp_server.py
-contextd/rpc.py
-contextd/service.py
