@@ -103,7 +103,13 @@ def test_the_manifest_explains_each_direct_entry():
         assert module in text
     assert "ENTRY 1/4" in text and "ENTRY 4/4" in text
     assert "AF_UNIX" in text, "the socket entries must record that they are local"
-    assert "postgres.py:318" in text, "the psycopg entry must cite its import site"
+    import re as _re
+    m = _re.search(r"postgres\.py:(\d+)", text)
+    assert m, "the psycopg entry must cite its import site"
+    # the cited line must actually BE the import site, so it cannot go stale
+    src = (REPO_ROOT / "contextd" / "backends" / "postgres.py").read_text().splitlines()
+    assert "import psycopg" in src[int(m.group(1)) - 1], (
+        f"manifest cites postgres.py:{m.group(1)} but the import is not there")
 
 
 def test_the_pure_data_modules_reach_nothing():
@@ -115,8 +121,13 @@ def test_the_pure_data_modules_reach_nothing():
     is the one this gate can actually make.
     """
     surface = gate.current_surface()
+    # search left this list when the resolver was corrected: it imports
+    # contextd.backends (function-locally, to refuse on Postgres), and that
+    # package reaches psycopg. Its reach was ALWAYS real; the old scanner
+    # dropped the edge. The remaining seven are clean under correct
+    # resolution, which is a stronger claim than the old list ever made.
     for module in ("contextd.canonical", "contextd.schemas", "contextd.redact",
-                   "contextd.domains", "contextd.search", "contextd.correlate",
+                   "contextd.domains", "contextd.correlate",
                    "contextd.export_crypto", "contextd.scratch"):
         assert module not in surface, (
             f"{module} can now reach {surface.get(module)}; it could not before"

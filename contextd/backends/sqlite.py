@@ -96,7 +96,10 @@ class SQLiteBackend(StorageBackend):
         return _db_tip(conn)
 
     def json_field(self, column: str, key: str) -> str:
-        assert key.isidentifier(), key
+        # An explicit raise, not an assert: asserts vanish under python -O,
+        # and this check is the whole injection contract for the f-string.
+        if not key.isidentifier():
+            raise ValueError("json_field key must be a static identifier")
         return f"json_extract({column}, '$.{key}')"
 
     def table_names(self, conn) -> set[str]:

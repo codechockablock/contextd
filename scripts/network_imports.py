@@ -147,16 +147,24 @@ def module_name(path: Path) -> str:
     return ".".join(parts)
 
 
-def _resolve_relative(node: ast.ImportFrom, current: str) -> str:
+def _resolve_relative(node: ast.ImportFrom, current: str,
+                      is_package: bool) -> str:
     """Turn a relative import into an absolute dotted name.
 
     `current` is the importing module. A level-1 import inside
     `contextd.backends.postgres` is relative to `contextd.backends`; inside a
-    package `__init__` it is relative to the package itself.
+    package `__init__` it is relative to the package itself. The docstring
+    always said the second half; the code only did the first, because it was
+    never told which kind of file it was reading — module_name() strips
+    `__init__`, so for a package the name IS the base and level-1 must pop
+    nothing. Every `from .x import` in backends/__init__.py therefore resolved
+    one package too high, matched no file, and was silently discarded — which
+    severed the exact psycopg chain this gate exists to see. Found by audit,
+    not by the gate; the gate passed.
     """
     base = current.split(".")
-    # `contextd.backends.postgres` at level 1 -> `contextd.backends`
-    for _ in range(node.level):
+    pops = node.level - (1 if is_package else 0)
+    for _ in range(pops):
         if base:
             base.pop()
     if node.module:
@@ -173,6 +181,7 @@ def imports_of(path: Path) -> set[str]:
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     current = module_name(path)
+    is_package = path.name == "__init__.py"
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -181,7 +190,7 @@ def imports_of(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom):
             base = node.module or ""
             if node.level:
-                base = _resolve_relative(node, current)
+                base = _resolve_relative(node, current, is_package)
             if not base:
                 continue
             found.add(base)
@@ -204,11 +213,28 @@ def build_graph() -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, P
     for path in paths:
         name = module_name(path)
         internal[name], external[name] = set(), set()
+        dangling: set[str] = set()
         for dotted in imports_of(path):
             if dotted in by_name and dotted != name:
                 internal[name].add(dotted)
             elif not dotted.startswith("contextd"):
                 external[name].add(dotted)
+            elif "." in dotted.removeprefix("contextd."):
+                # contextd-prefixed, resolves to no file, and is not the
+                # from-X-import-name reading of a module we already recorded:
+                # a graph builder that shrugs here is how the __init__
+                # resolution bug stayed invisible — four dangling names per
+                # run, zero diagnostics, and a gate that passed. An
+                # unresolvable internal import is an error in the gate itself.
+                head = dotted.rsplit(".", 1)[0]
+                if head not in by_name:
+                    dangling.add(dotted)
+        if dangling:
+            raise SystemExit(
+                f"network imports: {path} has internal imports this scanner "
+                f"cannot resolve to files: {sorted(dangling)} — fix the "
+                f"scanner or the import; a silent drop here is a blind spot"
+            )
     return internal, external, by_name
 
 

@@ -917,3 +917,104 @@ def test_ingest_runs_against_postgres_including_cursor_watermarks(
 
     ingest_note(pg_conn, "a deliberate note")
     assert verify_chain_read_only(pg_conn)["ok"]
+
+
+# --- the gate-v1.1 merge-audit regressions ---------------------------------
+# Each of these reproduces a defect found by the pre-push audit of the merged
+# tree, all in the seam between Q's checkpoint machinery and this backend.
+# None was reachable from either lane alone.
+
+
+def test_a_post_cutover_postgres_archive_appends_at_the_default_interval(
+    pg_conn, monkeypatch
+):
+    """The sqlite_master probe crashed every post-cutover Postgres append.
+
+    prepare_append_signing -> _checkpoint_due probed for service_checkpoints
+    with a raw sqlite_master query whenever checkpoint_interval_events > 0 —
+    and the SHIPPED DEFAULT is 100 — so a production archive moved to
+    Postgres could not append at all: psycopg.errors.UndefinedTable from
+    inside the append path. The probe now asks the backend.
+    """
+    from contextd import ledger_sig
+    from contextd.db import append_event, verify_chain
+
+    append_event(pg_conn, "note", "note", content="pre-cutover")
+    ledger_sig.sign_tip(pg_conn, cutover=True)
+    # interval > 0 is what armed the crash; keep the shipped default shape
+    for i in range(3):
+        append_event(pg_conn, "note", "note", content=f"post-cutover {i}")
+    assert verify_chain(pg_conn)["ok"]
+    # and verify_ledger must not crash on a Postgres archive either
+    ledger_sig.verify_ledger(pg_conn)
+
+
+def test_a_checkpoint_boundary_append_upserts_portably(pg_conn, monkeypatch):
+    """INSERT OR REPLACE wedged the archive at the first boundary.
+
+    The boundary condition persists until a checkpoint is recorded, so the
+    SQLite-only syntax did not just fail one append — every subsequent append
+    was still "due" and failed identically. The upsert is now
+    ON CONFLICT DO UPDATE, which both engines execute.
+    """
+    from contextd import ledger_sig
+    from contextd.db import append_event
+
+    monkeypatch.setattr(
+        "contextd.ledger_sig.checkpoint_interval", lambda: 2
+    )
+    append_event(pg_conn, "note", "note", content="one")
+    ledger_sig.sign_tip(pg_conn, cutover=True)
+    for i in range(5):  # crosses at least two boundaries
+        append_event(pg_conn, "note", "note", content=f"boundary {i}")
+    rows = pg_conn.execute(
+        "SELECT COUNT(*) AS c FROM service_checkpoints"
+    ).fetchone()["c"]
+    assert rows >= 1, "no checkpoint was recorded across two boundaries"
+
+
+def test_appender_grants_cover_every_authority_table():
+    """The hardened role must reach every table the append path writes.
+
+    APPENDER_GRANTS omitted service_checkpoints — the one authority table Q
+    added in the same program — so a hardened appender aborted with
+    InsufficientPrivilege at the first checkpoint boundary. Asserted against
+    the schema, not a literal list, so the next new table cannot repeat this.
+    """
+    import re
+    from contextd.backends import postgres as pg
+
+    tables = set(re.findall(
+        r"CREATE TABLE IF NOT EXISTS (\w+)", pg.SCHEMA + "".join(
+            pg.UPGRADES.values())
+    ))
+    granted = set(re.findall(r"\w+", pg.APPENDER_GRANTS))
+    missing = {t for t in tables if t not in granted}
+    assert not missing, f"APPENDER_GRANTS omits authority tables: {missing}"
+
+
+def test_checkpoint_export_refuses_the_tip_the_backup_path_refuses(
+    pg_conn, pg_url
+):
+    """The export must not launder the one tamper signal Postgres has.
+
+    With chain_tip rewritten by the table owner, create_backup refuses — but
+    append_checkpoint_log happily signed the events-derived tip and exported
+    it, laundering the divergence into the external anti-tampering log. The
+    export now runs the backend's verify_tip first and refuses the same
+    state the backup path refuses.
+    """
+    import psycopg
+    import pytest as _pytest
+    from contextd import ledger_sig
+    from contextd.db import ChainStateError, append_event, home
+
+    append_event(pg_conn, "note", "note", content="one")
+    append_event(pg_conn, "note", "note", content="two")
+    ledger_sig.sign_tip(pg_conn, cutover=True)
+    with psycopg.connect(pg_url, autocommit=True) as owner:
+        owner.execute("ALTER TABLE chain_tip DISABLE TRIGGER ALL")
+        owner.execute("UPDATE chain_tip SET id = id - 1")
+        owner.execute("ALTER TABLE chain_tip ENABLE TRIGGER ALL")
+    with _pytest.raises(ChainStateError):
+        ledger_sig.append_checkpoint_log(pg_conn, home() / "cp.log")

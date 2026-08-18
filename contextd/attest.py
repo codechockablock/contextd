@@ -1090,7 +1090,7 @@ def refusal_reason(exc: BaseException) -> str:
 #: `cap` do not already carry: the refusal event's bytes are a pure function of
 #: (authorization, reason) — `_refusal_event` derives every field from the
 #: signed action and reproduces nothing the caller supplied — so repetitions are
-#: *byte-identical apart from position in the chain*. Evidence is what the rows
+#: *byte-identical apart from chain position and the seconds-precision timestamp*. Evidence is what the rows
 #: say, and after the first one of a reason they say the same thing.
 #:
 #: Why the budget is per (nonce, reason) rather than per nonce. The reasons are

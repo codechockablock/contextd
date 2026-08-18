@@ -945,10 +945,13 @@ def last_checkpoint_tip(conn) -> int | None:
 
 
 def _has_checkpoint_table(conn) -> bool:
-    return bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' "
-        "AND name='service_checkpoints'"
-    ).fetchone())
+    # sqlite_master is not a portable way to ask (backends/base.py says so at
+    # the seam built for exactly this): on Postgres the raw probe raised
+    # UndefinedTable from inside prepare_append_signing, so every append to a
+    # post-cutover Postgres archive crashed at the shipped default interval,
+    # and verify_ledger crashed on every Postgres archive unconditionally.
+    from .backends import backend_for
+    return "service_checkpoints" in backend_for(conn).table_names(conn)
 
 
 def _checkpoint_due(conn) -> bool:
@@ -1004,9 +1007,18 @@ def _insert_checkpoint_signatures(
             handle.private, handle.alg, canonical_bytes(CHECKPOINT_DOMAIN, payload)
         )
         conn.execute(
-            "INSERT OR REPLACE INTO service_checkpoints "
+            # ON CONFLICT DO UPDATE is the portable upsert (SQLite >= 3.24,
+            # Postgres native). INSERT OR REPLACE was SQLite-only: a Postgres
+            # append landing on a checkpoint boundary died on SyntaxError
+            # inside the append transaction, and because the boundary
+            # condition persists, every later append was still "due" — the
+            # archive wedged at the boundary.
+            "INSERT INTO service_checkpoints "
             "(tip_id, alg, chain_hash, key_id, signature, signed_at) "
-            "VALUES (?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT (tip_id, alg) DO UPDATE SET "
+            "chain_hash = excluded.chain_hash, key_id = excluded.key_id, "
+            "signature = excluded.signature, signed_at = excluded.signed_at",
             (int(tip_id), handle.alg, chain_hash, handle.key_id,
              signature.hex(), stamp),
         )
@@ -1294,6 +1306,15 @@ def append_checkpoint_log(conn, destination: Path | str) -> dict:
     verifying byte-for-byte. So the timestamp is unauthenticated, and
     `checkpoint_log_claim` says so rather than letting it read as evidence.
     """
+    # Never sign a tip the backend itself would refuse. On Postgres the one
+    # tamper signal the archive has is chain_tip disagreeing with events —
+    # the exact state create_backup refuses to launder into a bundle — and
+    # this export was signing the events-derived tip without looking, which
+    # laundered that divergence into the external anti-tampering log instead.
+    # On SQLite the same call checks the witness, so an unwitnessed tip is
+    # refused for the same reason.
+    from .backends import backend_for
+    backend_for(conn).verify_tip(conn)
     record = checkpoint_record(conn)
     entry = {"v": CHECKPOINT_LOG_VERSION, "exported_at": int(time.time()),
              **record}

@@ -124,10 +124,9 @@ class StorageBackend(ABC):
         query written on one backend runs inside the other's append
         transaction — which is exactly where the refusal-budget count runs, on
         the path an attacker controls the frequency of. ``key`` must be a
-        static identifier from code, never caller input; the assertion is the
-        contract.
+        static identifier from code, never caller input; the explicit check in each
+        implementation is the contract (an assert would vanish under -O).
         """
-        assert key.isidentifier(), key
         raise NotImplementedError
 
     @abstractmethod
