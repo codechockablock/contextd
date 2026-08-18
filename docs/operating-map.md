@@ -129,12 +129,14 @@ they enabled still count in the field tally.
   This claim is recorded on the branch, not master, because the lane brief
   forbids master commits — visible from master only after merge, flagged in
   the lane report (same pattern as Lane NV).
-- **State:** Phase B complete on branch, awaiting operator review/merge —
-  audit `docs/reviews/lane-x-residency-audit.md`, five deletion/docs
-  commits, suite green at every commit, §4 virgin-home amputation gate in
-  the lane report.
+- **State:** MERGED to master (672f796, --no-ff, operator-authorized) —
+  audit `docs/reviews/lane-x-residency-audit.md`, six commits, suite green
+  at every commit, §4 virgin-home amputation gate green in the lane report.
+  Known residual: the lexical network-surface gate still fails on the
+  pre-existing `contextd/authority_mode.py` omission (Lane T's), ruled
+  left-as-found — operator to decide a separate fix.
 - **Blockers:** —
-- **Last update:** 2026-08-18 — residency removed on branch
+- **Last update:** 2026-08-18 — merged and pushed
 
 ### verifier-pqc (Lane NV)
 - **Objective:** Make `scripts/verify_format_independent.mjs` genuinely runtime-
