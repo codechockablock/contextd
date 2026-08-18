@@ -4,6 +4,7 @@ version = "0.0.1"
 description = "Personal context daemon: append-only life log + index + gate, served over MCP."
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
+readme = "README.md"
 # `cryptography` is imported unguarded at module scope by attest.py, ledger_sig.py,
 # backup.py, export_crypto.py, and cli.py — it is what signs operator actions, the
 # event chain, and sealed exports. It was previously undeclared and arrived only
@@ -15,6 +16,14 @@ license = {text = "Apache-2.0"}
 dependencies = ["mcp>=2", "cryptography>=42"]
 
 [project.optional-dependencies]
+# Three extras, each documented at its declaration below and summarized in
+# README.md ("Install"). None of them is required for the default single-host
+# SQLite archive, and installing one never migrates an existing archive:
+#
+#   dev       pytest + ruff, the gate battery in scripts/gates.sh
+#   pqc       a cryptography VERSION FLOOR for ML-DSA checkpoints — not a
+#             new library, and off by default even once installed
+#   postgres  psycopg, for multi-host archives only
 dev = ["pytest>=8", "ruff>=0.12"]
 # Post-quantum checkpoint signing (ML-DSA / FIPS 204). This extra is a VERSION
 # FLOOR, not a new library: `cryptography` >= 47 exposes ML-DSA natively via
