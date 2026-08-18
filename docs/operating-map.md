@@ -171,6 +171,32 @@ they enabled still count in the field tally.
   first-fixture marker fires when `gen --backend llamacpp` writes the real
   corpus on the desktop (after ENV.lock/WEIGHTS.lock).
 
+### boundary-severance (Lane T)
+- **Objective:** Make the gate/evidence core import-clean so the Terminus
+  extraction is a `git archive`, not a surgery. Cuts edges in place; explicitly
+  does NOT extract, rename, create a `terminus` package, or dissolve the daemon.
+  Durable artifact is `tests/test_core_boundary.py`.
+- **Owning session:** local CC (Opus 5), dispatched 2026-08-18; branch
+  `lane-t-severance`, worked in a separate `git worktree` at `~/contextd-lane-t`
+  because Lane NV holds the `~/contextd` checkout live. Claim recorded on the
+  branch, not master, per the NV precedent — the brief forbids master commits.
+- **State:** **HALTED at the Phase A gate, awaiting operator ratification.**
+  Triage complete and committed (`docs/reviews/lane-t-triage.md`); zero
+  modules modified. AST re-measure confirms the brief's §2 shape exactly —
+  13 daemon modules in the core closure, 9 core sources, 24 direct edges
+  (§2's 21 undercounted duplicate call sites; no new module either side).
+  Headline finding: **0 INLINE, 1 HOOK, 23 of 24 sites need ratification.**
+  The boundary is six modules on the wrong side of the line, not conveniences
+  the core could inline — and `redact`, `correlate`, `backup` decide signed or
+  stored bytes, so §5 forbids hooking them.
+- **Blockers:** operator ratification of (1) RECLASSIFY `redact`, `assurance`,
+  `correlate`, `domains`, `scratch`, `backup` into core; (2) the `search`
+  question — reclassify or hook, Phase B is blocked on it; (3) `lineage`
+  admission (proposed per §1, closure-neutral); (4) release of four MOVEs
+  (`authd.hardened`/`is_service_process`, `loops.scope_str`,
+  `experiment.epistemic_type`), ~20 lines total.
+- **Last update:** 2026-08-18 — Phase A landed, halted for ratification
+
 ## Done
 
 - 2026-08-18 — **gate-v1.1** (three lanes, merged to master `ce27e55`): Postgres
