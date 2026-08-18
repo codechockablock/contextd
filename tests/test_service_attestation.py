@@ -415,3 +415,216 @@ def test_unsigned_manifest_is_reported_as_unsigned_not_valid():
     result = verify_manifest_signature(conn, {"service_signature": {"signed": False}})
     assert result["ok"] is False
     assert result["signed"] is False
+
+
+# --- the exported checkpoint log --------------------------------------------
+#
+# `service_checkpoints` rows live inside the archive they attest, so an attacker
+# who owns the storage rewrites the chain and the checkpoints together and the
+# result is internally consistent. The export moves the same signed records
+# somewhere else; verification then compares the archive against every one of
+# them, and a rollback stops being self-consistent.
+#
+# What these tests do NOT establish is that the destination is out of reach —
+# nothing in the code can establish that, and `test_checkpoint_export_states_
+# its_own_advisory_scope` pins the docstring that says so.
+
+def _log_lines(path):
+    return [json.loads(line) for line in
+            path.read_text().splitlines() if line.strip()]
+
+
+def test_checkpoint_export_appends_and_never_rewrites(tmp_path):
+    """Append-only in the literal sense: earlier bytes are untouched.
+
+    This is the property that makes the destination able to be append-only
+    storage, which is the only kind of destination that makes the whole
+    mechanism worth more than the in-archive rows.
+    """
+    from contextd.ledger_sig import append_checkpoint_log
+
+    conn = connect()
+    log = tmp_path / "protected" / "checkpoints.jsonl"
+    ingest_note(conn, "one")
+    append_checkpoint_log(conn, log)
+    first_bytes = log.read_bytes()
+
+    ingest_note(conn, "two")
+    ingest_note(conn, "three")
+    append_checkpoint_log(conn, log)
+
+    assert log.read_bytes().startswith(first_bytes)   # nothing rewritten
+    entries = _log_lines(log)
+    assert len(entries) == 2
+    assert [e["tip_id"] for e in entries] == [1, 3]
+    # one JSON object per line, exactly as docs/FORMAT.md §11 promises
+    assert log.read_text().count("\n") == 2
+    for entry in entries:
+        assert entry["v"] == 1
+        assert set(entry) >= {"v", "exported_at", "archive_uuid", "tip_id",
+                              "chain_hash", "key_id", "signature"}
+
+
+def test_checkpoint_export_verify_checks_every_record_not_just_the_last(
+    tmp_path,
+):
+    """The whole point: an attacker who rolls back and re-checkpoints produces
+    a log whose LAST line is valid. The earlier lines are the evidence."""
+    from contextd.ledger_sig import append_checkpoint_log, verify_checkpoint_log
+
+    conn = connect()
+    log = tmp_path / "checkpoints.jsonl"
+    for i in range(6):
+        ingest_note(conn, f"event {i}")
+        if i % 2 == 0:
+            append_checkpoint_log(conn, log)
+    result = verify_checkpoint_log(conn, log)
+    assert result["ok"] is True
+    assert result["checked"] == 3
+    assert result["highest_checkpointed_tip"] == 5
+    assert result["failures"] == []
+
+
+def test_checkpoint_export_screams_on_rollback(tmp_path):
+    """A rolled-back archive that is locally perfect is still caught."""
+    from contextd.ledger_sig import append_checkpoint_log, verify_checkpoint_log
+
+    conn = connect()
+    log = tmp_path / "checkpoints.jsonl"
+    for i in range(6):
+        ingest_note(conn, f"event {i}")
+    append_checkpoint_log(conn, log)
+
+    # the full attack: drop the tail, then repair every local check
+    conn.execute("DROP TRIGGER IF EXISTS events_no_delete")
+    conn.execute("DELETE FROM events WHERE id >= 4")
+    conn.commit()
+    _recompute_chain(conn)
+    assert verify_chain(conn)["ok"]           # locally consistent again
+
+    # ...and the attacker re-checkpoints at the rolled-back tip, so the log's
+    # newest record is perfectly valid
+    append_checkpoint_log(conn, log)
+    entries = _log_lines(log)
+    assert len(entries) == 2
+
+    result = verify_checkpoint_log(conn, log)
+    assert result["ok"] is False
+    assert result["rollback"] is True
+    assert "ROLLBACK" in result["why"]
+    # exactly the older record failed; the fresh one verifies
+    assert [r["ok"] for r in result["records"]] == [False, True]
+
+
+def test_checkpoint_export_detects_rewritten_history(tmp_path):
+    from contextd.ledger_sig import append_checkpoint_log, verify_checkpoint_log
+
+    conn = connect()
+    log = tmp_path / "checkpoints.jsonl"
+    eid = ingest_note(conn, "original")
+    for i in range(3):
+        ingest_note(conn, f"later {i}")
+    append_checkpoint_log(conn, log)
+
+    _rewrite_event(conn, eid, "rewritten")
+    result = verify_checkpoint_log(conn, log)
+    assert result["ok"] is False
+    assert result["records"][0].get("rewritten") is True
+
+
+def test_checkpoint_export_reports_a_damaged_log_line_instead_of_skipping_it(
+    tmp_path,
+):
+    """A line that does not parse is what truncation looks like. Silently
+    ignoring it would let an attacker delete evidence by corrupting it."""
+    from contextd.ledger_sig import (append_checkpoint_log,
+                                     read_checkpoint_log, verify_checkpoint_log)
+
+    conn = connect()
+    log = tmp_path / "checkpoints.jsonl"
+    ingest_note(conn, "one")
+    append_checkpoint_log(conn, log)
+    with open(log, "a") as stream:
+        stream.write('{"v": 1, "tip_id": trunca\n')
+
+    parsed = read_checkpoint_log(log)
+    assert len(parsed["entries"]) == 1
+    assert parsed["malformed"] == [{"line": 2, "why": "not valid JSON"}]
+
+    result = verify_checkpoint_log(conn, log)
+    assert result["ok"] is False
+    assert any(f.get("line") == 2 for f in result["failures"])
+
+
+def test_checkpoint_export_refuses_a_log_from_another_archive(
+    tmp_path, monkeypatch
+):
+    from contextd.ledger_sig import append_checkpoint_log, verify_checkpoint_log
+
+    conn = connect()
+    log = tmp_path / "checkpoints.jsonl"
+    ingest_note(conn, "here")
+    append_checkpoint_log(conn, log)
+
+    monkeypatch.setenv("CONTEXTD_HOME", str(tmp_path / "elsewhere"))
+    other = connect()
+    result = verify_checkpoint_log(other, log)
+    assert result["ok"] is False
+
+
+def test_checkpoint_export_of_a_missing_or_empty_log_is_not_a_pass(tmp_path):
+    """An absent log must never read as "verified"."""
+    from contextd.ledger_sig import verify_checkpoint_log
+
+    conn = connect()
+    ingest_note(conn, "x")
+    missing = verify_checkpoint_log(conn, tmp_path / "nope.jsonl")
+    assert missing["ok"] is False and missing["checked"] == 0
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    result = verify_checkpoint_log(conn, empty)
+    assert result["ok"] is False and result["checked"] == 0
+
+
+def test_checkpoint_export_states_its_own_advisory_scope():
+    """The scope is part of the artifact, not a README claim someone can drop.
+
+    It is returned as data for the same reason `migrate.cutover_claim` is: a
+    caller can print it but cannot quietly upgrade it into a stronger promise.
+    """
+    from contextd.ledger_sig import checkpoint_log_claim, verify_checkpoint_log
+
+    claim = checkpoint_log_claim("/somewhere")
+    assert "ADVISORY" in claim["advisory_on_one_machine"]
+    assert "cannot write" in claim["advisory_on_one_machine"]
+    disclaimed = " ".join(claim["does_not_attest"])
+    assert "truncate" in disclaimed          # the log can be shortened
+    assert "outside every signature" in disclaimed   # exported_at is not evidence
+
+    # and every verification result carries it, so a caller reading only the
+    # result still gets the limitation
+    conn = connect()
+    ingest_note(conn, "x")
+    assert "advisory_on_one_machine" in verify_checkpoint_log(conn, "/nope")["claim"]
+
+
+def test_checkpoint_export_timestamp_is_not_covered_by_the_signature(tmp_path):
+    """Documented honestly rather than quietly: editing `exported_at` does not
+    break verification, because no signature covers it."""
+    from contextd.ledger_sig import append_checkpoint_log, verify_checkpoint_log
+
+    conn = connect()
+    log = tmp_path / "checkpoints.jsonl"
+    ingest_note(conn, "x")
+    append_checkpoint_log(conn, log)
+
+    entry = _log_lines(log)[0]
+    entry["exported_at"] = 0
+    log.write_text(json.dumps(entry, sort_keys=True,
+                              separators=(",", ":")) + "\n")
+    result = verify_checkpoint_log(conn, log)
+    assert result["ok"] is True                 # signature still verifies
+    assert result["records"][0]["exported_at"] == 0
+    assert any("outside every signature" in d
+               for d in result["claim"]["does_not_attest"])

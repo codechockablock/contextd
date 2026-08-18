@@ -344,13 +344,35 @@ EVENT_SCHEMAS: dict = {
     # All four are ordinary chained events under the closed registry — adding
     # them here is what makes them writable at all.
     #
-    # `mandate.bind` is the only one of the four that carries an attestation
-    # block, and deliberately so: it is the event that consumes the nonce, so
-    # it is the one place the signed action legitimately becomes durable.
+    # `mandate.bind` and `mandate.resolve` are the two that carry an
+    # attestation block, and deliberately so: they are the events that consume
+    # an operator nonce, so they are the places a signed action legitimately
+    # becomes durable. `tx.execute`, `tx.inflight` and `tx.refuse` consume
+    # nothing and carry none.
     ("mandate", "bind"): {
         **_AUTHORITY,
         **_MANDATE,
         # the deadline after which the recorded outcome stops being replayable
+        "replay_until": Field("instant", required=True),
+    },
+    # The operator's attested outcome for a mandate the core could not resolve
+    # (contextd/attest.py, `resolve_mandate`). Two nonces are in play and both
+    # are recorded: `nonce` is the authorization THIS event consumes, as in
+    # every other event here, and `mandate_nonce` is the in-flight mandate
+    # being resolved. Conflating them would make it impossible to tell which
+    # signature was spent.
+    #
+    # `status` is not a field the core computed. It is transcribed from the
+    # signed arguments of the attestation block above it, which is the whole
+    # point: the archive records what the operator swore to, not what the
+    # archive guessed.
+    ("mandate", "resolve"): {
+        **_AUTHORITY,
+        **_MANDATE,
+        "mandate_nonce": Field("digest", required=True),
+        "mandate_event": Field("int", required=True),
+        "status": Field("enum", required=True, choices=("succeeded", "failed")),
+        "outcome_digest": Field("digest", required=True),
         "replay_until": Field("instant", required=True),
     },
     # Observed-unresolved: the process that bound the mandate did not live to

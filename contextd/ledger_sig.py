@@ -1192,6 +1192,10 @@ def write_checkpoint(conn, destination: Path | str) -> Path:
     The destination must be somewhere the client plane cannot rewrite for this
     to mean anything; this function does not and cannot verify that, which is
     why `ctx security doctor` reports rollback resistance separately.
+
+    This writes exactly one record and replaces whatever was there. For a
+    history of checkpoints — which is what detects a rollback to a state that
+    was itself once checkpointed — use `append_checkpoint_log`.
     """
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1199,3 +1203,217 @@ def write_checkpoint(conn, destination: Path | str) -> Path:
     destination.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     os.chmod(destination, 0o600)
     return destination
+
+
+# --- the exported checkpoint log ---------------------------------------
+#
+# The hole this closes, and the exact size of it.
+#
+# `service_checkpoints` rows live inside the archive being attested. Against
+# the modeled attacker — someone who owns the storage, whether that is the
+# SQLite file or a Postgres superuser — they are worth nothing on their own:
+# rewriting the chain and rewriting the checkpoint rows are the same privilege,
+# so the attacker produces an archive that is internally consistent at a state
+# of their choosing. Both Lane 3 and Lane 4 flagged this during Gate v1.0.
+#
+# The fix is not cryptographic, because there is nothing wrong with the
+# cryptography. It is *positional*: the same signed records, kept somewhere the
+# archive's owner cannot rewrite. Then a rollback stops being self-consistent —
+# the archive says it ends at #400, and a signature the attacker could not forge
+# says it once reached #900.
+#
+# Which is why this is a log and not a file. A single-record checkpoint that the
+# attacker can also overwrite proves nothing; a single record they *cannot*
+# overwrite proves one thing. An append-only log of them proves it continuously,
+# and makes the gap between "last checkpoint" and "now" visible instead of
+# assumed.
+#
+# The honest scope is stated at `checkpoint_log_claim` and repeated in
+# docs/FORMAT.md §11: on one machine under one uid this is ADVISORY. It detects
+# accident, bug, and partial compromise. It does not withstand an attacker with
+# write access to the destination, because nothing in this file can give a
+# destination a property the filesystem did not.
+
+#: Record-format version of one log line. Bumped only if a line's byte layout
+#: changes; new optional keys do not bump it.
+CHECKPOINT_LOG_VERSION = 1
+
+#: Keys a log line adds around the checkpoint record itself. Neither is covered
+#: by any signature — see `checkpoint_log_claim`.
+CHECKPOINT_LOG_ENVELOPE = ("v", "exported_at")
+
+
+def checkpoint_log_claim(destination: Path | str = "") -> dict:
+    """Exactly what an exported checkpoint log does and does not prove.
+
+    Returned as data, like `migrate.cutover_claim`, so a caller cannot
+    paraphrase it into something stronger than it is. `ctx security doctor`
+    already reports whether the destination is writable by this uid; that
+    report, not this function, is what tells an operator which case they are in.
+    """
+    return {
+        "destination": str(destination),
+        "attests": "the service signed these (archive, tip, chain hash) "
+                   "records, and the archive's history is consistent with "
+                   "every one of them",
+        "does_not_attest": [
+            "that the log is complete — an attacker who can write the "
+            "destination can truncate it, and a truncated log verifies",
+            "that any record was exported when its `exported_at` says; that "
+            "field is outside every signature and is operator convenience, "
+            "not evidence",
+            "that the archive was not rolled back to a state OLDER than the "
+            "first exported checkpoint",
+            "anything at all about content — a checkpoint carries no archive "
+            "data by design",
+        ],
+        "advisory_on_one_machine": (
+            "Under one uid on one machine this is ADVISORY. The uid that can "
+            "rewrite the archive can rewrite this log, so it detects accident, "
+            "bug, and partial compromise — not an attacker who owns the "
+            "account. Its value is realized only when the destination is "
+            "somewhere the archive's owner cannot write: another host, an "
+            "append-only cloud bucket, a different uid, or immutable storage."
+        ),
+    }
+
+
+def append_checkpoint_log(conn, destination: Path | str) -> dict:
+    """Append one signed checkpoint record to a log outside the archive.
+
+    Append-friendly by construction: one JSON object per line, written with
+    `O_APPEND` and fsynced, so a concurrent appender interleaves whole lines
+    rather than corrupting one, and an interrupted write costs at most the
+    trailing line. Nothing is ever rewritten — reading the log needs no state
+    from this process, and a destination that only permits appends (the whole
+    point) is enough.
+
+    The line is the checkpoint record plus `v` and `exported_at`. Those two are
+    deliberately *outside* the signed payload: `checkpoint_payload` is frozen
+    (docs/FORMAT.md §5) and every record signed before this existed must keep
+    verifying byte-for-byte. So the timestamp is unauthenticated, and
+    `checkpoint_log_claim` says so rather than letting it read as evidence.
+    """
+    record = checkpoint_record(conn)
+    entry = {"v": CHECKPOINT_LOG_VERSION, "exported_at": int(time.time()),
+             **record}
+    line = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
+
+    path = Path(destination).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write(line)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Best effort, and non-fatal on purpose: the destinations where this
+        # log is actually worth something — another host, a mounted share, a
+        # different uid's directory — are exactly the ones where this process
+        # may not own the file. Failing the export there would push the
+        # operator back to a local destination, which is the weaker choice.
+        pass
+    return entry
+
+
+def read_checkpoint_log(destination: Path | str) -> dict:
+    """Parse a checkpoint log. Reports damage rather than skipping it.
+
+    A line that does not parse is the signature of truncation or tampering, so
+    it is returned in `malformed` with its line number and never silently
+    dropped. An empty or absent log is not an error here — it is a fact for the
+    caller to judge, and `verify_checkpoint_log` judges it.
+    """
+    path = Path(destination).expanduser()
+    if not path.exists():
+        return {"exists": False, "entries": [], "malformed": []}
+    entries, malformed = [], []
+    for number, raw in enumerate(path.read_text().splitlines(), start=1):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            malformed.append({"line": number, "why": "not valid JSON"})
+            continue
+        if not isinstance(entry, dict):
+            malformed.append({"line": number, "why": "line is not an object"})
+            continue
+        entry["_line"] = number
+        entries.append(entry)
+    return {"exists": True, "entries": entries, "malformed": malformed}
+
+
+def verify_checkpoint_log(conn, destination: Path | str) -> dict:
+    """Check the archive against EVERY checkpoint the log records.
+
+    Every record must verify. Passing because the newest one checked out would
+    reintroduce the hole: an attacker who rolls the archive back to tip #400
+    and appends a fresh checkpoint there produces a log whose last line is
+    perfectly valid — and whose earlier lines, at #900, are the evidence.
+
+    `rollback` is raised loudly and separately from `ok`, because the two are
+    different events for an operator: a signature that fails is a broken or
+    foreign record, while a *valid* signature over a tip the archive no longer
+    reaches is the archive having lost history it once had.
+    """
+    parsed = read_checkpoint_log(destination)
+    claim = checkpoint_log_claim(destination)
+
+    def _empty(why: str) -> dict:
+        """Same key set as a real result, so no caller has to special-case it.
+
+        `ok` is False on purpose: a log that is absent or empty has verified
+        nothing, and the one way this mechanism could quietly fail open is by
+        letting "nothing to check" read as "checked out".
+        """
+        return {"ok": False, "checked": 0, "failures": [], "rollback": False,
+                "highest_checkpointed_tip": 0, "records": [], "claim": claim,
+                "why": why}
+
+    if not parsed["exists"]:
+        return _empty(f"no checkpoint log at {destination}")
+
+    results, failures = [], []
+    rollback = False
+    highest = 0
+    for entry in parsed["entries"]:
+        line = entry.pop("_line")
+        version = entry.pop("v", None)
+        exported_at = entry.pop("exported_at", None)
+        if version != CHECKPOINT_LOG_VERSION:
+            failures.append({"line": line,
+                             "why": f"unknown log record version {version!r}"})
+            continue
+        outcome = verify_checkpoint(conn, entry)
+        outcome.update({"line": line, "exported_at": exported_at})
+        results.append(outcome)
+        if outcome.get("rollback"):
+            rollback = True
+        if not outcome["ok"]:
+            failures.append({"line": line, "why": outcome["why"]})
+        highest = max(highest, int(entry.get("tip_id") or 0))
+
+    for bad in parsed["malformed"]:
+        failures.append(bad)
+
+    if not results and not failures:
+        return _empty(f"the checkpoint log at {destination} is empty")
+
+    why = None
+    if rollback:
+        why = ("ROLLBACK: the archive no longer reaches a tip that a signed, "
+               "exported checkpoint says it once had")
+    elif failures:
+        why = f"{len(failures)} checkpoint record(s) did not verify"
+    return {
+        "ok": not failures,
+        "checked": len(results),
+        "failures": failures,
+        "rollback": rollback,
+        "highest_checkpointed_tip": highest,
+        "records": results,
+        "claim": claim,
+        "why": why,
+    }

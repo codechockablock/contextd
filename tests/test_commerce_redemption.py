@@ -1028,3 +1028,419 @@ def test_a_v1_witness_is_restamped_without_moving_the_tip():
         current["id"], current["chain_hash"]
     )
     assert verify_chain(reopened)["ok"]
+
+
+# --- E5: the refusal row growth channel, and its cap ------------------------
+#
+# The refusal branch does not consume the nonce, on purpose: a refused act must
+# not burn a signature the operator paid a presence gesture for. The cost is
+# that one valid authorization can be re-presented forever and mint a chained
+# row every time — an unbounded write channel into an append-only archive.
+#
+# The mitigation is a per-(nonce, reason) budget. These tests pin all three
+# halves of "does not weaken evidence": the first `cap` rows of every reason are
+# still written, one reason's flood cannot suppress another's first row, and the
+# caller is refused identically whether or not a row was written.
+#
+# Every cap here is configured small so the boundary is reachable; the shipped
+# default is 64 (contextd/attest.py, DEFAULT_MAX_REFUSALS_PER_NONCE).
+
+def _cap(home_path, value: int) -> None:
+    """Set the refusal budget in the isolated archive's config."""
+    home_path.mkdir(parents=True, exist_ok=True)
+    (home_path / "config.toml").write_text(
+        f"[security]\n{attest.REFUSAL_CAP_KEY} = {value}\n"
+    )
+
+
+def _mismatched(conn, auth, n: int) -> int:
+    """Present `auth` against the wrong act `n` times. Returns refusals raised."""
+    raised = 0
+    for _ in range(n):
+        with pytest.raises(attest.AttestationError):
+            attest.authorized_append(
+                conn, "note", "note", auth, "note.deliberate", "global",
+                content="an act this authorization does not cover",
+            )
+        raised += 1
+    return raised
+
+
+def test_refusal_cap_bounds_the_rows_one_authorization_can_mint(
+    isolated_contextd_home,
+):
+    """The channel is closed: attempts are unbounded, recorded rows are not."""
+    _cap(isolated_contextd_home, 3)
+    conn = connect()
+    auth = operator(conn).authorize("note.deliberate", "global", content=ACT)
+
+    assert _mismatched(conn, auth, 25) == 25       # every attempt still refused
+    refusals = _refusals(conn)
+    assert len(refusals) == 3                      # ...but only `cap` recorded
+    assert {r["reason"] for r in refusals} == {"act_mismatch"}
+    assert {r["nonce"] for r in refusals} == {auth.nonce}
+    assert verify_chain(conn)["ok"]
+
+
+def test_refusal_cap_records_exactly_the_cap_at_the_boundary(
+    isolated_contextd_home,
+):
+    """The boundary itself: the cap-th attempt writes, the (cap+1)-th does not.
+
+    Checked one attempt at a time rather than in bulk, so an off-by-one in
+    either direction fails — a cap that recorded 2 or 4 rows for cap=3 would
+    pass a "roughly bounded" assertion and fail this one.
+    """
+    _cap(isolated_contextd_home, 3)
+    conn = connect()
+    auth = operator(conn).authorize("note.deliberate", "global", content=ACT)
+
+    counts = []
+    for _ in range(5):
+        _mismatched(conn, auth, 1)
+        counts.append(len(_refusals(conn)))
+    assert counts == [1, 2, 3, 3, 3]
+
+
+def test_refusal_cap_is_per_reason_so_a_flood_cannot_suppress_other_evidence(
+    isolated_contextd_home,
+):
+    """The evidence-preserving half, and the reason the budget is not per-nonce.
+
+    An attacker who could exhaust one shared budget could then act with the
+    *interesting* refusal unrecorded. Here `act_mismatch` is flooded well past
+    its budget first; the first `already_consumed` — a different and more
+    serious allegation — must still be written.
+    """
+    _cap(isolated_contextd_home, 2)
+    conn = connect()
+    auth = operator(conn).authorize("note.deliberate", "global", content=ACT)
+
+    _mismatched(conn, auth, 10)
+    assert {r["reason"] for r in _refusals(conn)} == {"act_mismatch"}
+
+    # spend the authorization on the act it really covers, then re-present it
+    attest.authorized_append(
+        conn, "note", "note", auth, "note.deliberate", "global", content=ACT,
+    )
+    with pytest.raises(attest.AlreadyConsumedError):
+        attest.authorized_append(
+            conn, "note", "note", _replay(conn, auth), "note.deliberate",
+            "global", content=ACT,
+        )
+
+    by_reason = {}
+    for row in _refusals(conn):
+        by_reason[row["reason"]] = by_reason.get(row["reason"], 0) + 1
+    assert by_reason == {"act_mismatch": 2, "already_consumed": 1}
+    assert verify_chain(conn)["ok"]
+
+
+def test_refusal_cap_covers_the_mandate_replay_path_too(isolated_contextd_home):
+    """`intent_mismatch` is refused outside the bind path and capped as well.
+
+    This is the worse half of the channel: a bound mandate has nothing left to
+    consume, so it can be re-aimed at a different act for as long as the archive
+    exists.
+    """
+    _cap(isolated_contextd_home, 2)
+    conn = connect()
+    auth = operator(conn).authorize("note.deliberate", "global", content=ACT)
+    attest.redeem(
+        conn, auth, action="note.deliberate", scope="global", content=ACT,
+        perform=lambda: {"ok": True},
+    )
+    for _ in range(9):
+        with pytest.raises(attest.IntentMismatch):
+            attest.redeem(
+                conn, _replay(conn, auth), action="note.deliberate",
+                scope="global", content="a different act entirely",
+                perform=lambda: pytest.fail("must not run"),
+            )
+    mismatches = [r for r in _refusals(conn) if r["reason"] == "intent_mismatch"]
+    assert len(mismatches) == 2
+    assert verify_chain(conn)["ok"]
+
+
+def test_refusal_cap_of_zero_disables_the_cap(isolated_contextd_home):
+    """Unbounded recording stays available, and is an explicit config choice."""
+    _cap(isolated_contextd_home, 0)
+    conn = connect()
+    auth = operator(conn).authorize("note.deliberate", "global", content=ACT)
+    _mismatched(conn, auth, 12)
+    assert len(_refusals(conn)) == 12
+    assert attest.refusal_cap() == 0
+
+
+def test_refusal_cap_default_is_the_documented_one(isolated_contextd_home):
+    connect()
+    assert attest.refusal_cap() == attest.DEFAULT_MAX_REFUSALS_PER_NONCE == 64
+
+
+def test_refusal_cap_query_seeks_an_index_instead_of_scanning(
+    isolated_contextd_home,
+):
+    """The counting query runs inside the append transaction, so it must seek.
+
+    An O(refusal rows) scan on the exact path an attacker controls the
+    frequency of would be the denial of service the cap exists to prevent. The
+    partial index only applies while the query's `kind = 'refuse'` stays an
+    inline literal, which is invisible to every behavioural test — so the plan
+    itself is asserted here.
+    """
+    conn = connect()
+    # the statement the module really runs, not a copy of it
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + attest._REFUSAL_COUNT_SQL,
+        ("n", "act_mismatch", 4),
+    ).fetchall()
+    detail = " ".join(str(r["detail"]) for r in plan)
+    assert "idx_refusal_by_nonce" in detail, detail
+    assert "SCAN events" not in detail, detail
+
+
+# --- E6: resolving an in-flight mandate -------------------------------------
+#
+# The in-flight state is honest and, until now, terminal: nothing could close a
+# mandate whose process died between the external act and the outcome append.
+# The closing move is an operator attestation — someone reads the processor's
+# console and signs for what they saw — and the whole design question is
+# whether that can be added *without* becoming a second way to say "the
+# operator approved this".
+#
+# So the tests below pin the seams rather than the happy path:
+#   - the resolution rides the existing OperatorActionV1 machinery, and the
+#     stored attestation re-verifies through the ordinary verifier;
+#   - the signature covers exactly which mandate and which outcome, so one
+#     resolution is not redeemable against a different mandate;
+#   - the core contributes no outcome of its own, ever;
+#   - re-execution stays impossible and one resolution stays one resolution.
+
+def _inflight(conn, op=None):
+    """Leave exactly one mandate in flight, and return its authorization."""
+    op = op or operator(conn)
+    auth = op.authorize("note.deliberate", "global", content=ACT)
+
+    def perform():
+        raise TimeoutError("the payment network stopped answering")
+
+    with pytest.raises(TimeoutError):
+        attest.redeem(
+            conn, auth, action="note.deliberate", scope="global", content=ACT,
+            perform=perform,
+        )
+    return auth
+
+
+def _resolution(conn, op, nonce, status, reason=None):
+    return op.authorize(
+        attest.RESOLVE_ACTION, "global",
+        arguments=attest.resolution_arguments(nonce, status), reason=reason,
+    )
+
+
+def test_resolve_records_the_operators_attested_outcome():
+    conn = connect()
+    op = operator(conn)
+    auth = _inflight(conn, op)
+    assert [m["nonce"] for m in attest.inflight_mandates(conn)] == [auth.nonce]
+
+    signed = _resolution(conn, op, auth.nonce, "succeeded",
+                         reason="confirmed on the processor's console")
+    result = attest.resolve_mandate(
+        conn, signed, nonce=auth.nonce, status="succeeded",
+        reason="confirmed on the processor's console",
+    )
+
+    assert result.state == attest.REDEEM_EXECUTED
+    assert result.outcome["status"] == "succeeded"
+    # unmistakably an attestation about the world, not contextd's observation
+    assert result.outcome["resolved_by"] == attest.RESOLVED_BY_OPERATOR
+    row = conn.execute(
+        "SELECT state, outcome FROM redemptions WHERE nonce = ?", (auth.nonce,)
+    ).fetchone()
+    assert row["state"] == "executed"
+    assert json.loads(row["outcome"])["resolved_by"] == "operator"
+    assert attest.inflight_mandates(conn) == []
+    assert verify_chain(conn)["ok"]
+
+
+def test_resolve_rides_the_one_authorization_path_not_a_second_one():
+    """The resolution event's attestation re-verifies through the ordinary
+    verifier, against the ordinary registry, for the exact act it claims.
+
+    If resolution had been given its own authorization path this would fail:
+    `verify_stored_authorization` knows nothing about mandates.
+    """
+    conn = connect()
+    op = operator(conn)
+    auth = _inflight(conn, op)
+    assert attest.RESOLVE_ACTION in attest.ACTION_CLASSES
+
+    signed = _resolution(conn, op, auth.nonce, "failed", reason="never landed")
+    attest.resolve_mandate(
+        conn, signed, nonce=auth.nonce, status="failed", reason="never landed",
+    )
+
+    row = conn.execute(
+        "SELECT * FROM events WHERE source='mandate' AND kind='resolve'"
+    ).fetchone()
+    recovered = attest.verify_stored_authorization(
+        conn, row, action=attest.RESOLVE_ACTION, scope="global",
+        arguments=attest.resolution_arguments(auth.nonce, "failed"),
+        reason="never landed",
+    )
+    assert recovered is not None
+    # the recorded status is transcribed from the signed arguments, not chosen
+    assert recovered.action["arguments"]["status"] == "failed"
+    assert json.loads(row["meta"])["status"] == "failed"
+    assert json.loads(row["content"])["status"] == "failed"
+
+
+def test_resolve_signature_is_bound_to_one_mandate_and_one_outcome():
+    """A resolution authorization must not be redeemable against another act.
+
+    Two independent checks, because they fail for different reasons: a
+    signature naming a different mandate, and a signature naming the other
+    status. Both are refused as act mismatches by the ordinary verifier.
+    """
+    conn = connect()
+    op = operator(conn)
+    first = _inflight(conn, op)
+
+    other_nonce = "f" * 64
+    wrong_mandate = _resolution(conn, op, other_nonce, "succeeded")
+    with pytest.raises(attest.ActMismatchError):
+        attest.resolve_mandate(
+            conn, wrong_mandate, nonce=first.nonce, status="succeeded",
+        )
+
+    wrong_status = _resolution(conn, op, first.nonce, "failed")
+    with pytest.raises(attest.ActMismatchError):
+        attest.resolve_mandate(
+            conn, wrong_status, nonce=first.nonce, status="succeeded",
+        )
+
+    # neither attempt resolved anything
+    assert [m["nonce"] for m in attest.inflight_mandates(conn)] == [first.nonce]
+    assert {r["reason"] for r in _refusals(conn)} == {"act_mismatch"}
+
+
+def test_resolve_serves_the_attested_outcome_on_replay_without_re_executing():
+    """After resolution the replay path returns the attestation, and `perform`
+    is never called again — the act happened (or did not) exactly once."""
+    conn = connect()
+    op = operator(conn)
+    auth = _inflight(conn, op)
+    signed = _resolution(conn, op, auth.nonce, "succeeded", reason="verified")
+    attest.resolve_mandate(
+        conn, signed, nonce=auth.nonce, status="succeeded", reason="verified",
+    )
+
+    replayed = attest.redeem(
+        conn, _replay(conn, auth), action="note.deliberate", scope="global",
+        content=ACT, perform=lambda: pytest.fail("must never re-execute"),
+    )
+    assert replayed.state == attest.REDEEM_REPLAYED
+    assert replayed.outcome["status"] == "succeeded"
+    assert replayed.outcome["resolved_by"] == "operator"
+
+
+def test_resolve_refuses_a_mandate_that_is_not_in_flight():
+    """One resolution per mandate: an outcome is written exactly once."""
+    conn = connect()
+    op = operator(conn)
+    auth = _inflight(conn, op)
+    attest.resolve_mandate(
+        conn, _resolution(conn, op, auth.nonce, "succeeded"),
+        nonce=auth.nonce, status="succeeded",
+    )
+    second = _resolution(conn, op, auth.nonce, "failed")
+    with pytest.raises(attest.AttestationError, match="not in flight"):
+        attest.resolve_mandate(
+            conn, second, nonce=auth.nonce, status="failed",
+        )
+    assert json.loads(conn.execute(
+        "SELECT outcome FROM redemptions WHERE nonce = ?", (auth.nonce,)
+    ).fetchone()["outcome"])["status"] == "succeeded"
+
+
+def test_resolve_consumes_its_own_authorization_exactly_once():
+    """The resolution's signature is single-use like every other operator act.
+
+    It is a *different* signature from the one that bound the mandate — that
+    one was consumed by the bind and can never be spent again.
+    """
+    conn = connect()
+    op = operator(conn)
+    auth = _inflight(conn, op)
+    signed = _resolution(conn, op, auth.nonce, "succeeded")
+    attest.resolve_mandate(
+        conn, signed, nonce=auth.nonce, status="succeeded",
+    )
+    consumed = conn.execute(
+        "SELECT consumed_event FROM operator_nonces WHERE nonce = ?",
+        (signed.nonce,),
+    ).fetchone()["consumed_event"]
+    assert consumed == conn.execute(
+        "SELECT id FROM events WHERE source='mandate' AND kind='resolve'"
+    ).fetchone()["id"]
+
+    # a second mandate, and the already-spent resolution signature: re-presenting
+    # it must not resolve anything, even though the signature itself is valid
+    other = _inflight(conn, operator(conn, seed=b"second-operator"))
+    with pytest.raises(attest.AttestationError):
+        attest.resolve_mandate(
+            conn, _replay(conn, signed), nonce=other.nonce, status="succeeded",
+        )
+    assert [m["nonce"] for m in attest.inflight_mandates(conn)] == [other.nonce]
+
+
+def test_resolve_refuses_a_status_the_operator_could_not_have_verified():
+    """The status vocabulary is closed, and there is no `unknown`.
+
+    "I do not know" is what the in-flight state already says; an operator with
+    nothing to attest does not resolve.
+    """
+    conn = connect()
+    op = operator(conn)
+    auth = _inflight(conn, op)
+    for bad in ("unknown", "pending", "", "SUCCEEDED"):
+        with pytest.raises(attest.AttestationError):
+            attest.resolution_arguments(auth.nonce, bad)
+    assert set(attest.RESOLUTION_STATUSES) == {"succeeded", "failed"}
+
+
+def test_resolve_cannot_invent_a_mandate_that_was_never_bound():
+    conn = connect()
+    op = operator(conn)
+    ghost = "a" * 64
+    signed = _resolution(conn, op, ghost, "succeeded")
+    with pytest.raises(attest.AttestationError, match="no mandate"):
+        attest.resolve_mandate(conn, signed, nonce=ghost, status="succeeded")
+
+
+def test_the_core_still_never_resolves_a_mandate_on_its_own():
+    """The property gap 2 must not have weakened.
+
+    Everything the core can do to an in-flight mandate on its own — observe it,
+    be asked about it repeatedly — still leaves it in flight. Only a signature
+    moves it.
+    """
+    conn = connect()
+    auth = _inflight(conn)
+    for _ in range(3):
+        seen = attest.redeem(
+            conn, _replay(conn, auth), action="note.deliberate",
+            scope="global", content=ACT,
+            perform=lambda: pytest.fail("must not re-execute"),
+        )
+        assert seen.state == attest.REDEEM_INFLIGHT
+        assert seen.outcome is None
+    assert conn.execute(
+        "SELECT state FROM redemptions WHERE nonce = ?", (auth.nonce,)
+    ).fetchone()["state"] == "inflight"
+    # and nothing in the ledger claims an outcome for it
+    assert not conn.execute(
+        "SELECT 1 FROM events WHERE source='mandate' AND kind='resolve'"
+    ).fetchone()

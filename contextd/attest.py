@@ -81,6 +81,12 @@ ACTION_CLASSES = frozenset({
     "loop.add", "loop.confirm", "loop.close", "loop.reopen", "loop.dismiss",
     "grant.add", "grant.revoke",
     "decision.supersede",
+    # The operator's attested outcome for a mandate the core cannot resolve
+    # (see `resolve_mandate`). It is here, in the one registry, rather than
+    # behind a module-local check, for the same reason `pin.adopt` is: a
+    # second way to say "the operator approved this" is a second way to be
+    # wrong about it.
+    "mandate.resolve",
     "archive.raw_read", "archive.export", "archive.backup", "archive.restore",
     "security.key_register", "security.key_revoke",
     # Instruction-position pinning (contextd/pinning.py). `pin.adopt` is the
@@ -1067,6 +1073,122 @@ def refusal_reason(exc: BaseException) -> str:
     return "unverifiable"
 
 
+#: How many refusal rows ONE authorization may durably mint for ONE reason.
+#:
+#: Why a cap exists at all. The refusal branch deliberately does not consume
+#: the nonce — a refused act must not burn the operator's signature, or anyone
+#: who can provoke a refusal could destroy an authorization the operator paid a
+#: presence gesture for. The cost of that correct choice is that a single valid
+#: authorization can be re-presented forever, and each attempt appends a
+#: core-written, chained, signed row. That is an unbounded write channel into an
+#: append-only archive: nothing is forged, nothing is false, and the archive
+#: still grows without limit (merge-audit finding, gate-v1.1).
+#:
+#: Why this mitigation does not weaken evidence. The first `cap` refusals of
+#: each distinct reason are recorded exactly as before. What is dropped is the
+#: (cap+1)-th identical repetition, which carries no information the first
+#: `cap` do not already carry: the refusal event's bytes are a pure function of
+#: (authorization, reason) — `_refusal_event` derives every field from the
+#: signed action and reproduces nothing the caller supplied — so repetitions are
+#: *byte-identical apart from position in the chain*. Evidence is what the rows
+#: say, and after the first one of a reason they say the same thing.
+#:
+#: Why the budget is per (nonce, reason) rather than per nonce. The reasons are
+#: not interchangeable: `act_mismatch` says an authorization was aimed at a
+#: different act, `already_consumed` says a spent signature was presented again,
+#: `intent_mismatch` says a bound mandate was re-aimed. Each is a distinct
+#: allegation and each keeps its own budget, so provoking one reason can never
+#: suppress the recording of another. The total remains bounded, at
+#: `cap * len(REFUSAL_REASONS)` rows per authorization.
+#:
+#: What is NOT dropped: the refusal itself. Over budget, the caller receives
+#: the identical exception it would have received under budget. The cap governs
+#: whether a new row is written, never whether the act is refused.
+#:
+#: Why the default is 64 and not something tight. The property that closes the
+#: hole is that the bound is *finite*, not that it is small, and a default low
+#: enough to be reached by honest behaviour would be a worse bug than the one
+#: it fixes — sixteen clients racing one authorization is a real shape this
+#: archive already tests (`test_sixteen_racing_appenders_yield_one_act_and_
+#: fifteen_core_refusals`), and losing rows there would drop evidence the
+#: operator has a live reason to read. 64 clears realistic concurrent-retry
+#: bursts with margin while bounding one authorization to at most
+#: `64 * len(REFUSAL_REASONS)` = 320 rows instead of unbounded.
+DEFAULT_MAX_REFUSALS_PER_NONCE = 64
+
+#: Config key in the `[security]` table. Zero or negative disables the cap and
+#: restores unbounded recording — a defensible choice for an operator who wants
+#: every attempt on the record and accepts the growth channel, and stated here
+#: so that choosing it is deliberate rather than accidental.
+REFUSAL_CAP_KEY = "max_refusals_per_nonce"
+
+
+def refusal_cap() -> int:
+    """The per-(nonce, reason) refusal budget, from `[security]` config.
+
+    Read through `db._append_config`, which caches on (home, config mtime), for
+    the same reason `ledger_sig._security_config` does: this is resolved on the
+    append path and `load_config()` re-reads and re-parses config.toml on every
+    call. Resolved by the caller *before* the transaction opens — only the
+    counting query belongs inside it.
+    """
+    from .db import _append_config
+
+    raw = (_append_config().get("security") or {}).get(
+        REFUSAL_CAP_KEY, DEFAULT_MAX_REFUSALS_PER_NONCE
+    )
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise AttestationError(
+            f"[security] {REFUSAL_CAP_KEY} must be an integer"
+        ) from None
+
+
+#: The refusal-counting query, as a named constant so the test that asserts its
+#: query *plan* explains the statement this module actually runs rather than a
+#: copy of it. `kind = 'refuse'` is an inline literal on purpose — see
+#: `_refusal_budget_spent`. It must track :data:`REFUSAL_KIND`.
+_REFUSAL_COUNT_SQL = (
+    "SELECT COUNT(*) FROM ("
+    "  SELECT 1 FROM events"
+    "  WHERE kind = 'refuse'"
+    "    AND json_extract(meta, '$.nonce') = ?"
+    "    AND json_extract(meta, '$.reason') = ?"
+    "  LIMIT ?"
+    ")"
+)
+assert f"kind = '{REFUSAL_KIND}'" in _REFUSAL_COUNT_SQL
+
+
+def _refusal_budget_spent(conn, nonce: str, reason: str, cap: int) -> bool:
+    """Whether this (nonce, reason) already has its `cap` rows of evidence.
+
+    MUST be called inside the append transaction that is about to write the
+    refusal. Counting outside it would be a time-of-check/time-of-use gap that
+    two concurrent refusals could both walk through, and the whole design rule
+    here is that the decision and the write are one critical section.
+
+    The query is written to stay cheap on the path an attacker controls:
+
+    * `kind = 'refuse'` is an inline literal, not a parameter, because SQLite
+      only uses a partial index when the query's WHERE clause *implies* the
+      index's — a bound parameter defeats that match and silently turns this
+      into a scan. `idx_refusal_by_nonce` (contextd/db.py) covers exactly this.
+    * the nonce is the indexed expression, so this is a seek, not a filter;
+    * `LIMIT cap` stops the walk at the budget, so the work is bounded by the
+      cap and never by how many refusals exist.
+
+    `tests/test_commerce_redemption.py::test_the_refusal_cap_query_uses_the_
+    index_and_does_not_scan` asserts the plan, so a future edit that reverts
+    the literal to a parameter fails rather than quietly regressing.
+    """
+    if cap <= 0:                       # explicitly disabled; record everything
+        return False
+    row = conn.execute(_REFUSAL_COUNT_SQL, (nonce, reason, int(cap))).fetchone()
+    return int(row[0]) >= cap
+
+
 def _refusal_event(authorization: Authorization, reason: str, **extra) -> dict:
     """The exact bytes of one pre-declared refusal outcome.
 
@@ -1131,6 +1253,7 @@ def authorized_append(conn, source: str, kind: str, authorization: Authorization
         "assurance": authorization.assurance,
         "attestation": authorization.stored_block(),
     }
+    cap = refusal_cap()   # resolved out here; only the count runs in the lock
 
     def bind(locked_conn, _ts, event_id):
         try:
@@ -1140,7 +1263,15 @@ def authorized_append(conn, source: str, kind: str, authorization: Authorization
             )
             consume_nonce(locked_conn, verified, event_id)
         except AttestationError as exc:
-            raise Refusal(refusal_reason(exc), exc) from exc
+            label = refusal_reason(exc)
+            if _refusal_budget_spent(locked_conn, authorization.nonce, label, cap):
+                # Refuse, and append nothing: this reason already has its rows.
+                # Raising something other than `Refusal` is what makes that
+                # happen — `append_event_checked` commits an alternate row only
+                # for a declared `Refusal`, and abandons the append for anything
+                # else. The caller sees the same exception either way.
+                raise
+            raise Refusal(label, exc) from exc
 
     return append_event_checked(
         conn, source, kind, uri=uri, content=content, meta=meta, bind=bind,
@@ -1204,6 +1335,15 @@ class _AlreadyBound(Exception):
 
 class _StateMoved(Exception):
     """Internal: the redemption row changed under us; resolve it again."""
+
+
+class _RefusalBudgetSpent(Exception):
+    """Internal: this (nonce, reason) has its evidence; append no further row.
+
+    Deliberately not an `AttestationError`. It never reaches a caller — it is
+    raised inside the append transaction purely to abandon the append, and is
+    swallowed by the site that raised it, which then raises the real refusal.
+    """
 
 
 @dataclass(frozen=True)
@@ -1275,6 +1415,8 @@ def _bind_mandate(conn, authorization: Authorization, *, action: str, scope: str
     """
     from .db import Refusal, append_event_checked
 
+    cap = refusal_cap()   # resolved out here; only the count runs in the lock
+
     def bind(locked_conn, _ts, event_id):
         # Serialized by the exclusive chain lock and BEGIN IMMEDIATE: if a
         # racing process bound this mandate, its row is visible here. That is a
@@ -1288,7 +1430,10 @@ def _bind_mandate(conn, authorization: Authorization, *, action: str, scope: str
             )
             consume_nonce(locked_conn, verified, event_id)
         except AttestationError as exc:
-            raise Refusal(refusal_reason(exc), exc) from exc
+            label = refusal_reason(exc)
+            if _refusal_budget_spent(locked_conn, authorization.nonce, label, cap):
+                raise      # over budget: refuse, append nothing (see above)
+            raise Refusal(label, exc) from exc
         locked_conn.execute(
             "INSERT INTO redemptions(nonce, intent_digest, mandate_event, "
             "bound_at, replay_until, state) VALUES (?,?,?,?,?, 'inflight')",
@@ -1390,12 +1535,38 @@ def _refuse_redemption(conn, authorization: Authorization, reason: str,
     the transaction would be a tautology rather than a check. What matters is
     unchanged: the row is written by the core, in a transaction, and the caller
     never cooperated.
+
+    `resolve_mandate` writes `replay_until` a second time and does not disturb
+    this. Both writers set it only while the row is leaving `inflight` — the
+    bind that creates it, and the resolution that closes it — and the expiry
+    check above is reachable only for rows that have already left. A row whose
+    deadline can be read here is therefore a row whose deadline can no longer
+    move.
+
+    These two reasons are the *other* half of the refusal growth channel, and
+    the worse half: a bound mandate can be re-presented with a different act,
+    or replayed past its window, for as long as the archive exists — neither
+    attempt consumes anything, because there is nothing left to consume. The
+    same per-(nonce, reason) budget applies, and is counted inside the
+    transaction through `check` so that two concurrent attempts cannot both
+    find room. Over budget nothing is appended and `cause` is raised exactly as
+    before: the refusal is unchanged, only its (n+1)-th identical record is.
     """
     spec = _refusal_event(authorization, reason, **extra)
     from .db import append_event_checked
-    append_event_checked(
-        conn, spec["source"], spec["kind"], meta=spec["meta"],
-    )
+
+    cap = refusal_cap()
+
+    def check(locked_conn, _ts):
+        if _refusal_budget_spent(locked_conn, authorization.nonce, reason, cap):
+            raise _RefusalBudgetSpent()
+
+    try:
+        append_event_checked(
+            conn, spec["source"], spec["kind"], meta=spec["meta"], check=check,
+        )
+    except _RefusalBudgetSpent:
+        pass
     raise cause
 
 
@@ -1524,6 +1695,213 @@ def redeem(conn, authorization: Authorization, *, action: str,
     return Redemption(
         REDEEM_EXECUTED, recorded, intent, mandate_event,
         outcome_event=outcome_event,
+    )
+
+
+# --- resolving an in-flight mandate -------------------------------------
+#
+# The fourth redemption state is honest but terminal: a mandate whose process
+# died between the external act and the outcome append stays in flight forever,
+# because the core has no way to learn what happened out in the world. Nothing
+# in the archive can close it, and nothing in the archive should try — a core
+# that guessed would be manufacturing a receipt.
+#
+# What can close it is the one thing this system already treats as ground
+# truth about the world: the operator, signing. Someone reads the payment
+# processor's console, sees whether the transfer landed, and attests it. That
+# is not a second authorization path — it is the *same* `OperatorActionV1`
+# machinery under a new action class, prepared by the authority plane, signed
+# with a presence gesture, verified against the registry, and consumed inside
+# the append transaction exactly like every other operator act.
+#
+# Three properties this must not break, and how each is kept:
+#
+# 1. **The core still never guesses.** `status` is not inferred, defaulted, or
+#    derived from anything the core can see; it arrives inside the *signed*
+#    arguments, so the outcome recorded is the outcome the operator put their
+#    signature on. There is no code path that resolves a mandate without one.
+# 2. **Re-execution stays impossible.** Resolution records an outcome; it never
+#    calls `perform`, and it cannot revive the original authorization, whose
+#    nonce was consumed by the bind. It also refuses any row that is not still
+#    `inflight`, so it can never overwrite an outcome the core did observe.
+# 3. **The resolution is distinguishable from an observed outcome.** The
+#    receipt carries `resolved_by: "operator"` and lands under its own event
+#    kind, so nothing downstream can mistake an attestation about the world for
+#    the core's own record of it.
+
+#: The two things an operator may attest about an act that happened outside the
+#: ledger. Deliberately closed and deliberately only two: "succeeded" and
+#: "failed" are the only claims a human can verify externally and be held to.
+#: There is no "unknown" — that is what the in-flight state already says, and
+#: an operator with nothing to attest simply does not resolve.
+RESOLUTION_STATUSES = ("succeeded", "failed")
+
+#: The action class that carries a resolution. Registered in `ACTION_CLASSES`
+#: like every other operator act, so it goes through the one authorization
+#: path rather than beside it.
+RESOLVE_ACTION = "mandate.resolve"
+MANDATE_RESOLVE_KIND = "resolve"
+
+#: Who recorded a receipt. `_record_outcome` writes receipts the core observed
+#: and does not stamp them; a resolution is stamped, so the two can never be
+#: read as the same kind of claim.
+RESOLVED_BY_OPERATOR = "operator"
+
+
+def resolution_arguments(nonce: str, status: str) -> dict:
+    """The exact arguments a resolution authorization must cover.
+
+    One function, used by the preparer and by the verifier, so the bytes the
+    operator signs and the bytes the append re-derives cannot drift apart. The
+    mandate's nonce is in here because a signature that named only the status
+    would be redeemable against *any* in-flight mandate.
+    """
+    if status not in RESOLUTION_STATUSES:
+        raise AttestationError(
+            f"a resolution status must be one of "
+            f"{', '.join(RESOLUTION_STATUSES)}; the core does not infer it"
+        )
+    if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", nonce):
+        raise AttestationError("a mandate nonce is 64 lowercase hex characters")
+    return {"nonce": nonce, "status": status}
+
+
+def inflight_mandates(conn) -> list:
+    """Every mandate awaiting a resolution. Read-only; changes nothing.
+
+    This is what an operator needs before they can resolve anything, and it is
+    deliberately a plain read: enumerating unresolved work is not an authority
+    act and must not require a signature.
+    """
+    return [
+        {
+            "nonce": row["nonce"],
+            "intent_digest": row["intent_digest"],
+            "mandate_event": int(row["mandate_event"]),
+            "bound_at": int(row["bound_at"]),
+            "bound": _instant(int(row["bound_at"])),
+            "inflight_event": row["inflight_event"],
+        }
+        for row in conn.execute(
+            "SELECT * FROM redemptions WHERE state = 'inflight' "
+            "ORDER BY bound_at, nonce"
+        )
+    ]
+
+
+def resolve_mandate(conn, authorization: Authorization, *, nonce: str,
+                    status: str, reason: str | None = None,
+                    replay_ttl_seconds: int | None = None,
+                    now: int | None = None, fault=None) -> Redemption:
+    """Record the operator's attested outcome for an in-flight mandate.
+
+    ``authorization`` must be a verified ``OperatorActionV1`` for
+    ``mandate.resolve`` covering exactly ``resolution_arguments(nonce, status)``
+    and this ``reason``. It is a *different* authorization from the one that
+    bound the mandate — that one was consumed by the bind and can never be
+    spent again — and it is consumed here inside the append transaction by the
+    same `consume_nonce` every other operator act uses.
+
+    The event, the nonce consumption and the redemption row's transition are
+    one transaction, for the reason the bind path documents: there must be no
+    representable state where the operator's signature is spent but the
+    resolution is unrecorded, or where a resolution is recorded twice.
+
+    ``replay_ttl_seconds`` restarts the replay window, because the attested
+    receipt is new information recorded now — a resolution typically happens
+    long after the original window lapsed, and a receipt nobody may be served
+    is not a resolution. This does not disturb the monotonicity
+    `_refuse_redemption` relies on: `replay_until` is only ever written while
+    the row is leaving `inflight`, and the expiry check only ever runs on rows
+    that have already left it.
+    """
+    from .db import Refusal, append_event_checked
+
+    arguments = resolution_arguments(nonce, status)
+    ttl = (
+        DEFAULT_REPLAY_TTL_SECONDS if replay_ttl_seconds is None
+        else int(replay_ttl_seconds)
+    )
+    if not 0 < ttl <= MAX_REPLAY_TTL_SECONDS:
+        raise AttestationError(
+            f"replay ttl must be in (0, {MAX_REPLAY_TTL_SECONDS}]"
+        )
+    now = now if now is not None else int(time.time())
+
+    row = _redemption_row(conn, nonce)
+    if row is None:
+        raise AttestationError(
+            "there is no mandate with that nonce; a resolution attests to an "
+            "act this archive actually bound"
+        )
+    if row["state"] != "inflight":
+        raise AttestationError(
+            "this mandate is not in flight; its outcome is already recorded "
+            "and an outcome is written exactly once"
+        )
+    intent = row["intent_digest"]
+    mandate_event = int(row["mandate_event"])
+    replay_until = now + ttl
+
+    outcome = {
+        "resolved_by": RESOLVED_BY_OPERATOR,
+        "status": status,
+        "mandate_event": mandate_event,
+    }
+    if reason:
+        outcome["reason"] = reason
+    text, digest = _encode_outcome(outcome)
+
+    cap = refusal_cap()
+
+    def bind(locked_conn, _ts, event_id):
+        try:
+            verified = reverify_for_use(
+                locked_conn, authorization, action=RESOLVE_ACTION,
+                scope="global", arguments=arguments, content=None,
+                reason=reason,
+            )
+            consume_nonce(locked_conn, verified, event_id)
+        except AttestationError as exc:
+            label = refusal_reason(exc)
+            if _refusal_budget_spent(locked_conn, authorization.nonce, label, cap):
+                raise
+            raise Refusal(label, exc) from exc
+        # Conditional on the row still being in flight, so two concurrent
+        # resolutions cannot both write: the loser matches zero rows and the
+        # whole append — its event and its nonce consumption — is abandoned.
+        cursor = locked_conn.execute(
+            "UPDATE redemptions SET state = 'executed', outcome = ?, "
+            "outcome_event = ?, replay_until = ? "
+            "WHERE nonce = ? AND state = 'inflight'",
+            (text, event_id, replay_until, nonce),
+        )
+        if cursor.rowcount != 1:
+            raise AttestationError(
+                "this mandate stopped being in flight while it was being "
+                "resolved; nothing was recorded"
+            )
+
+    event_id = append_event_checked(
+        conn, MANDATE_SOURCE, MANDATE_RESOLVE_KIND, content=text,
+        meta={
+            "assurance": authorization.assurance,
+            "attestation": authorization.stored_block(),
+            "intent_digest": intent,
+            "nonce": authorization.nonce,     # the act consumed by THIS event
+            "mandate_nonce": nonce,           # the mandate it resolves
+            "mandate_event": mandate_event,
+            "status": status,
+            "outcome_digest": digest,
+            "replay_until": _instant(replay_until),
+        },
+        bind=bind,
+        fault=fault,
+        refusals=declared_refusals(authorization),
+    )
+    return Redemption(
+        REDEEM_EXECUTED, json.loads(text), intent, mandate_event,
+        outcome_event=event_id,
     )
 
 

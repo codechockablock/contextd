@@ -39,6 +39,18 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_egress_outcome_once
 ON events(json_extract(meta, '$.egress_id')) WHERE kind = 'egress_outcome';
+-- Lets the refusal growth cap (contextd/attest.py, `_refusal_budget_spent`)
+-- count one authorization's recorded refusals with an index seek instead of a
+-- scan. That query runs INSIDE the append transaction, on the path an attacker
+-- controls the frequency of, so an O(refusal rows) scan there would itself be
+-- the denial of service the cap exists to bound. Partial and expression-based
+-- exactly like `idx_egress_outcome_once` above; refusal rows that carry no
+-- nonce (`pin`/`refuse`) index as NULL and are skipped by every seek.
+-- Adding an index changes no record byte, so SCHEMA_VERSION does not move:
+-- `connect_sqlite` re-runs this script on every open, so existing archives
+-- acquire it without a migration.
+CREATE INDEX IF NOT EXISTS idx_refusal_by_nonce
+ON events(json_extract(meta, '$.nonce')) WHERE kind = 'refuse';
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
