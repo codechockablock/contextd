@@ -9,7 +9,6 @@ to approve an export they believe is addressed to themselves, receive a
 readable copy of the entire archive.
 """
 
-import os
 import sqlite3
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from contextd import home
-from contextd.authd import AuthorityService, _export_action_arguments
+from contextd.authd import _export_action_arguments
 from contextd.db import append_event, connect
 from contextd.export import (
     ExportError,
@@ -38,7 +37,7 @@ from contextd.export_crypto import (
     recipient_digest,
     seal,
 )
-from contextd.rpc import RpcClient, RpcError
+from contextd.service import RpcError
 from tests.authorization_support import operator
 
 _ENC = serialization.Encoding
@@ -290,14 +289,12 @@ def _write_recipient(path: Path, public: bytes) -> Path:
     return path
 
 
-def _export_call(service, conn, destination, *, arguments):
-    """Authorize an export covering `arguments`, then call it over the socket."""
+def _export_call(conn, destination, *, arguments):
+    """Authorize an export covering `arguments`, then run it via the library."""
+    from contextd import service as client_plane
     op = operator(conn)
     auth = op.authorize("archive.export", "global", arguments=arguments)
-    blob = {"action": auth.action, "signature": auth.signature.hex()}
-    with RpcClient(service.path) as client:
-        return client.call("export", destination=str(destination),
-                           authorization=blob)
+    return client_plane.export(str(destination), auth)
 
 
 def test_a_swapped_config_recipient_refuses_rather_than_redirecting(
@@ -323,33 +320,27 @@ def test_a_swapped_config_recipient_refuses_rather_than_redirecting(
     honest_path = _write_recipient(short_dir / "honest.pem", honest_public)
     attacker_path = _write_recipient(short_dir / "attacker.pem", attacker_public)
 
-    service = AuthorityService(path=short_dir / "exp.sock",
-                               operator_uids={os.getuid()})
-    service.start()
-    try:
-        # The operator signs an export to the recipient they actually chose.
-        monkeypatch.setattr(
-            "contextd.authd.load_config",
-            lambda: {"security": {"export_recipient": str(honest_path)}},
-        )
-        honest_digest = load_recipient(honest_public)[1]
-        covered = _export_action_arguments(conn, str(tmp_path / "out"),
-                                           honest_digest)
+    # The operator signs an export to the recipient they actually chose.
+    monkeypatch.setattr(
+        "contextd.authd.load_config",
+        lambda: {"security": {"export_recipient": str(honest_path)}},
+    )
+    honest_digest = load_recipient(honest_public)[1]
+    covered = _export_action_arguments(conn, str(tmp_path / "out"),
+                                       honest_digest)
 
-        # The attacker now repoints config.toml at their own key.
-        monkeypatch.setattr(
-            "contextd.authd.load_config",
-            lambda: {"security": {"export_recipient": str(attacker_path)}},
-        )
-        with pytest.raises(RpcError) as caught:
-            _export_call(service, conn, tmp_path / "out", arguments=covered)
+    # The attacker now repoints config.toml at their own key.
+    monkeypatch.setattr(
+        "contextd.authd.load_config",
+        lambda: {"security": {"export_recipient": str(attacker_path)}},
+    )
+    with pytest.raises(RpcError) as caught:
+        _export_call(conn, tmp_path / "out", arguments=covered)
 
-        assert caught.value.code == "attestation"
-        # and nothing was written for the attacker to collect
-        assert not list((tmp_path / "out").glob("*")) \
-            if (tmp_path / "out").exists() else True
-    finally:
-        service.stop()
+    assert caught.value.code == "attestation"
+    # and nothing was written for the attacker to collect
+    assert not list((tmp_path / "out").glob("*")) \
+        if (tmp_path / "out").exists() else True
 
     # The honest recipient's key must not open anything, because nothing exists;
     # assert the attacker's key did not receive an export either.
@@ -369,19 +360,13 @@ def test_export_succeeds_when_the_configured_recipient_is_the_signed_one(
     private, public = _keypair()
     path = _write_recipient(short_dir / "honest.pem", public)
 
-    service = AuthorityService(path=short_dir / "exp.sock",
-                               operator_uids={os.getuid()})
-    service.start()
     monkeypatch.setattr(
         "contextd.authd.load_config",
         lambda: {"security": {"export_recipient": str(path)}},
     )
-    try:
-        covered = _export_action_arguments(conn, str(tmp_path / "out"),
-                                           load_recipient(public)[1])
-        result = _export_call(service, conn, tmp_path / "out", arguments=covered)
-    finally:
-        service.stop()
+    covered = _export_action_arguments(conn, str(tmp_path / "out"),
+                                       load_recipient(public)[1])
+    result = _export_call(conn, tmp_path / "out", arguments=covered)
 
     sealed = Path(result["export"]).read_bytes()
     assert b"private note 2" not in sealed
@@ -451,21 +436,14 @@ def test_export_refuses_a_group_readable_recipient_file(
     path.write_bytes(public)
     path.chmod(0o644)
 
-    service = AuthorityService(path=short_dir / "exp.sock",
-                               operator_uids={os.getuid()})
-    service.start()
     monkeypatch.setattr(
         "contextd.authd.load_config",
         lambda: {"security": {"export_recipient": str(path)}},
     )
-    try:
-        op = operator(conn)
-        auth = op.authorize("archive.export", "global")
-        blob = {"action": auth.action, "signature": auth.signature.hex()}
-        with RpcClient(service.path) as client, pytest.raises(RpcError) as caught:
-            client.call("export", destination=str(tmp_path / "out"),
-                        authorization=blob)
-    finally:
-        service.stop()
+    from contextd import service as client_plane
+    op = operator(conn)
+    auth = op.authorize("archive.export", "global")
+    with pytest.raises(RpcError) as caught:
+        client_plane.export(str(tmp_path / "out"), auth)
     assert caught.value.code == "policy"
     assert "0600" in str(caught.value)

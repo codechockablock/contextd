@@ -452,19 +452,13 @@
       "matches": [
         {
           "class": "credential",
-          "line": 203,
-          "sha256": "dde4e5591c877b3f85ceae6d4fb7049df34c1fcaca5d28880e31cf427a533a72",
-          "count": 1
-        },
-        {
-          "class": "credential",
-          "line": 440,
+          "line": 296,
           "sha256": "dde4e5591c877b3f85ceae6d4fb7049df34c1fcaca5d28880e31cf427a533a72",
           "count": 1
         }
       ],
       "status": "synthetic",
-      "reason": "Planted refusal and client-surface canaries; all literals are invented and asserted absent from outputs."
+      "reason": "Planted client-surface canary; the literal is invented and asserted absent from gated output."
     },
     "tests/test_security_doctor.py": {
       "matches": [
