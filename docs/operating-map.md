@@ -145,12 +145,15 @@ they enabled still count in the field tally.
   L4 scratch drafts only, per operator ruling. Spec amendable via its
   changelog until first fixture, immutable after (§10 marker cites its
   hash + ENV.lock + WEIGHTS.lock).
-- **Next:** remaining harness verbs (compose/timing engine, `gen`
-  backends, `replay`, `verify`, `probe`, `manifest`) + template
-  authoring (real setA/setB pools, T1–T4, GBNF) → `plan` output
-  committed → ENV.lock/WEIGHTS.lock on the desktop → corpus generation
-  there (~1.5 GPU-days single-stream, sharded) → §9 leakage probe
-  before anything downstream.
+- **Next:** the making half — compose/timing engine + `gen` backends
+  (llama.cpp + deterministic stub) + template authoring (real setA/setB
+  pools, T1–T4, GBNF) → `plan` output committed → ENV.lock/WEIGHTS.lock
+  on the desktop → corpus generation there (~1.5 GPU-days
+  single-stream, sharded) → §9 leakage probe before anything
+  downstream. The judging half is done: `plan` @ `0c03b51`;
+  `replay`/`verify`/`probe`/`manifest` @ `c50b813`, integration-tested
+  against live contextd (unauthorized barrier → anomaly; §7.4 reading
+  pinned by test), 72 tests green.
 - **Blockers:** — (repo naming outstanding, non-blocking; kill date
   2026-10-16 stands)
 - **Last update:** 2026-08-18 — harness core landed @ `0c03b51`
