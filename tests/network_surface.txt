@@ -1,6 +1,7 @@
 contextd/assurance.py
 contextd/attest.py
 contextd/authd.py
+contextd/authority_mode.py
 contextd/backends/postgres.py
 contextd/domains.py
 contextd/gate.py
