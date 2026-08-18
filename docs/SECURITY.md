@@ -157,6 +157,7 @@ as a property contextd has.
 | S15 | A hostile same-UID process cannot open the daemon-owned DB, obtain raw content through a CLI fallback, invoke a production signer without presence, read key material from env/argv/config/logs/backups/temp, or widen its RPC capabilities. | `test_process_isolation.py` | enforced¹ |
 | S16 | `ctx security doctor --strict --json` reports each invariant separately and exits nonzero unless every one holds. | `test_security_doctor.py` | enforced |
 | S17 | Every tracked file type and filename is scanned without binary/size skips; synthetic approvals pin exact fingerprint, line, and count; reachable history includes blob, commit, and annotated-tag metadata. | `test_repository_privacy.py` | enforced |
+| S18 | Every signature record names the scheme that produced it; a record whose algorithm disagrees with its key's registered algorithm is refused, and history signed under one scheme still verifies after another is enabled. | `test_crypto_agility.py` | enforced³ |
 
 ² **S12 holds against a chain-recomputing attacker, not against one that
 re-signs.** The service key is 0600 but currently lives beside the archive, so
@@ -165,6 +166,16 @@ full attack — rewrite a row, recompute every downstream chain hash, rewrite th
 witness — and show the signature still catches it; they do not claim the key is
 out of reach. It becomes out of reach when the service account owns it.
 `ctx security doctor` reports which case applies.
+
+³ **S18 covers the identifier and the dispatch, not the secrecy of the
+post-quantum key.** Algorithm agility is a property of the *records*: they name
+their scheme, verification refuses a mismatch, and a mixed-scheme archive
+verifies end to end (§9). What it does not establish is that an ML-DSA
+checkpoint is unforgeable in a development deployment — the key sits beside the
+archive under the same UID, so the same caveat as ² applies, for the same
+reason. Post-quantum checkpointing is also **off by default**; with
+`checkpoint_algorithms` empty the checkpoint record is byte-for-byte what it
+was before, so a base install neither gains the property nor regresses.
 
 ¹ **S15 is enforced in code and tested, with one simulated clause.** The RPC
 surface, tier assignment from kernel peer credentials, attestation requirement,
@@ -341,6 +352,115 @@ differ; rewriting them after verification would create false provenance.
 
 ---
 
+## 9. Signature agility and checkpoints
+
+An archive kept as evidence outlives the assumption that made it evidence. A
+record appended in 2026 may be disputed in 2035, by which time ECDSA P-256 may
+be forgeable by an adversary with a cryptographically relevant quantum
+computer. Two mechanisms address that, and it is worth being exact about what
+each one buys.
+
+### Every signature names its scheme
+
+`service_keys`, `service_signatures`, and `service_tips` each carry an **`alg`**
+column, and verification dispatches on it: a signature that names one scheme
+while its key is registered under another is **refused**, not verified under
+whichever scheme happened to load. Supported names are `ecdsa-p256-sha256` and
+ML-DSA (`ml-dsa-44`, `ml-dsa-65`, `ml-dsa-87` — FIPS 204).
+
+This is the part that had to land first, and the reason is purely practical:
+once a large archive exists with no algorithm field, introducing a second
+scheme means *guessing* which existing records used which, and there is no
+version of that guess that is safe. Records written before this column existed
+are backfilled as `ecdsa-p256-sha256`, which is a statement of fact rather than
+a default — no other scheme existed to have produced them. Schema version 3 is
+the cutover; migration is an additive `ALTER TABLE ... ADD COLUMN` and rewrites
+no row.
+
+### Checkpoints, not events, carry the post-quantum signature
+
+An ML-DSA-44 signature is 2,420 bytes with a 1,312-byte public key, against
+roughly 64 and 32 for ECDSA P-256 — about **38× per event**, which a per-event
+ledger cannot carry. It does not have to. The chain hash at event *N* already
+commits to every event beneath it, so a single signature over a tip
+transitively covers the entire prefix. This is Certificate Transparency's
+signed-tree-head model, and it is why the per-append path stays classical and
+fast while long-lived evidence gets a scheme meant to outlive P-256.
+
+There is no third-party PQC dependency: `cryptography` ≥ 47 provides ML-DSA
+natively through OpenSSL. The `[pqc]` extra is a **version floor, not a new
+library** — no C toolchain, no vendored implementation.
+
+**Hybrid mode.** With `[security] checkpoint_algorithms = ["ml-dsa-44"]` each
+checkpoint is signed under both schemes. The classical signature keeps its
+original five fields and its original signed bytes, so a verifier written
+before this change still checks it and still reaches the right answer —
+stranding deployed verifiers would defeat the purpose of a transition mode.
+Post-quantum signatures cover a payload that additionally includes `alg`, so
+the two messages can never collide: the canonical encoding length-prefixes the
+field count, making a four-field and a five-field map distinct by construction.
+**All** signatures present must verify; a hybrid checkpoint whose ML-DSA half
+fails is a broken checkpoint, not a classical one.
+
+Checkpoint signatures are inserted **inside the append transaction**, from keys
+loaded before it. A checkpoint written after the commit could be lost by a
+crash that kept the event it covers, and recovery — which reconciles chain
+state only — would report success.
+
+### The exposure window
+
+`[security] checkpoint_interval_events` (default **100**) is how many events
+may pass before the tip is checkpointed again, and that number *is* the
+exposure window. Events appended since the last checkpoint are covered by local
+state alone, so an attacker who owns the archive can roll back up to that many
+events without contradicting a signature they cannot forge. 100 is chosen so
+the worst case loses a session rather than a history, while keeping the
+post-quantum cost off the per-event path. Lower it if the window matters more
+than the bytes; `0` disables automatic checkpointing.
+
+### What a checkpoint does and does not prove
+
+A verified checkpoint proves, and only proves:
+
+> At the time it was signed, the holder of a specific registered service key
+> asserted that this archive UUID had this chain hash at this tip id.
+
+Excluded claims — never assert these:
+
+- **Not coverage of events after it.** Everything appended since the last
+  checkpoint is outside it. A checkpoint is silent about the window it does not
+  reach, and that silence is not evidence of absence.
+- **Not rollback resistance by itself.** The `service_checkpoints` rows live in
+  the archive the attacker owns; an attacker who truncates the ledger can drop
+  them in the same motion. Rollback detection comes from a checkpoint
+  **exported** to a destination the desktop UID cannot rewrite (§8). The
+  in-archive row is the durable, transactional record and the material to
+  export — not the defence.
+- **Not post-quantum security in a development deployment.** The ML-DSA private
+  key sits beside the archive under the same UID, so the modeled same-UID
+  attacker re-signs rather than forges. This layer becomes load-bearing only
+  when the service account owns the key, exactly as for the classical signature
+  (§3). `ctx security doctor` reports which case applies.
+- **Not protection against a downgrade by an attacker who owns config.**
+  `config.toml` is writable by the modeled attacker, so clearing
+  `checkpoint_algorithms` stops future post-quantum checkpoints. It cannot
+  retroactively strip signatures already recorded, and an exported checkpoint
+  is out of reach — but "PQ was configured" is not a property a live archive
+  can prove about its own future.
+- **Not that the content is true, or that the chain is semantically correct.**
+  A checkpoint binds a hash, not a meaning.
+- **Not a guarantee that ML-DSA will hold.** It is NIST-standardized and has
+  survived years of public cryptanalysis, which is the actual basis for
+  believing a 2035 adjudicator would accept it. That is a considered bet on a
+  scrutinized standard, not a proof.
+
+Signature-size reduction is explicitly **not** an engineering goal here. The
+bits are the security; a transform that reliably shrank an ML-DSA signature
+would be a distinguisher, which is an attack. Tests:
+`tests/test_crypto_agility.py`.
+
+---
+
 ## Deployment states
 
 | State | Meaning | `doctor --strict` |
@@ -363,6 +483,8 @@ differ; rewriting them after verification would create false provenance.
 | Authority/storage daemon, closed RPC surface, hardened mode, no SQLite fallback | implemented, tested (daemon runs as the desktop uid until installed — the *isolation* is simulated, the *surface* is real) |
 | `ctx security doctor --strict --json` | implemented, tested (reports 6 of 7 invariants failing on this tree, which is correct) |
 | Service-signed envelopes and chain tips, key rotation, protected checkpoint | implemented, tested (see ² — the key is not yet service-owned) |
+| Algorithm identifier on every signature record, verification dispatching on it | implemented, tested (schema 3; historical rows backfilled `ecdsa-p256-sha256`) |
+| Post-quantum (ML-DSA/FIPS 204) checkpoint signing, hybrid with the classical scheme | implemented, tested — native via `cryptography` ≥ 47, no third-party PQC library. Off by default; see ³ |
 | Signed backup manifests | implemented, tested |
 | Encrypted export | implemented, tested — X25519/HKDF-SHA256/ChaCha20-Poly1305 sealed to a configured recipient, whose sha256 the operator's signed action covers. No recipient is configured on this tree, so export refuses here. |
 | Migration (append-only, idempotent, crash-safe), frozen legacy fixture, crash/concurrency tests, future-schema refusal | implemented, tested |

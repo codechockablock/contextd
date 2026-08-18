@@ -39,8 +39,10 @@ from .canonical import canonical_digest
 from .db import SCHEMA as DB_SCHEMA
 from .db import SCHEMA_VERSION, SchemaVersionError, verify_chain_read_only
 
-#: Schema versions this build can migrate *from*.
-MIGRATABLE_FROM = (0, 1, 2)
+#: Schema versions this build can migrate *from*. The current version is in
+#: the list because migration must stay idempotent: re-running it on an
+#: already-migrated archive is a no-op, not an error.
+MIGRATABLE_FROM = (0, 1, 2, 3)
 
 HISTORICAL_COLUMNS = (
     "id", "ts", "source", "kind", "uri", "content", "content_hash",
@@ -137,6 +139,7 @@ def plan(conn) -> dict:
         "tip": tip,
         "chain_ok": chain["ok"],
         "tables_to_create": missing,
+        "columns_to_add": [f"{t}.{c}" for t, c, _ in _missing_columns(conn)],
         "cursors_to_sanitize": cursor_plan["changed"],
         "blob_entries_to_harden": store_plan["entries"],
         "legacy_labelled_events": legacy_labels,
@@ -149,13 +152,49 @@ def plan(conn) -> dict:
 _REQUIRED_TABLES = {
     "operator_keys", "operator_nonces", "operator_sequence",
     "archive_identity", "dispatch_capabilities", "service_keys",
-    "service_signatures", "service_tips",
+    "service_signatures", "service_tips", "service_checkpoints",
 }
 
 
 def _table_names(conn) -> set:
     return {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def _columns(conn, table: str) -> set:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _missing_columns(conn) -> list:
+    """Columns the current schema declares that this archive does not have.
+
+    ``executescript(SCHEMA)`` cannot supply these: every statement in it is
+    ``CREATE TABLE IF NOT EXISTS``, which is a no-op once the table exists, so
+    a column added after the table shipped needs an explicit ALTER.
+    """
+    from .ledger_sig import ADDED_COLUMNS
+    existing = _table_names(conn)
+    return [
+        (table, column, decl)
+        for table, column, decl in ADDED_COLUMNS
+        if table in existing and column not in _columns(conn, table)
+    ]
+
+
+def _add_missing_columns(conn) -> list:
+    """Add declared-but-absent columns. Additive, idempotent, no rewrite.
+
+    ``ADD COLUMN`` with a constant default does not rewrite existing rows and
+    cannot lose one. The default matters as much as the column: it backfills
+    every historical signature with ``ecdsa-p256-sha256``, which is not a guess
+    — it is the only scheme this archive could have used, because it is the
+    only one that existed when those rows were written.
+    """
+    applied = []
+    for table, column, decl in _missing_columns(conn):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        applied.append(f"{table}.{column}")
+    return applied
 
 
 def _cursor_hardening_plan(conn) -> dict:
@@ -285,6 +324,7 @@ def migrate(conn, dry_run: bool = False) -> dict:
     conn.executescript(DB_SCHEMA)
     conn.executescript(CAPABILITY_SCHEMA)
     conn.executescript(LEDGER_SCHEMA)
+    _add_missing_columns(conn)
     conn.commit()
 
     # Cursors are mutable scanner checkpoints, not historical evidence.  They

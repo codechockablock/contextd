@@ -68,6 +68,24 @@ DEFAULTS = {
         # cannot rewrite. Empty means rollback resistance is INCOMPLETE, and
         # `ctx security doctor` says so rather than passing.
         "checkpoint_destination": "",
+        # How many events may pass before the chain tip is checkpointed again.
+        # This number IS the exposure window: events appended since the last
+        # checkpoint are covered by local state only, so an attacker who owns
+        # the archive can roll back up to this many events without
+        # contradicting a signature they cannot forge. 100 is chosen as a
+        # window small enough that the loss is a session rather than a history,
+        # and large enough that the post-quantum signing cost (~2.4 KB and a
+        # keygen-free sign per checkpoint) stays off the per-event path — the
+        # tradeoff is spelled out in docs/SECURITY.md. 0 disables.
+        "checkpoint_interval_events": 100,
+        # Additional NIST-standardized schemes each checkpoint is signed under,
+        # on top of the classical one that is always present: currently
+        # "ml-dsa-44", "ml-dsa-65", or "ml-dsa-87" (FIPS 204). Empty means
+        # classical only, so a base install does not start depending on ML-DSA
+        # merely by upgrading. This names an ALGORITHM, never a key — see
+        # ledger_sig.checkpoint_algorithms for why that distinction is what
+        # keeps it off the signer-selection surface.
+        "checkpoint_algorithms": [],
         # Path to the X25519 public key that `ctx security export` seals to,
         # as DER or PEM, mode 0600. Empty means export refuses; export never
         # emits plaintext as a fallback.

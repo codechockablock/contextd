@@ -4,10 +4,32 @@ version = "0.0.1"
 description = "Personal context daemon: append-only life log + index + gate, served over MCP."
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
-dependencies = ["mcp>=2"]
+# `cryptography` is imported unguarded at module scope by attest.py, ledger_sig.py,
+# backup.py, export_crypto.py, and cli.py — it is what signs operator actions, the
+# event chain, and sealed exports. It was previously undeclared and arrived only
+# because mcp depends on pyjwt[crypto]. That worked, but it made the archive's
+# cryptographic identity a side effect of the MCP transport's JWT handling: drop
+# the transport, or drop its extra, and signing fails at import. The inherited
+# floor was also whatever pyjwt accepts (>=3.4.0, 2021), which is not a floor this
+# project should sign under.
+dependencies = ["mcp>=2", "cryptography>=42"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.12"]
+# Post-quantum checkpoint signing (ML-DSA / FIPS 204). This extra is a VERSION
+# FLOOR, not a new library: `cryptography` >= 47 exposes ML-DSA natively via
+# OpenSSL, so there is no third-party PQC dependency, no C toolchain to build,
+# and no upstream production disclaimer to inherit. The base install stays at
+# >=42 so nothing regresses for deployments that do not want the floor raised;
+# checkpoint signing degrades to classical-only and says so rather than
+# failing. Note the floor is necessary but not sufficient — the schemes are
+# implemented by the linked OpenSSL, so ledger_sig.pq_available() probes for
+# the capability instead of inferring it from a version number.
+pqc = ["cryptography>=47"]
+# Multi-host archives only. SQLite remains the default and requires nothing
+# extra, so an existing single-host install is unaffected by this extra
+# existing and is never migrated by installing it.
+postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
 ctx = "contextd.cli:main"
@@ -17,7 +39,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["contextd"]
+# Subpackages are not implied by the parent: without `contextd.backends` listed
+# here an installed wheel imports `contextd` fine and then fails on the first
+# `connect()`, which the test suite would not catch because it runs from the
+# source tree.
+packages = ["contextd", "contextd.backends"]
 
 [tool.pytest.ini_options]
 # experiments/ and hooks/ are harness-side scripts deliberately outside the

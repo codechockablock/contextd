@@ -19,7 +19,9 @@ def _user_version(conn):
 
 def test_fresh_init_is_stamped(isolated_contextd_home):
     conn = connect()
-    assert _user_version(conn) == SCHEMA_VERSION == 2
+    # 3 is the crypto-agility cutover: every signature table carries an `alg`
+    # column and service_checkpoints exists.
+    assert _user_version(conn) == SCHEMA_VERSION == 3
     assert verify_chain(conn)["ok"]
 
 
