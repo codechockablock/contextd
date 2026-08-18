@@ -96,6 +96,28 @@ they enabled still count in the field tally.
 
 ## Done
 
+- 2026-08-17 — **gate-v1** (Claude Code / Fable 5, PR #1 merged to master as
+  `1c5b1c8`): the Gate v1.0 program, lanes 1–4 of 6, orchestrator-verified —
+  every lane's gates re-run independently, never taken from lane reports.
+  Lane 1 three-state redemption + intent digest + core-recorded refusal
+  (witness protocol v2); Lane 2 instruction-position pinning (openly
+  convergent with Microsoft's toolkit, durability earned by a real
+  restart test); Lane 3 algorithm-tagged signatures + ML-DSA checkpoint
+  signing via native cryptography, **SCHEMA_VERSION 2→3**; Lane 4 backend
+  seam + PostgreSQL path proven across two hosts 20/20 (protocol redesign —
+  the "backend swap" premise was refuted). Cross-lane defects found by
+  adversarial audit of the merged tree and fixed: PQ key silently disabling
+  backups; concurrent-migration race (0/40 post-fix). **Live archive migrated
+  to schema 3** (45,557 events, history byte-identical, chain green; rollback
+  copy at `~/.contextd-prehmigration-schema2-20260817-185907`, forward-only —
+  keep until the eval settles). Gate-proof demo frozen and byte-identical
+  throughout. **Lane 6 (advisory trajectory evidence) HELD unmerged** on
+  `gate-v1-lane-6`, deliberately: detector TPR does not transfer (100% dev
+  → 40% held-out); the honest version is worth more unmerged. Lane 5
+  (release surface) not started; COMPARISON.md corrected in place instead
+  (instruction-pinning row conceded to Microsoft; no-network claim scoped to
+  the SQLite backend). Reports: docs/reviews/gate-v1-preflight.md and the
+  lane briefs beside it.
 - 2026-08-15 — **flaw-sweep** (Claude Code / Fable 5, branch `flaw-sweep`,
   operator-chartered: "completely fix 1-6 end to end" from the repo-flaws
   review). Fixed: blob store quarantine-and-heal for a corrupt content
