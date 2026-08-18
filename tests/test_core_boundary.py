@@ -58,6 +58,16 @@ CORE = frozenset({
     "backends.postgres",
     "backends.sqlite",
     "backends.transfer",
+    # R8: export binds this module's SIGNED manifest sha256 into seal() as AEAD
+    # associated data, so backup is part of the sealing lifecycle rather than a
+    # dependency of it, and 47 of its 52 defs are reachable from export's two
+    # imports — there is no seam to cut, and manufacturing one would be worse
+    # than admitting. Debt RECORDED, not waived: at extraction time its
+    # export-reachable surface (~1,668 lines) gets a focused review pass and a
+    # true name — it is manifest/sealing machinery wearing a daemon filename.
+    # No rename, no pruning, no API change now; both are extraction scope, and
+    # its daemon-only defs stay where they are.
+    "backup",
 })
 
 #: Everything the daemon keeps. Listed explicitly so that a module which is
@@ -65,7 +75,6 @@ CORE = frozenset({
 #: rather than silently defaulting to one side of the boundary.
 DAEMON = frozenset({
     "authd",
-    "backup",
     "cli",
     "decisions",
     "doctor",
@@ -80,23 +89,6 @@ DAEMON = frozenset({
     "service",
 })
 
-
-#: The one edge the severance has NOT closed, held open deliberately.
-#:
-#: contextd/export.py builds its sealed bundle with `backup.create_backup` and
-#: binds the resulting `manifest_sha256` into the AEAD as associated data. That
-#: hash means nothing unless the manifest is the signed, trust-store-validated
-#: one, so export's correctness spans backup's manifest surface and not merely
-#: a snapshot primitive: 47 of backup.py's 52 module-level definitions are
-#: reachable from export's two imports, and only `restore_backup`,
-#: `bundle_identity`, `normalized_path`, `_assert_secure_regular_file` and
-#: `_empty_destination_identity` are not. "Move the bounded primitive" would
-#: therefore move ~90% of the module under another name.
-#:
-#: Ruling R4 reserved that admission to the operator, because it materially
-#: changes Terminus's reviewable surface. Lane T halted rather than take it.
-#: Emptying this set is the last step of the severance.
-PENDING_RATIFICATION = frozenset({"backup"})
 
 
 def _module_name(path: Path) -> str:
@@ -275,17 +267,11 @@ def test_every_module_is_classified():
 def test_core_never_reaches_the_daemon():
     """The severance itself: no daemon module in the core's import closure.
 
-    `PENDING_RATIFICATION` is the only permitted exception and it is checked in
-    both directions — an entry that stops leaking must be removed, so the set
-    can never quietly outlive the reason it was written.
+    There is no exception list. There was one, for `backup`, until ruling R8
+    admitted it; if a future boundary change needs another, it is a diff
+    somebody argues for, not a set that quietly accumulates.
     """
-    reached = core_closure() & DAEMON
-    stale = sorted(PENDING_RATIFICATION - reached)
-    assert not stale, (
-        "PENDING_RATIFICATION still names " + ", ".join(stale) + ", but the "
-        "core no longer reaches it. Delete the entry: the severance is done."
-    )
-    leaked = sorted(reached - PENDING_RATIFICATION)
+    leaked = sorted(core_closure() & DAEMON)
     if not leaked:
         return
 
@@ -293,7 +279,7 @@ def test_core_never_reaches_the_daemon():
         (src, target, line, how, text)
         for src in sorted(CORE & MODULES.keys())
         for (target, line, how, text) in ALL_EDGES[src]
-        if target in DAEMON and target not in PENDING_RATIFICATION
+        if target in DAEMON
     ]
     indirect = sorted(set(leaked) - {t for _s, t, *_r in direct})
     report = [
