@@ -46,13 +46,38 @@
 //   --json                 emit the full findings object as JSON
 //   --quiet                suppress the human-readable report
 //   --fail-on-spec-gap     exit non-zero when a spec gap is recorded
+//   --no-native-mldsa      diagnostic: behave as if node:crypto had no ML-DSA
+//                          support, so a capable runtime can demonstrate the
+//                          degraded UNVERIFIABLE verdict (used by the tests)
+//
+// ML-DSA VERIFICATION, IN TWO TIERS
+// ---------------------------------
+// Checkpoints can carry ML-DSA (FIPS 204) signatures, which node:crypto only
+// verifies from the OpenSSL 3.5 line (Node >= 24). "Independent, if your Node
+// is new enough" is not the promise this file exists to keep, so:
+//
+//   tier 1 (default): a vendored pure-JS ML-DSA verifier under
+//     scripts/vendor/ (@noble/post-quantum 0.4.1 + @noble/hashes 1.8.0,
+//     pinned and hashed in scripts/vendor/PROVENANCE.md). No package.json,
+//     no npm, no network. Only `.verify` is ever called: this program is
+//     structurally incapable of producing a signature.
+//   tier 2 (fallback): if the vendored files are absent, node:crypto is
+//     probed at runtime and used when it supports ML-DSA.
+//   neither: every ML-DSA signature reports a distinct
+//     UNVERIFIABLE-ON-THIS-RUNTIME line -- not PASS, not FAIL -- and the
+//     process exits 3 so "couldn't check" can never be mistaken for
+//     "checked and passed". A tampered ML-DSA signature on any runtime that
+//     CAN check (either tier) still fails: the fallback is a capability
+//     ladder, never a bypass.
 //
 // EXIT CODES
-//   0  every check that could be run, passed
+//   0  every check that could be run, passed -- and nothing was skipped
 //   1  a verification check failed (or a spec gap, under --fail-on-spec-gap)
 //   2  the archive could not be opened / usage error
+//   3  no check failed, but at least one signature was UNVERIFIABLE on this
+//      runtime (no vendored verifier, no capable node:crypto)
 
-import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify as cryptoVerify } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { dirname, join, resolve } from 'node:path';
@@ -67,12 +92,22 @@ const REPO_ROOT = resolve(HERE, '..');
 // ---------------------------------------------------------------------------
 
 const findings = {
-  pass: [], fail: [], warn: [], spec_gap: [], spec_mismatch: [], info: {},
+  pass: [], fail: [], warn: [], unverifiable: [],
+  spec_gap: [], spec_mismatch: [], info: {},
 };
 
 const pass = (check, detail) => findings.pass.push({ check, detail });
 const fail = (check, detail) => findings.fail.push({ check, detail });
 const warn = (check, detail) => findings.warn.push({ check, detail });
+
+/**
+ * Record a signature this runtime COULD NOT CHECK. Deliberately neither pass
+ * nor fail: a fail says the archive is bad, a pass says the maths were done,
+ * and this says neither happened. It carries its own exit code (3) so no
+ * caller can fold "couldn't check" into "checked and passed".
+ */
+const unverifiable = (check, detail) =>
+  findings.unverifiable.push({ check, detail });
 
 /**
  * Record a place where FORMAT.md says something the archive contradicts.
@@ -260,42 +295,182 @@ function canonicalDigest(domain, value) {
 const ALG_ECDSA_P256 = 'ecdsa-p256-sha256';
 const ML_DSA_ALGS = new Set(['ml-dsa-44', 'ml-dsa-65', 'ml-dsa-87']);
 
-function keyAlgorithmName(publicKey) {
-  // Node reports ML-DSA keys as asymmetricKeyType 'ml-dsa-44' etc., and EC
-  // keys as 'ec' with a named curve in asymmetricKeyDetails.
-  const type = publicKey.asymmetricKeyType;
-  if (type === 'ec') {
-    const curve = publicKey.asymmetricKeyDetails?.namedCurve;
-    return curve === 'prime256v1' ? ALG_ECDSA_P256 : `ec:${curve}`;
-  }
-  return type;
+// ---- key identification, from the SPKI bytes rather than the runtime ------
+//
+// Node 22's OpenSSL reports no asymmetricKeyType for an ML-DSA key (it does
+// not know the algorithm), so the key's identity is read from the
+// SubjectPublicKeyInfo itself: a DER SEQUENCE of an AlgorithmIdentifier and a
+// BIT STRING. The OIDs are the FIPS 204 / SEC1 registrations; nothing here is
+// cryptography, only ASN.1 field extraction, and the actual verification
+// below still dispatches on the RECORDED alg per FORMAT.md section 5.
+
+const OID_TO_ALG = new Map([
+  ['2a8648ce3d0201', 'ec'],                    // 1.2.840.10045.2.1 id-ecPublicKey
+  ['608648016503040311', 'ml-dsa-44'],         // 2.16.840.1.101.3.4.3.17
+  ['608648016503040312', 'ml-dsa-65'],         // 2.16.840.1.101.3.4.3.18
+  ['608648016503040313', 'ml-dsa-87'],         // 2.16.840.1.101.3.4.3.19
+]);
+const OID_P256 = '2a8648ce3d030107';           // 1.2.840.10045.3.1.7 prime256v1
+
+function pemToDer(pem) {
+  const body = pem.replace(/-----(BEGIN|END) PUBLIC KEY-----/g, '')
+    .replace(/\s+/g, '');
+  return Buffer.from(body, 'base64');
 }
+
+/** Read one DER TLV at `off`; returns {tag, start, end} of the value bytes. */
+function derTlv(buf, off) {
+  if (off + 2 > buf.length) throw new Error('DER: truncated');
+  const tag = buf[off];
+  let len = buf[off + 1];
+  let start = off + 2;
+  if (len & 0x80) {
+    const n = len & 0x7f;
+    if (n < 1 || n > 4 || start + n > buf.length) throw new Error('DER: bad length');
+    len = 0;
+    for (let i = 0; i < n; i += 1) len = len * 256 + buf[start + i];
+    start += n;
+  }
+  if (start + len > buf.length) throw new Error('DER: value overruns buffer');
+  return { tag, start, end: start + len };
+}
+
+/**
+ * Parse a SubjectPublicKeyInfo: SEQUENCE { SEQUENCE { OID, params? },
+ * BIT STRING }. Returns {algOid, paramsOid, raw} where `raw` is the public
+ * key with the BIT STRING's unused-bits octet stripped.
+ */
+function parseSpki(der) {
+  const outer = derTlv(der, 0);
+  if (outer.tag !== 0x30) throw new Error('SPKI: not a SEQUENCE');
+  const algid = derTlv(der, outer.start);
+  if (algid.tag !== 0x30) throw new Error('SPKI: AlgorithmIdentifier is not a SEQUENCE');
+  const oid = derTlv(der, algid.start);
+  if (oid.tag !== 0x06) throw new Error('SPKI: no algorithm OID');
+  const algOid = der.subarray(oid.start, oid.end).toString('hex');
+  let paramsOid = null;
+  if (oid.end < algid.end) {
+    const params = derTlv(der, oid.end);
+    if (params.tag === 0x06) {
+      paramsOid = der.subarray(params.start, params.end).toString('hex');
+    }
+  }
+  const bits = derTlv(der, algid.end);
+  if (bits.tag !== 0x03) throw new Error('SPKI: no BIT STRING public key');
+  if (der[bits.start] !== 0x00) throw new Error('SPKI: unused bits in public key');
+  return { algOid, paramsOid, raw: der.subarray(bits.start + 1, bits.end) };
+}
+
+/** The algorithm a public key actually is, named in FORMAT.md's vocabulary. */
+function spkiAlgorithmName(spki) {
+  const alg = OID_TO_ALG.get(spki.algOid);
+  if (alg === 'ec') {
+    return spki.paramsOid === OID_P256 ? ALG_ECDSA_P256 : `ec:oid:${spki.paramsOid}`;
+  }
+  return alg ?? `oid:${spki.algOid}`;
+}
+
+// ---- the ML-DSA capability ladder ------------------------------------------
+
+const VENDORED_MLDSA_URL = new URL('./vendor/noble-post-quantum/ml-dsa.js', import.meta.url);
+
+function nativeMlDsaAvailable() {
+  // Probed, never assumed from a version number: what matters is whether THIS
+  // node's OpenSSL knows the algorithm.
+  try {
+    generateKeyPairSync('ml-dsa-44');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Select how ML-DSA signatures will be verified on this runtime.
+ *
+ * Tier 1 is the vendored pure-JS implementation (works on any Node this
+ * script parses on); tier 2 is node:crypto where its OpenSSL is new enough;
+ * otherwise ML-DSA checks are recorded as UNVERIFIABLE, never passed. A
+ * vendored tree that is present but broken falls THROUGH the ladder (warn,
+ * then tier 2 or UNVERIFIABLE) -- there is no path on which a signature is
+ * accepted without one of the two implementations actually running.
+ */
+async function selectMlDsaBackend(opts) {
+  if (existsSync(fileURLToPath(VENDORED_MLDSA_URL))) {
+    try {
+      const mod = await import(VENDORED_MLDSA_URL.href);
+      // Verify-only, structurally: nothing but `.verify` is ever referenced.
+      return {
+        name: 'vendored',
+        verifiers: new Map([
+          ['ml-dsa-44', (pk, msg, sig) => mod.ml_dsa44.verify(pk, msg, sig)],
+          ['ml-dsa-65', (pk, msg, sig) => mod.ml_dsa65.verify(pk, msg, sig)],
+          ['ml-dsa-87', (pk, msg, sig) => mod.ml_dsa87.verify(pk, msg, sig)],
+        ]),
+      };
+    } catch (err) {
+      warn('ml-dsa-backend',
+        `the vendored ML-DSA verifier is present but failed to load ` +
+        `(${err.message}); falling back to the runtime capability probe`);
+    }
+  }
+  if (!opts.noNativeMlDsa && nativeMlDsaAvailable()) {
+    return { name: 'node:crypto', verifiers: null };
+  }
+  return { name: 'unavailable', verifiers: null };
+}
+
+const UNVERIFIABLE_WHY =
+  'UNVERIFIABLE-ON-THIS-RUNTIME (need Node >= 24 with OpenSSL 3.5 ML-DSA, ' +
+  'or the vendored verifier under scripts/vendor/)';
 
 /**
  * Verify `signature` over `message` under exactly `alg`.
  *
- * Returns {ok, why}. Never falls back to another scheme: that fallback is the
- * exact behaviour FORMAT.md section 5 forbids.
+ * `key` is an entry from loadServiceKeys/loadOperatorKeys: {keyAlg, raw,
+ * nodeKey}. Returns {ok, why} -- or {ok: false, unverifiable: true, why} when
+ * this runtime has no way to check an ML-DSA signature at all. Never falls
+ * back to another SCHEME: that fallback is the exact behaviour FORMAT.md
+ * section 5 forbids. (Falling back to another IMPLEMENTATION of the same
+ * scheme is the capability ladder above, and both rungs really verify.)
  */
-function verifySignature(alg, publicKey, message, signature) {
-  const keyAlg = keyAlgorithmName(publicKey);
+function verifySignature(alg, key, message, signature, mlDsaBackend) {
+  const keyAlg = key.keyAlg;
   if (alg === ALG_ECDSA_P256) {
     if (keyAlg !== ALG_ECDSA_P256) {
       return { ok: false, why: `alg says ${alg} but the key is ${keyAlg}` };
     }
+    if (!key.nodeKey) {
+      return { ok: false, why: 'ECDSA P-256 key did not load in node:crypto' };
+    }
     // `cryptography`'s ec.ECDSA(SHA256) emits a DER-encoded (r,s), which is
     // Node's default dsaEncoding; it is named explicitly rather than assumed.
     const ok = cryptoVerify('sha256', message,
-      { key: publicKey, dsaEncoding: 'der' }, signature);
+      { key: key.nodeKey, dsaEncoding: 'der' }, signature);
     return { ok, why: ok ? null : 'ECDSA P-256 signature does not verify' };
   }
   if (ML_DSA_ALGS.has(alg)) {
     if (keyAlg !== alg) {
       return { ok: false, why: `alg says ${alg} but the key is ${keyAlg}` };
     }
-    // ML-DSA is a pure signature scheme: no separate digest algorithm.
-    const ok = cryptoVerify(null, message, publicKey, signature);
-    return { ok, why: ok ? null : `${alg} signature does not verify` };
+    if (mlDsaBackend.name === 'vendored') {
+      let ok;
+      try {
+        ok = mlDsaBackend.verifiers.get(alg)(key.raw, message, signature) === true;
+      } catch (err) {
+        return { ok: false, why: `${alg} signature is malformed: ${err.message}` };
+      }
+      return { ok, why: ok ? null : `${alg} signature does not verify` };
+    }
+    if (mlDsaBackend.name === 'node:crypto') {
+      if (!key.nodeKey) {
+        return { ok: false, why: `${alg} key did not load in node:crypto` };
+      }
+      // ML-DSA is a pure signature scheme: no separate digest algorithm.
+      const ok = cryptoVerify(null, message, key.nodeKey, signature);
+      return { ok, why: ok ? null : `${alg} signature does not verify` };
+    }
+    return { ok: false, unverifiable: true, why: UNVERIFIABLE_WHY };
   }
   return { ok: false, why: `unknown algorithm ${JSON.stringify(alg)}` };
 }
@@ -680,19 +855,36 @@ function loadServiceKeys(db) {
   const keys = new Map();
   if (!tableExists(db, 'service_keys')) return keys;
   for (const row of allRows(db, 'SELECT key_id, public_pem, alg FROM service_keys')) {
+    // The key's identity comes from its own SPKI bytes, not from node:crypto:
+    // a Node whose OpenSSL predates ML-DSA still reads WHAT the key is, even
+    // when it cannot use it. createPublicKey is attempted separately, because
+    // the ECDSA path (and the native ML-DSA fallback) needs a KeyObject.
+    let spki;
     try {
-      keys.set(row.key_id, {
-        key: createPublicKey(row.public_pem),
-        alg: row.alg,
-      });
+      spki = parseSpki(pemToDer(row.public_pem));
     } catch (err) {
-      fail('service-key', `key ${row.key_id} has an unloadable public_pem: ${err.message}`);
+      fail('service-key', `key ${row.key_id} has an unparseable public_pem: ${err.message}`);
+      continue;
     }
+    let nodeKey = null;
+    try {
+      nodeKey = createPublicKey(row.public_pem);
+    } catch {
+      // Expected for ML-DSA keys on a pre-3.5-OpenSSL Node; the vendored
+      // verifier works from `raw` and never needs the KeyObject.
+      nodeKey = null;
+    }
+    keys.set(row.key_id, {
+      alg: row.alg,
+      keyAlg: spkiAlgorithmName(spki),
+      raw: spki.raw,
+      nodeKey,
+    });
   }
   return keys;
 }
 
-function checkServiceSignatures(db, keys) {
+function checkServiceSignatures(db, keys, mlDsaBackend) {
   if (!tableExists(db, 'service_signatures')) {
     findings.info.service_signatures = 0;
     return;
@@ -741,8 +933,13 @@ function checkServiceSignatures(db, keys) {
         `event ${sig.event_id}: no service_keys row for key_id ${sig.key_id}`);
       continue;
     }
-    const result = verifySignature(sig.alg, key.key, message,
-      Buffer.from(sig.signature, 'hex'));
+    const result = verifySignature(sig.alg, key, message,
+      Buffer.from(sig.signature, 'hex'), mlDsaBackend);
+    if (result.unverifiable) {
+      unverifiable('service-signature',
+        `event ${sig.event_id} (alg ${sig.alg}): ${result.why}`);
+      continue;
+    }
     if (!result.ok) {
       fail('service-signature',
         `event ${sig.event_id}: ${result.why} (alg ${sig.alg}, key ${sig.key_id})`);
@@ -789,7 +986,7 @@ function resolveArchiveUuid(db) {
   return row ? row.uuid : null;
 }
 
-function checkTips(db, keys, archiveUuid, tip) {
+function checkTips(db, keys, archiveUuid, tip, mlDsaBackend) {
   if (!tableExists(db, 'service_tips')) return;
   const rows = allRows(db,
     'SELECT tip_id, chain_hash, key_id, signature, cutover, alg FROM service_tips ' +
@@ -816,8 +1013,13 @@ function checkTips(db, keys, archiveUuid, tip) {
       fail('service-tip', `tip ${row.tip_id}: no service_keys row for ${row.key_id}`);
       continue;
     }
-    const result = verifySignature(row.alg, key.key, message,
-      Buffer.from(row.signature, 'hex'));
+    const result = verifySignature(row.alg, key, message,
+      Buffer.from(row.signature, 'hex'), mlDsaBackend);
+    if (result.unverifiable) {
+      unverifiable('service-tip',
+        `tip ${row.tip_id} (alg ${row.alg}): ${result.why}`);
+      continue;
+    }
     if (!result.ok) {
       fail('service-tip', `tip ${row.tip_id}: ${result.why}`);
       continue;
@@ -847,7 +1049,7 @@ function checkTips(db, keys, archiveUuid, tip) {
   }
 }
 
-function checkCheckpoints(db, keys, archiveUuid) {
+function checkCheckpoints(db, keys, archiveUuid, mlDsaBackend) {
   if (!tableExists(db, 'service_checkpoints')) return;
   const rows = allRows(db,
     'SELECT tip_id, alg, chain_hash, key_id, signature FROM service_checkpoints ' +
@@ -879,8 +1081,16 @@ function checkCheckpoints(db, keys, archiveUuid) {
         `checkpoint ${row.tip_id}/${row.alg}: no service_keys row for ${row.key_id}`);
       continue;
     }
-    const result = verifySignature(row.alg, key.key, message,
-      Buffer.from(row.signature, 'hex'));
+    const result = verifySignature(row.alg, key, message,
+      Buffer.from(row.signature, 'hex'), mlDsaBackend);
+    if (result.unverifiable) {
+      // Not a pass and not a fail: this runtime has no ML-DSA implementation
+      // to run. The distinct exit code (3) keeps this from ever reading as
+      // "checked and passed" to a caller that only looks at the process.
+      unverifiable('checkpoint',
+        `checkpoint ${row.tip_id}/${row.alg}: ${result.why}`);
+      continue;
+    }
     if (!result.ok) {
       // Section 5: "All signatures present on a checkpoint must verify. A
       // hybrid checkpoint whose ML-DSA half fails is a broken checkpoint, not
@@ -942,8 +1152,11 @@ function loadOperatorKeys(db) {
       continue;
     }
     try {
+      const spki = parseSpki(der);
       keys.set(row.key_id, {
-        key: createPublicKey({ key: der, format: 'der', type: 'spki' }),
+        keyAlg: spkiAlgorithmName(spki),
+        raw: spki.raw,
+        nodeKey: createPublicKey({ key: der, format: 'der', type: 'spki' }),
         signer: row.signer,
         revoked: row.revoked,
       });
@@ -1032,9 +1245,10 @@ function checkAttestations(db, operatorKeys, archiveUuid) {
       continue;
     }
     // Section 4: ECDSA P-256 with SHA-256 over canonical_bytes(DOMAIN, action).
+    // The scheme is fixed by the document, so no ML-DSA backend is consulted.
     const message = canonicalBytes('contextd.OperatorActionV1', action);
-    const result = verifySignature(ALG_ECDSA_P256, key.key, message,
-      Buffer.from(attestation.signature, 'hex'));
+    const result = verifySignature(ALG_ECDSA_P256, key, message,
+      Buffer.from(attestation.signature, 'hex'), { name: 'unavailable' });
     if (!result.ok) {
       fail('attestation', `event ${id}: ${result.why}`);
       continue;
@@ -1075,6 +1289,7 @@ function parseArgs(args) {
     json: false,
     quiet: false,
     failOnSpecGap: false,
+    noNativeMlDsa: false,
   };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -1082,6 +1297,7 @@ function parseArgs(args) {
     if (arg === '--json') { opts.json = true; continue; }
     if (arg === '--quiet') { opts.quiet = true; continue; }
     if (arg === '--fail-on-spec-gap') { opts.failOnSpecGap = true; continue; }
+    if (arg === '--no-native-mldsa') { opts.noNativeMlDsa = true; continue; }
     if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`);
     if (opts.archive === null) { opts.archive = arg; continue; }
     throw new Error(`unexpected argument ${arg}`);
@@ -1110,6 +1326,9 @@ function report(opts) {
   lines.push('');
   for (const p of findings.pass) lines.push(`  PASS  ${p.check}: ${p.detail}`);
   for (const w of findings.warn) lines.push(`  WARN  ${w.check}: ${w.detail}`);
+  for (const u of findings.unverifiable) {
+    lines.push(`  UNVERIFIABLE  ${u.check}: ${u.detail}`);
+  }
   for (const f of findings.fail) lines.push(`  FAIL  ${f.check}: ${f.detail}`);
   if (findings.spec_mismatch.length > 0) {
     lines.push('');
@@ -1137,19 +1356,22 @@ function report(opts) {
   }
   lines.push('');
   lines.push(`  ${findings.pass.length} passed, ${findings.fail.length} failed, ` +
-    `${findings.warn.length} warning(s), ${findings.spec_gap.length} spec gap(s), ` +
+    `${findings.warn.length} warning(s), ` +
+    `${findings.unverifiable.length} unverifiable-on-this-runtime, ` +
+    `${findings.spec_gap.length} spec gap(s), ` +
     `${findings.spec_mismatch.length} spec/reality disagreement(s)`);
   if (!opts.quiet) stdout.write(lines.join('\n') + '\n');
 }
 
-function main() {
+async function main() {
   let opts;
   try {
     opts = parseArgs(argv.slice(2));
   } catch (err) {
     stdout.write(`usage error: ${err.message}\n`);
     stdout.write('usage: verify_format_independent.mjs <archive-dir-or-db> ' +
-      '[--vectors PATH] [--json] [--quiet] [--fail-on-spec-gap]\n');
+      '[--vectors PATH] [--json] [--quiet] [--fail-on-spec-gap] ' +
+      '[--no-native-mldsa]\n');
     return 2;
   }
 
@@ -1162,6 +1384,9 @@ function main() {
   }
   findings.info.archive = archive.db;
   findings.info.node = process.version;
+
+  const mlDsaBackend = await selectMlDsaBackend(opts);
+  findings.info.ml_dsa_backend = mlDsaBackend.name;
 
   // The canonical vectors need no archive at all -- they are the part a
   // second implementation should pass before it is trusted against real bytes
@@ -1183,11 +1408,11 @@ function main() {
       checkWitness(archive.dir, tip);
       checkRecoveryJournal(archive.dir);
       const serviceKeys = loadServiceKeys(db);
-      checkServiceSignatures(db, serviceKeys);
+      checkServiceSignatures(db, serviceKeys, mlDsaBackend);
       const archiveUuid = resolveArchiveUuid(db);
       findings.info.archive_uuid = archiveUuid;
-      checkTips(db, serviceKeys, archiveUuid, tip);
-      checkCheckpoints(db, serviceKeys, archiveUuid);
+      checkTips(db, serviceKeys, archiveUuid, tip, mlDsaBackend);
+      checkCheckpoints(db, serviceKeys, archiveUuid, mlDsaBackend);
       checkAttestations(db, loadOperatorKeys(db), archiveUuid);
     }
   } finally {
@@ -1202,7 +1427,11 @@ function main() {
   // a verifier that returned success there would be certifying the document.
   if (findings.spec_mismatch.length > 0) return 1;
   if (opts.failOnSpecGap && findings.spec_gap.length > 0) return 1;
+  // Signatures this runtime could not check at all. Exit 3, pinned: distinct
+  // from 0 because nothing was confirmed about those signatures, and distinct
+  // from 1 because nothing was refuted either.
+  if (findings.unverifiable.length > 0) return 3;
   return 0;
 }
 
-exit(main());
+exit(await main());
