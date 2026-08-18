@@ -134,19 +134,28 @@ they enabled still count in the field tally.
   registered advisory evidence (Gate v2 program).
 - **Owning session:** local CC (Fable 5), dispatched 2026-08-18; repo
   `~/md-signal` (new, outside this repo; operator names it)
-- **State:** active — Phase 0 closed (`587c4b0` prereg + audit;
-  settled-negative filed; D1 ratified / D2 frozen by operator ruling
-  2026-08-18, recorded @ `5734e34`). Next: Phase 1 (fixture factory),
-  ready to dispatch as its own tranche; first gate is the factory-spec
-  freeze (nuisance list, untrusted class set, event-type enumerations —
-  AUDIT.md F7) before any generation.
+- **State:** active — Phase 1 in progress. Phase 0 closed (`587c4b0`;
+  D1 ratified / D2 frozen @ `5734e34`). **Factory spec frozen @
+  `15294e2`** (`~/md-signal/FACTORY-SPEC.md` + fixture schema): AUDIT F7
+  closed — nuisance list (14 features, channels named), untrusted class
+  grammar, pin-divergence/refusal/gate-visible enumerations, all
+  grounded in `contextd/schemas.py`'s real vocabulary. Generators
+  pinned: Llama-3.1-8B-Instruct (family A) / Qwen3-8B (family B), Q5_K_M,
+  llama.cpp single build; corpus authority = the 4070 Ti only; Colab =
+  L4 scratch drafts only, per operator ruling. Spec amendable via its
+  changelog until first fixture, immutable after (§10 marker cites its
+  hash + ENV.lock + WEIGHTS.lock).
+- **Next:** factory harness implementation (Mac-OK, no GPU) → `plan`
+  output committed → ENV.lock/WEIGHTS.lock on the desktop → corpus
+  generation there (~1.5 GPU-days single-stream, sharded) → §9 leakage
+  probe before anything downstream.
 - **Blockers:** — (repo naming outstanding, non-blocking; kill date
   2026-10-16 stands)
-- **Last update:** 2026-08-18 — D1/D2 closed by the operator; lane
-  unblocked. Phase 0 had recorded two charter corrections: the "Lane 6
-  interface already in the schema" premise refuted on master (Phase 4
-  registers it instead), and the vacuous label-shuffle leakage test
-  replaced by a falsifiable nuisance-only probe.
+- **Last update:** 2026-08-18 — factory spec frozen. Two in-spec rulings
+  flagged for operator review until first fixture: gate-invisibility =
+  gate events + provenance anomalies, NOT untrusted-presence (presence
+  reading is unsatisfiable under §5.2 exposure matching); feature 4
+  counts `tx.refuse` only (pin refusals belong to feature 3).
 
 ## Done
 
