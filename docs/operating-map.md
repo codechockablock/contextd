@@ -27,6 +27,11 @@ Everything the machinery cannot do for you, with the exact act.
    2026-08-18 — see Decisions. Opening act: `ctx grant add loop.confirm
    --repo ~/contextd --for <duration>`, then resume the morning
    review ritual for confirmations made under the new window.
+3. **Close D1 and D2 in `~/md-signal/PREREG.md` §10** (Lane D,
+   mandate-divergence signal). D1 — construct wording: reply "ratify" or
+   "rename"; it cannot close by silence and Phase 1 is stopped on it.
+   D2 — the numbers table: adjust, or dispatch Phase 1 and the proposals
+   freeze as written. Also: name the repo (placeholder `md-signal`).
 
 Resolved 2026-08-15 (evening), by the operator: **production signer
 enrolled** — key `0885eb01…` (secure_enclave, tag=default); first signed
@@ -114,6 +119,24 @@ they enabled still count in the field tally.
   by loop candidate #42915
 - **Blockers:** —
 - **Last update:** 2026-08-15 — map reconciled to the archive marker
+
+### md-signal (Lane D)
+- **Objective:** Purpose-built mandate-divergence signal for the commerce
+  frame — prereg'd v0 trained on synthetic matched pairs, integrated as
+  registered advisory evidence (Gate v2 program).
+- **Owning session:** local CC (Fable 5), dispatched 2026-08-18; repo
+  `~/md-signal` (new, outside this repo; operator names it)
+- **State:** blocked — Phase 0 done (`587c4b0`: PREREG.md frozen, AUDIT.md
+  audit-of-record, settled-negative entry filed in the operator registry);
+  Phase 1 gated on PREREG.md §10 decisions
+- **Blockers:** D1 (construct wording — explicit "ratify"/"rename",
+  cannot close by silence) and D2 (numbers — dispatch ratifies); operator
+  queue item 3. Kill date 2026-10-16 stands regardless.
+- **Last update:** 2026-08-18 — Phase 0 complete. Two corrections to the
+  charter recorded: the "Lane 6 interface already in the schema" premise
+  is refuted on master (Phase 4 registers it instead), and the charter's
+  label-shuffle leakage test was vacuous (replaced by a falsifiable
+  nuisance-only probe).
 
 ## Done
 
