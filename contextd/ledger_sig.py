@@ -316,22 +316,35 @@ def _load_or_create_key(conn, alg: str = CLASSICAL_ALG):
     else:
         private = _generate_private_key(alg)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(
-            path,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(private.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption(),
-            ))
-            stream.flush()
-            os.fsync(stream.fileno())
+        try:
+            fd = os.open(
+                path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except FileExistsError:
+            # A concurrent process won the O_EXCL race between our exists()
+            # check and this open (concurrent migrations do exactly this).
+            # Its key is the key; ours was never persisted anywhere and is
+            # discarded. Symlink and permission checks still apply to what
+            # we read back.
+            if path.is_symlink():
+                raise LedgerSignatureError(
+                    "service signing key may not be a symlink"
+                ) from None
+            private = _read_private_key(path, alg)
+        else:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(private.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                ))
+                stream.flush()
+                os.fsync(stream.fileno())
     public_pem = private.public_key().public_bytes(
         serialization.Encoding.PEM,
         serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -341,17 +354,23 @@ def _load_or_create_key(conn, alg: str = CLASSICAL_ALG):
     # a separate field — and every key id minted before this change keeps its
     # value, which archives depend on.
     key_id = canonical_digest("contextd.ServiceKeyV1", {"pem": public_pem})[:32]
-    existing = conn.execute(
+    # Registration must be race-safe, not merely idempotent-by-inspection.
+    # A SELECT-then-INSERT lets a second process read "absent" while the
+    # first's row is uncommitted, then fail the primary key after it commits
+    # (observed under four concurrent migrations in CI). ON CONFLICT DO
+    # NOTHING makes the insert itself the arbiter; the read-back keeps the
+    # different-bytes collision check, which the conflict clause would
+    # otherwise silently swallow.
+    conn.execute(
+        "INSERT INTO service_keys (key_id, public_pem, created, retired, alg) "
+        "VALUES (?,?,?, NULL, ?) ON CONFLICT(key_id) DO NOTHING",
+        (key_id, public_pem, int(time.time()), alg))
+    conn.commit()
+    stored = conn.execute(
         "SELECT public_pem FROM service_keys WHERE key_id = ?", (key_id,)
     ).fetchone()
-    if existing is not None and existing["public_pem"] != public_pem:
+    if stored is None or stored["public_pem"] != public_pem:
         raise LedgerSignatureError("service key id collides with different key bytes")
-    if existing is None:
-        conn.execute(
-            "INSERT INTO service_keys (key_id, public_pem, created, retired, alg) "
-            "VALUES (?,?,?, NULL, ?)",
-            (key_id, public_pem, int(time.time()), alg))
-        conn.commit()
     return private, key_id
 
 

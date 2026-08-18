@@ -321,6 +321,13 @@ def open_archive_for_migration(
     mode = "ro" if read_only else "rw"
     conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True)
     conn.row_factory = sqlite3.Row
+    # Concurrent migrations are legal (the operator's daemons and a manual
+    # `ctx security migrate` can race) and must serialize on SQLite's write
+    # lock rather than die on it: with the default zero timeout, every loser
+    # raises "database is locked" immediately and it is possible for NO
+    # attempt to win. Waiting turns the race into a queue — the winner
+    # migrates, the laggards then see the stamped version and no-op.
+    conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 
