@@ -73,13 +73,13 @@ def test_every_manifest_entry_names_how_the_capability_arrived():
             )
 
 
-def test_the_direct_entry_points_are_the_three_that_are_documented():
-    """The load-bearing claim: capability enters at exactly three places.
+def test_the_direct_entry_points_are_the_two_that_are_documented():
+    """The load-bearing claim: capability enters at exactly two places.
 
-    Everything else in the manifest inherits. If a fourth appears, this fails
+    Everything else in the manifest inherits. If a third appears, this fails
     before anyone has to notice a new `via:` line in a 29-line diff.
-    (There used to be four: authd's AF_UNIX listener was deleted with the
-    authority daemon, lane X.)
+    (There used to be four: authd's AF_UNIX listener and rpc's client half
+    were deleted with the authority daemon, lane X. No socket entry remains.)
     """
     surface = gate.current_surface()
     entries = {
@@ -89,7 +89,6 @@ def test_the_direct_entry_points_are_the_three_that_are_documented():
         if how == "direct"
     }
     assert entries == {
-        ("contextd.rpc", "socket"),            # client half of the removed daemon
         ("contextd.backends.postgres", "psycopg"),   # real remote TCP
         ("contextd.mcp_server", "mcp"),        # MCP SDK, ships HTTP transports
     }, entries
@@ -99,11 +98,12 @@ def test_the_manifest_explains_each_direct_entry():
     """Every entry point is annotated, because an unexplained allowance is
     indistinguishable from one nobody reviewed."""
     text = MANIFEST.read_text()
-    for module in ("contextd.rpc",
-                   "contextd.backends.postgres", "contextd.mcp_server"):
+    for module in ("contextd.backends.postgres", "contextd.mcp_server"):
         assert module in text
-    assert "ENTRY 1/3" in text and "ENTRY 3/3" in text
-    assert "AF_UNIX" in text, "the socket entries must record that they are local"
+    assert "ENTRY 1/2" in text and "ENTRY 2/2" in text
+    assert "NO socket entry" in text, (
+        "the manifest must state outright that no socket entry point remains"
+    )
     import re as _re
     m = _re.search(r"postgres\.py:(\d+)", text)
     assert m, "the psycopg entry must cite its import site"

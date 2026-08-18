@@ -50,14 +50,14 @@ DEFAULTS = {
     },
     "security": {
         # "development": the client plane opens the archive directly and the
-        # only assurance is attribution. "hardened": only the authority service
-        # (contextd/authd.py) opens the archive, every client goes through its
-        # closed RPC surface, and a missing service fails closed rather than
-        # falling back to SQLite. Switching this on without installing the
-        # service makes every archive call fail loudly, which is the intended
-        # behaviour — see docs/DEPLOYMENT.md.
+        # only assurance is attribution. "hardened": every archive call FAILS
+        # CLOSED — the resident authority service that used to be the only
+        # process allowed to open a hardened archive was removed (lane X,
+        # residency dissolution), and refusal is the daemon-absent behaviour
+        # docs/SECURITY.md always specified. There is no direct-SQLite
+        # fallback. The one hardened path that still runs is the out-of-band
+        # first-key bootstrap ceremony (ctx security key bootstrap).
         "mode": "development",
-        "socket": "",                    # default: <home>/authd.sock
         # There is deliberately no signer-selection key here. Selecting among
         # already-registered keys authorizes nothing, but config must not name
         # a signer in any sense — test_config_and_env_cannot_name_a_signer

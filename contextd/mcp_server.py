@@ -12,8 +12,8 @@ from . import service as authority
 from .db import connect
 from .gate import GateError, disclose, redact, verify_anchors
 from .ingest import ingest_note
+from .authd import RpcError
 from .redact import sanitize_label
-from .rpc import RpcError
 
 # Assurance resolvers register at import time (contextd/assurance.py). Importing
 # them here, at module scope, is what guarantees a daemon process never reads a

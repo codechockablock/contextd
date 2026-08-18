@@ -16,7 +16,6 @@ asserting a property it did not actually observe. Read this file's
 
 import json
 import os
-import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +29,6 @@ from contextd import attest, home, load_config
 from contextd.authd import service_context
 from contextd.canonical import canonical_bytes
 from contextd.db import DirectAccessRefused, connect
-from contextd.rpc import peer_credentials
 from contextd.service import RpcError
 from tests.authorization_support import operator
 
@@ -273,16 +271,6 @@ def test_key_material_is_not_readable_from_env_argv_config_or_logs():
             continue
         data = path.read_bytes()
         assert b"-----BEGIN" not in data, f"key material in {path.name}"
-
-
-def test_peer_credentials_read_directly_match_getuid():
-    a, b = socket.socketpair(socket.AF_UNIX)
-    try:
-        creds = peer_credentials(a)
-        assert creds["uid"] == os.getuid()
-    finally:
-        a.close()
-        b.close()
 
 
 # --- the library read path stays gated ---------------------------------------

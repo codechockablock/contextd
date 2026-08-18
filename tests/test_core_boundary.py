@@ -73,6 +73,10 @@ CORE = frozenset({
 #: Everything the daemon keeps. Listed explicitly so that a module which is
 #: neither core nor daemon — a new file — fails `test_every_module_is_classified`
 #: rather than silently defaulting to one side of the boundary.
+#: `rpc` was in this set until lane X deleted the file with the daemon —
+#: the entry left because the module did, not because anything was
+#: reclassified. `authd` and `service` survive as files (the request-scoped
+#: operation layer and the client-plane dispatch) and stay DAEMON-side.
 DAEMON = frozenset({
     "authd",
     "cli",
@@ -84,7 +88,6 @@ DAEMON = frozenset({
     "liveness",
     "loops",
     "mcp_server",
-    "rpc",
     "search",
     "service",
 })

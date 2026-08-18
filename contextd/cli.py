@@ -129,7 +129,7 @@ def cmd_search(args):
     result is redacted, budgeted, and receipted like any other disclosure.
     """
     from . import service as authority
-    from .rpc import RpcError
+    from .authd import RpcError
     try:
         result = authority.search(" ".join(args.query), limit=args.limit,
                                   client="cli")

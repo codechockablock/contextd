@@ -18,8 +18,8 @@ configuration and reported by `ctx security doctor`.
 """
 
 from . import load_config
+from .authd import RpcError
 from .authority_mode import hardened
-from .rpc import RpcError
 
 # Assurance resolvers register at import time (contextd/assurance.py). Importing
 # them here, at module scope, is what guarantees a process never reads a

@@ -29,7 +29,6 @@ short-lived library calls.
 from pathlib import Path
 
 from . import home, load_config
-from .rpc import RpcError
 
 # Assurance resolvers register at import time (contextd/assurance.py). Importing
 # them here, at module scope, is what guarantees a process never reads a
@@ -51,6 +50,21 @@ from .authority_mode import (  # noqa: E402, F401
     is_service_process,
     service_context,
 )
+
+
+class RpcError(RuntimeError):
+    """A request was refused.
+
+    Moved verbatim in behaviour from the deleted ``contextd/rpc.py``: this is
+    the refusal type every client caller catches (`except RpcError` in the
+    CLI and MCP server). It outlives the RPC transport because the operation
+    layer's `_Refusal` and the client plane's `ClientRefused` both subclass
+    it — the refusal channel is the surviving contract, not the wire.
+    """
+
+    def __init__(self, message: str, code: str = "refused"):
+        super().__init__(message)
+        self.code = code
 
 
 class _Refusal(RpcError):
